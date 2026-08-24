@@ -8,6 +8,7 @@ mod policy;
 mod probe;
 mod runner_observer;
 mod runtime;
+mod supervisor;
 mod tray;
 
 pub use agent::{
@@ -35,6 +36,10 @@ pub use runtime::{
     DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState, LanguagePreference, LinkKind,
     LinkSnapshot, LinkState, ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
     RunnerPhase, ThemePreference, UiPreferences, ZenOverride,
+};
+pub use supervisor::{
+    ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
+    SupervisorOutcome, SupervisorRefusal, SupervisorRequest, SyntheticProcessBackend,
 };
 pub use tray::{
     NativeTrayEventLoop, TrayActionResult, TrayError, TrayIconGlyph, TrayMenuEntry, TrayMenuId,
