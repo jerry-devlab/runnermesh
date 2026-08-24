@@ -836,6 +836,7 @@ mod tests {
                 target: "synthetic".to_owned(),
             },
             health: AgentHealth::Healthy,
+            health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             zen: ZenOverride::Disabled,
             user_mode: UserMode::Auto,
             node_state: NodeState::Drained,
