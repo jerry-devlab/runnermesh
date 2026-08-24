@@ -340,6 +340,19 @@ pub enum DoctorStatus {
     Unknown,
 }
 
+impl fmt::Display for DoctorStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Pass => "PASS",
+            Self::Warn => "WARN",
+            Self::Fail => "FAIL",
+            Self::Unknown => "UNKNOWN",
+        };
+
+        formatter.write_str(name)
+    }
+}
+
 /// A presentation-independent diagnostic report.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DoctorReport {
