@@ -5,6 +5,7 @@ mod cli;
 mod ipc;
 mod model;
 mod runtime;
+mod tray;
 
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
@@ -21,4 +22,8 @@ pub use runtime::{
     DoctorCheck, DoctorReport, DoctorStatus, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
     ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference,
     UiPreferences, ZenOverride,
+};
+pub use tray::{
+    NativeTrayEventLoop, TrayActionResult, TrayError, TrayIconGlyph, TrayMenuEntry, TrayMenuId,
+    TrayMenuItem, TrayRender, TrayUiUpdate,
 };
