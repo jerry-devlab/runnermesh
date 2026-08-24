@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,34 @@ impl fmt::Display for UserMode {
         };
 
         formatter.write_str(name)
+    }
+}
+
+/// Error returned when a CLI argument does not match the stable mode contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParseUserModeError;
+
+impl fmt::Display for ParseUserModeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("expected auto, work, gaming, idle, maintenance, or force-ci")
+    }
+}
+
+impl std::error::Error for ParseUserModeError {}
+
+impl FromStr for UserMode {
+    type Err = ParseUserModeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "work" => Ok(Self::Work),
+            "gaming" => Ok(Self::Gaming),
+            "idle" => Ok(Self::Idle),
+            "maintenance" => Ok(Self::Maintenance),
+            "force-ci" => Ok(Self::ForceCi),
+            _ => Err(ParseUserModeError),
+        }
     }
 }
 
