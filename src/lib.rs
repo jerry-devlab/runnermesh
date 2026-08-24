@@ -6,6 +6,7 @@ mod ipc;
 mod model;
 mod policy;
 mod probe;
+mod runner_observer;
 mod runtime;
 mod tray;
 
@@ -24,6 +25,10 @@ pub use probe::{
     ActivityWorkloadProbe, ProbeReadError, ProcessListProbe, ProcessSource, SteamAppIdSource,
     SteamGameProbe, UserActivityProbe, UserActivitySource, WindowsProcessSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource,
+};
+pub use runner_observer::{
+    ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
+    RunnerLocalEvidence, RunnerObservation, RunnerSource, WindowsRunnerSource,
 };
 pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,

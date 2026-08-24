@@ -1,0 +1,268 @@
+use std::path::PathBuf;
+
+use crate::{LinkKind, LinkSnapshot, LinkState, ReasonCode, RunnerPhase};
+
+/// Evidence about whether a runner-owned path belongs to the expected execution
+/// identity. `Unknown` is intentionally not treated as verified ownership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnershipEvidence {
+    Verified,
+    NotOwned,
+    Unknown,
+}
+
+/// Evidence about the execution identity of observed runner processes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionIdentityEvidence {
+    Verified,
+    Mismatch,
+    Unknown,
+}
+
+/// Remote GitHub Actions evidence gathered without controlling the runner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionEvidence {
+    Connected,
+    Connecting,
+    Disconnected,
+    Insufficient,
+    NotConfigured,
+}
+
+/// Raw local facts used to derive stable runner/link state. Paths and process
+/// details remain local observation data and are not serialized into public
+/// snapshots by this Goal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLocalEvidence {
+    pub runner_home: Option<PathBuf>,
+    pub metadata_present: bool,
+    pub listener_present: bool,
+    pub worker_present: bool,
+    pub execution_identity: ExecutionIdentityEvidence,
+    pub work_root: OwnershipEvidence,
+    pub connection: ConnectionEvidence,
+}
+
+/// Stable observation result for Agent/CLI/Tray snapshots and diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerObservation {
+    pub phase: RunnerPhase,
+    pub github_link: LinkSnapshot,
+    pub runner_home_known: bool,
+    pub metadata_present: bool,
+    pub execution_identity: ExecutionIdentityEvidence,
+    pub work_root: OwnershipEvidence,
+}
+
+/// Read-only source boundary for official runner discovery.
+pub trait RunnerSource {
+    fn collect(&self) -> RunnerLocalEvidence;
+}
+
+/// Maps local evidence conservatively. No call in this type starts, stops,
+/// drains, registers, reconfigures, or otherwise controls a runner.
+pub struct OfficialRunnerObserver<S> {
+    source: S,
+}
+
+impl<S> OfficialRunnerObserver<S> {
+    pub fn new(source: S) -> Self {
+        Self { source }
+    }
+}
+
+impl<S: RunnerSource> OfficialRunnerObserver<S> {
+    pub fn observe(&self) -> RunnerObservation {
+        let evidence = self.source.collect();
+        RunnerObservation {
+            phase: derive_phase(&evidence),
+            github_link: derive_link(&evidence),
+            runner_home_known: evidence.runner_home.is_some(),
+            metadata_present: evidence.metadata_present,
+            execution_identity: evidence.execution_identity,
+            work_root: evidence.work_root,
+        }
+    }
+}
+
+/// Read-only Windows source. It accepts a caller-selected runner home rather
+/// than scanning unrelated paths. It reads only existence/metadata evidence and
+/// process names; it does not parse, alter, or expose runner configuration.
+#[derive(Clone, Debug)]
+pub struct WindowsRunnerSource {
+    runner_home: PathBuf,
+}
+
+impl WindowsRunnerSource {
+    pub fn new(runner_home: impl Into<PathBuf>) -> Self {
+        Self {
+            runner_home: runner_home.into(),
+        }
+    }
+}
+
+impl RunnerSource for WindowsRunnerSource {
+    fn collect(&self) -> RunnerLocalEvidence {
+        let home_exists = self.runner_home.is_dir();
+        let metadata_present = self.runner_home.join(".runner").is_file();
+        let process_names = read_process_names();
+        let listener_present = process_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("Runner.Listener.exe"));
+        let worker_present = process_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("Runner.Worker.exe"));
+
+        RunnerLocalEvidence {
+            runner_home: home_exists.then(|| self.runner_home.clone()),
+            metadata_present,
+            listener_present,
+            worker_present,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+            // Directory existence proves neither ownership nor a safe work-root
+            // adoption claim; G09/G10 keep that distinction explicit.
+            work_root: OwnershipEvidence::Unknown,
+            connection: if metadata_present {
+                ConnectionEvidence::Insufficient
+            } else {
+                ConnectionEvidence::NotConfigured
+            },
+        }
+    }
+}
+
+fn derive_phase(evidence: &RunnerLocalEvidence) -> RunnerPhase {
+    match (evidence.listener_present, evidence.worker_present) {
+        (true, true) | (false, true) => RunnerPhase::Busy,
+        (true, false) => RunnerPhase::Listening,
+        (false, false) if evidence.metadata_present => RunnerPhase::Stopped,
+        (false, false) => RunnerPhase::Unknown,
+    }
+}
+
+fn derive_link(evidence: &RunnerLocalEvidence) -> LinkSnapshot {
+    let (state, reason) = match evidence.connection {
+        ConnectionEvidence::Connected => (LinkState::Connected, "github-link-connected"),
+        ConnectionEvidence::Connecting => (LinkState::Connecting, "github-link-connecting"),
+        ConnectionEvidence::Disconnected => (LinkState::Disconnected, "github-link-disconnected"),
+        ConnectionEvidence::Insufficient => {
+            // A local Listener is not proof of an authenticated remote link.
+            (LinkState::Unknown, "github-link-insufficient-evidence")
+        }
+        ConnectionEvidence::NotConfigured => {
+            (LinkState::NotConfigured, "github-link-not-configured")
+        }
+    };
+    LinkSnapshot {
+        kind: LinkKind::GithubActions,
+        state,
+        reason_code: Some(static_reason(reason)),
+    }
+}
+
+fn read_process_names() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output();
+        output
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.split('"').nth(1))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
+fn static_reason(value: &'static str) -> ReasonCode {
+    ReasonCode::new(value).expect("static runner-observer reason codes must be valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{
+        ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
+        RunnerLocalEvidence, RunnerSource,
+    };
+    use crate::{LinkState, RunnerPhase};
+
+    #[test]
+    fn process_presence_does_not_claim_connected_without_link_evidence() {
+        let observed = OfficialRunnerObserver::new(FakeSource(evidence(
+            true,
+            false,
+            ConnectionEvidence::Insufficient,
+        )))
+        .observe();
+
+        assert_eq!(observed.phase, RunnerPhase::Listening);
+        assert_eq!(observed.github_link.state, LinkState::Unknown);
+        assert_eq!(
+            observed.github_link.reason_code.unwrap().as_str(),
+            "github-link-insufficient-evidence"
+        );
+    }
+
+    #[test]
+    fn worker_evidence_is_busy_and_explicit_connection_evidence_is_preserved() {
+        let observed = OfficialRunnerObserver::new(FakeSource(evidence(
+            false,
+            true,
+            ConnectionEvidence::Connected,
+        )))
+        .observe();
+
+        assert_eq!(observed.phase, RunnerPhase::Busy);
+        assert_eq!(observed.github_link.state, LinkState::Connected);
+        assert_eq!(
+            observed.execution_identity,
+            ExecutionIdentityEvidence::Unknown
+        );
+        assert_eq!(observed.work_root, OwnershipEvidence::Unknown);
+    }
+
+    #[test]
+    fn absent_metadata_is_not_configured_and_does_not_invent_a_runner_phase() {
+        let mut local = evidence(false, false, ConnectionEvidence::NotConfigured);
+        local.metadata_present = false;
+        let observed = OfficialRunnerObserver::new(FakeSource(local)).observe();
+
+        assert_eq!(observed.phase, RunnerPhase::Unknown);
+        assert_eq!(observed.github_link.state, LinkState::NotConfigured);
+    }
+
+    fn evidence(
+        listener_present: bool,
+        worker_present: bool,
+        connection: ConnectionEvidence,
+    ) -> RunnerLocalEvidence {
+        RunnerLocalEvidence {
+            runner_home: Some(PathBuf::from("runner-home")),
+            metadata_present: true,
+            listener_present,
+            worker_present,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+            work_root: OwnershipEvidence::Unknown,
+            connection,
+        }
+    }
+
+    struct FakeSource(RunnerLocalEvidence);
+
+    impl RunnerSource for FakeSource {
+        fn collect(&self) -> RunnerLocalEvidence {
+            self.0.clone()
+        }
+    }
+}
