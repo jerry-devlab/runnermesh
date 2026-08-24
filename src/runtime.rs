@@ -320,6 +320,9 @@ pub struct AgentSnapshot {
     pub links: Vec<LinkSnapshot>,
     pub probes: Vec<ProbeSnapshot>,
     pub ui_preferences: UiPreferences,
+    pub start_on_login_preference: bool,
+    pub auto_idle_threshold_seconds: u64,
+    pub update_checks_enabled: bool,
 }
 
 /// A machine-readable doctor check result.
@@ -368,6 +371,15 @@ pub enum AgentCommand {
     SetMode { mode: UserMode },
     SetZen { zen: ZenOverride },
     SetProbeEnabled { probe_id: ProbeId, enabled: bool },
+    SetUiPreferences { ui_preferences: UiPreferences },
+    SetStartOnLoginPreference { enabled: bool },
+    SetAutoIdleThreshold { seconds: u64 },
+    SetUpdateChecksEnabled { enabled: bool },
+    CheckForUpdates,
+    OpenConfig,
+    OpenDataDirectory,
+    OpenLogs,
+    ExitAfterDrain,
     GetRunnerStatus,
     GetVersion,
 }
@@ -573,6 +585,9 @@ mod tests {
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
             ui_preferences: UiPreferences::default(),
+            start_on_login_preference: false,
+            auto_idle_threshold_seconds: 300,
+            update_checks_enabled: true,
         }
     }
 

@@ -248,6 +248,9 @@ where
             links: self.observation.links.clone(),
             probes,
             ui_preferences: self.config.ui_preferences.clone(),
+            start_on_login_preference: self.config.start_on_login,
+            auto_idle_threshold_seconds: self.config.auto_idle_threshold_seconds,
+            update_checks_enabled: self.config.update_checks_enabled,
         }
     }
 
@@ -288,6 +291,29 @@ where
                 })?;
                 self.accept_after_reconcile()
             }
+            AgentCommand::SetUiPreferences { ui_preferences } => {
+                self.update_config(|config| config.ui_preferences = ui_preferences)?;
+                self.accept_after_reconcile()
+            }
+            AgentCommand::SetStartOnLoginPreference { enabled } => {
+                self.update_config(|config| config.start_on_login = enabled)?;
+                self.accept_after_reconcile()
+            }
+            AgentCommand::SetAutoIdleThreshold { seconds } => {
+                self.update_config(|config| config.auto_idle_threshold_seconds = seconds)?;
+                self.accept_after_reconcile()
+            }
+            AgentCommand::SetUpdateChecksEnabled { enabled } => {
+                self.update_config(|config| config.update_checks_enabled = enabled)?;
+                self.accept_after_reconcile()
+            }
+            AgentCommand::CheckForUpdates
+            | AgentCommand::OpenConfig
+            | AgentCommand::OpenDataDirectory
+            | AgentCommand::OpenLogs
+            | AgentCommand::ExitAfterDrain => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("not-implemented"),
+            }),
         }
     }
 
@@ -522,7 +548,7 @@ mod tests {
     use crate::{
         AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, BuildProvenance, LinkKind,
         LinkSnapshot, LinkState, NodeState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-        RunnerPhase, UserMode, ZenOverride,
+        RunnerPhase, ThemePreference, UiPreferences, UserMode, ZenOverride,
     };
 
     #[test]
@@ -616,6 +642,35 @@ mod tests {
                 .get(&ProbeId::new("steam-game").unwrap()),
             Some(&false)
         );
+    }
+
+    #[test]
+    fn presentation_preferences_persist_without_changing_admission_policy() {
+        let observer = QueueObserver::new(vec![healthy_observation()]);
+        let reconciler = RecordingReconciler::default();
+        let store = MemoryConfigStore::default();
+        let mut core = AgentCore::new(observer, reconciler, store, build()).unwrap();
+        let admission_before = core.snapshot().admission;
+
+        let response = core
+            .handle_command(AgentCommand::SetUiPreferences {
+                ui_preferences: UiPreferences {
+                    theme: ThemePreference::Dark,
+                    language: crate::LanguagePreference::ZhCn,
+                },
+            })
+            .unwrap();
+        let AgentResponse::Accepted { snapshot } = response else {
+            panic!("presentation preference updates must return an Agent snapshot");
+        };
+
+        assert_eq!(snapshot.ui_preferences.theme, ThemePreference::Dark);
+        assert_eq!(
+            snapshot.ui_preferences.language,
+            crate::LanguagePreference::ZhCn
+        );
+        assert_eq!(snapshot.admission, admission_before);
+        assert_eq!(core.config().ui_preferences, snapshot.ui_preferences);
     }
 
     #[test]
