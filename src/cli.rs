@@ -439,6 +439,7 @@ mod tests {
             probes: vec![ProbeSnapshot {
                 id: ProbeId::new("steam-game").unwrap(),
                 enabled: true,
+                health: crate::ProbeHealth::Healthy,
                 runtime_state: ProbeRuntimeState::Unknown,
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],

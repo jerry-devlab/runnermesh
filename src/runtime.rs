@@ -251,11 +251,43 @@ impl fmt::Display for ProbeRuntimeState {
     }
 }
 
+/// Health of a probe implementation, separate from its observation and
+/// configured enablement.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProbeHealth {
+    Healthy,
+    Degraded,
+    Unavailable,
+}
+
+impl fmt::Display for ProbeHealth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Healthy => "HEALTHY",
+            Self::Degraded => "DEGRADED",
+            Self::Unavailable => "UNAVAILABLE",
+        };
+
+        formatter.write_str(name)
+    }
+}
+
+/// Hard-safety evidence evaluated before Zen, manual modes, and Auto Lite.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HardSafetyState {
+    Clear,
+    Unsafe,
+    Unknown,
+}
+
 /// Normalized probe evidence for policy, CLI, and Tray consumers.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProbeSnapshot {
     pub id: ProbeId,
     pub enabled: bool,
+    pub health: ProbeHealth,
     pub runtime_state: ProbeRuntimeState,
     pub reason_code: Option<ReasonCode>,
 }
@@ -399,9 +431,10 @@ pub enum AgentResponse {
 mod tests {
     use super::{
         AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
-        BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, LanguagePreference, LinkKind,
-        LinkSnapshot, LinkState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-        RunnerPhase, ThemePreference, UiPreferences, ZenOverride,
+        BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState,
+        LanguagePreference, LinkKind, LinkSnapshot, LinkState, ProbeHealth, ProbeId,
+        ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference, UiPreferences,
+        ZenOverride,
     };
     use crate::{NodeState, UserMode};
 
@@ -447,6 +480,12 @@ mod tests {
         assert_round_trips(ProbeRuntimeState::Unknown, "UNKNOWN");
         assert_round_trips(ProbeRuntimeState::Unavailable, "UNAVAILABLE");
         assert_round_trips(ProbeRuntimeState::Suspended, "SUSPENDED");
+        assert_round_trips(ProbeHealth::Healthy, "HEALTHY");
+        assert_round_trips(ProbeHealth::Degraded, "DEGRADED");
+        assert_round_trips(ProbeHealth::Unavailable, "UNAVAILABLE");
+        assert_round_trips(HardSafetyState::Clear, "CLEAR");
+        assert_round_trips(HardSafetyState::Unsafe, "UNSAFE");
+        assert_round_trips(HardSafetyState::Unknown, "UNKNOWN");
         assert_round_trips(ThemePreference::System, "system");
         assert_round_trips(ThemePreference::Light, "light");
         assert_round_trips(ThemePreference::Dark, "dark");
@@ -581,6 +620,7 @@ mod tests {
             probes: vec![ProbeSnapshot {
                 id: ProbeId::new("user-activity").unwrap(),
                 enabled: true,
+                health: ProbeHealth::Healthy,
                 runtime_state: ProbeRuntimeState::Unknown,
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],

@@ -12,9 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
-    DoctorCheck, DoctorReport, DoctorStatus, LinkKind, LinkSnapshot, LinkState, NodeState, ProbeId,
-    ProbeSnapshot, ReasonCode, RunnerPhase, UiPreferences, UserMode, ZenOverride,
+    decide_admission, AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
+    BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState, LinkKind,
+    LinkSnapshot, LinkState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
+    UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -54,6 +55,7 @@ impl Default for AgentConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentObservation {
     pub health: AgentHealth,
+    pub hard_safety: HardSafetyState,
     pub runner_phase: RunnerPhase,
     pub links: Vec<LinkSnapshot>,
     pub probes: Vec<ProbeSnapshot>,
@@ -63,6 +65,7 @@ impl AgentObservation {
     pub fn unobserved() -> Self {
         Self {
             health: AgentHealth::Starting,
+            hard_safety: HardSafetyState::Unknown,
             runner_phase: RunnerPhase::Unknown,
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,
@@ -211,7 +214,7 @@ where
         let config = store.load()?.unwrap_or_default();
         validate_schema(&config)?;
         let observation = AgentObservation::unobserved();
-        let decision = decide(&config);
+        let decision = decide(&config, &observation);
 
         Ok(Self {
             observer,
@@ -229,10 +232,11 @@ where
     }
 
     pub fn snapshot(&self) -> AgentSnapshot {
-        let mut probes = self.observation.probes.clone();
-        for probe in &mut probes {
-            if let Some(enabled) = self.config.probe_enabled.get(&probe.id) {
-                probe.enabled = *enabled;
+        let mut probes = self.effective_probes();
+        if self.config.zen == ZenOverride::Enabled {
+            for probe in probes.iter_mut().filter(|probe| probe.enabled) {
+                probe.runtime_state = ProbeRuntimeState::Suspended;
+                probe.reason_code = Some(static_reason("zen-suspended"));
             }
         }
 
@@ -257,7 +261,7 @@ where
     /// Runs the complete G03 synthetic loop in its fixed architectural order.
     pub fn observe_decide_reconcile(&mut self) -> Result<AgentSnapshot, AgentCoreError> {
         let observation = self.observer.observe().map_err(AgentCoreError::Observer)?;
-        let decision = decide(&self.config);
+        let decision = decide(&self.config, &observation);
         self.reconciler
             .reconcile(&decision)
             .map_err(AgentCoreError::Reconciler)?;
@@ -330,8 +334,18 @@ where
         update(&mut next);
         self.store.save(&next)?;
         self.config = next;
-        self.decision = decide(&self.config);
+        self.decision = decide(&self.config, &self.observation);
         Ok(())
+    }
+
+    fn effective_probes(&self) -> Vec<ProbeSnapshot> {
+        let mut probes = self.observation.probes.clone();
+        for probe in &mut probes {
+            if let Some(enabled) = self.config.probe_enabled.get(&probe.id) {
+                probe.enabled = *enabled;
+            }
+        }
+        probes
     }
 
     fn doctor_report(&self) -> DoctorReport {
@@ -397,54 +411,19 @@ fn validate_schema(config: &AgentConfig) -> Result<(), ConfigStoreError> {
     }
 }
 
-fn decide(config: &AgentConfig) -> AdmissionDecision {
-    if config.zen == ZenOverride::Enabled {
-        return AdmissionDecision {
-            allow_new_work: false,
-            desired_node_state: NodeState::Offline,
-            reason_code: static_reason("zen-enabled"),
-            drain_requested: true,
-        };
+fn decide(config: &AgentConfig, observation: &AgentObservation) -> AdmissionDecision {
+    let mut probes = observation.probes.clone();
+    for probe in &mut probes {
+        if let Some(enabled) = config.probe_enabled.get(&probe.id) {
+            probe.enabled = *enabled;
+        }
     }
-
-    match config.user_mode {
-        UserMode::Maintenance => AdmissionDecision {
-            allow_new_work: false,
-            desired_node_state: NodeState::Offline,
-            reason_code: static_reason("manual-maintenance"),
-            drain_requested: true,
-        },
-        UserMode::Work => AdmissionDecision {
-            allow_new_work: false,
-            desired_node_state: NodeState::Drained,
-            reason_code: static_reason("manual-work"),
-            drain_requested: true,
-        },
-        UserMode::Gaming => AdmissionDecision {
-            allow_new_work: false,
-            desired_node_state: NodeState::Drained,
-            reason_code: static_reason("manual-gaming"),
-            drain_requested: true,
-        },
-        UserMode::Idle => AdmissionDecision {
-            allow_new_work: true,
-            desired_node_state: NodeState::Full,
-            reason_code: static_reason("manual-idle"),
-            drain_requested: false,
-        },
-        UserMode::ForceCi => AdmissionDecision {
-            allow_new_work: true,
-            desired_node_state: NodeState::Full,
-            reason_code: static_reason("manual-force-ci"),
-            drain_requested: false,
-        },
-        UserMode::Auto => AdmissionDecision {
-            allow_new_work: false,
-            desired_node_state: NodeState::Drained,
-            reason_code: static_reason("awaiting-auto-policy"),
-            drain_requested: true,
-        },
-    }
+    decide_admission(
+        config.user_mode,
+        config.zen,
+        observation.hard_safety,
+        &probes,
+    )
 }
 
 fn static_reason(value: &'static str) -> ReasonCode {
@@ -606,6 +585,7 @@ mod tests {
     fn probe_enablement_is_persisted_intent_and_runtime_state_is_reconstructed() {
         let observation = AgentObservation {
             health: AgentHealth::Healthy,
+            hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,
@@ -615,6 +595,7 @@ mod tests {
             probes: vec![ProbeSnapshot {
                 id: ProbeId::new("steam-game").unwrap(),
                 enabled: true,
+                health: crate::ProbeHealth::Healthy,
                 runtime_state: ProbeRuntimeState::Unknown,
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
@@ -646,10 +627,11 @@ mod tests {
 
     #[test]
     fn presentation_preferences_persist_without_changing_admission_policy() {
-        let observer = QueueObserver::new(vec![healthy_observation()]);
+        let observer = QueueObserver::new(vec![healthy_observation(), healthy_observation()]);
         let reconciler = RecordingReconciler::default();
         let store = MemoryConfigStore::default();
         let mut core = AgentCore::new(observer, reconciler, store, build()).unwrap();
+        core.observe_decide_reconcile().unwrap();
         let admission_before = core.snapshot().admission;
 
         let response = core
@@ -671,6 +653,43 @@ mod tests {
         );
         assert_eq!(snapshot.admission, admission_before);
         assert_eq!(core.config().ui_preferences, snapshot.ui_preferences);
+    }
+
+    #[test]
+    fn zen_suspends_enabled_probe_runtime_without_disabling_configuration() {
+        let observation = AgentObservation {
+            health: AgentHealth::Healthy,
+            hard_safety: crate::HardSafetyState::Clear,
+            runner_phase: RunnerPhase::Listening,
+            links: Vec::new(),
+            probes: vec![ProbeSnapshot {
+                id: ProbeId::new("user-activity").unwrap(),
+                enabled: true,
+                health: crate::ProbeHealth::Healthy,
+                runtime_state: ProbeRuntimeState::Active,
+                reason_code: Some(ReasonCode::new("user-input-recent").unwrap()),
+            }],
+        };
+        let observer = QueueObserver::new(vec![observation]);
+        let reconciler = RecordingReconciler::default();
+        let store = MemoryConfigStore::default();
+        let mut core = AgentCore::new(observer, reconciler, store, build()).unwrap();
+
+        let response = core
+            .handle_command(AgentCommand::SetZen {
+                zen: ZenOverride::Enabled,
+            })
+            .unwrap();
+        let AgentResponse::Accepted { snapshot } = response else {
+            panic!("Zen changes must return an Agent snapshot");
+        };
+
+        assert!(snapshot.probes[0].enabled);
+        assert_eq!(
+            snapshot.probes[0].runtime_state,
+            ProbeRuntimeState::Suspended
+        );
+        assert_eq!(snapshot.admission.reason_code.as_str(), "zen-enabled");
     }
 
     #[test]
@@ -724,6 +743,7 @@ mod tests {
     fn healthy_observation() -> AgentObservation {
         AgentObservation {
             health: AgentHealth::Healthy,
+            hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,

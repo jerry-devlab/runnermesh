@@ -4,6 +4,8 @@ mod agent;
 mod cli;
 mod ipc;
 mod model;
+mod policy;
+mod probe;
 mod runtime;
 mod tray;
 
@@ -17,11 +19,17 @@ pub use ipc::{
     IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
 };
 pub use model::{NodeState, ParseUserModeError, UserMode};
+pub use policy::decide_admission;
+pub use probe::{
+    ActivityWorkloadProbe, ProbeReadError, ProcessListProbe, ProcessSource, SteamAppIdSource,
+    SteamGameProbe, UserActivityProbe, UserActivitySource, WindowsProcessSource,
+    WindowsSteamAppIdSource, WindowsUserActivitySource,
+};
 pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
-    DoctorCheck, DoctorReport, DoctorStatus, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference,
-    UiPreferences, ZenOverride,
+    DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState, LanguagePreference, LinkKind,
+    LinkSnapshot, LinkState, ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
+    RunnerPhase, ThemePreference, UiPreferences, ZenOverride,
 };
 pub use tray::{
     NativeTrayEventLoop, TrayActionResult, TrayError, TrayIconGlyph, TrayMenuEntry, TrayMenuId,
