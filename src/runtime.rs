@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for ReasonCode {
 }
 
 /// A stable identifier for a normalized probe.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ProbeId(String);
 
