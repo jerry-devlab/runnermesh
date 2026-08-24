@@ -10,6 +10,7 @@ use crate::{AgentCommand, AgentResponse, ReasonCode};
 
 /// The first stable wire protocol version for local Agent IPC.
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
+#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// A user-local request sent by a CLI or Tray frontend.
@@ -163,7 +164,9 @@ impl IpcEndpoint {
 /// Client for one request/response exchange with the local Agent.
 #[derive(Clone, Debug)]
 pub struct IpcClient {
+    #[cfg_attr(not(windows), allow(dead_code))]
     endpoint: IpcEndpoint,
+    #[cfg_attr(not(windows), allow(dead_code))]
     timeout: Duration,
 }
 
@@ -228,10 +231,11 @@ impl IpcServer {
     /// frontend can reconnect after a broken client pipe.
     pub fn serve_once(
         &self,
-        mut handle_command: impl FnMut(AgentCommand) -> Result<AgentResponse, ReasonCode>,
+        handle_command: impl FnMut(AgentCommand) -> Result<AgentResponse, ReasonCode>,
     ) -> Result<(), IpcTransportError> {
         #[cfg(windows)]
         {
+            let mut handle_command = handle_command;
             let raw_pipe = create_server_pipe(&self.endpoint)?;
             let connect_result = unsafe {
                 windows_sys::Win32::System::Pipes::ConnectNamedPipe(raw_pipe, std::ptr::null_mut())
@@ -276,6 +280,7 @@ impl IpcServer {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn serve_stream<S>(
     stream: &mut S,
     handle_command: &mut impl FnMut(AgentCommand) -> Result<AgentResponse, ReasonCode>,
@@ -315,6 +320,7 @@ where
     write_frame(stream, &response)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn write_unauthorized_response(stream: &mut impl Write) -> Result<(), IpcTransportError> {
     let response = IpcResponse {
         protocol_version: IPC_PROTOCOL_VERSION,
@@ -328,6 +334,7 @@ fn write_unauthorized_response(stream: &mut impl Write) -> Result<(), IpcTranspo
     write_frame(stream, &response)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn read_frame<T: for<'de> Deserialize<'de>>(
     reader: &mut impl BufRead,
 ) -> Result<T, IpcTransportError> {
@@ -351,6 +358,7 @@ fn read_frame<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&bytes).map_err(IpcTransportError::Json)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(), IpcTransportError> {
     let bytes = serde_json::to_vec(value)?;
     if bytes.len() > MAX_FRAME_BYTES {
@@ -362,6 +370,7 @@ fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(), I
     Ok(())
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn static_reason(value: &'static str) -> ReasonCode {
     ReasonCode::new(value).expect("static IPC reason codes must be valid")
 }
