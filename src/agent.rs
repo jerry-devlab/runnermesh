@@ -55,6 +55,7 @@ impl Default for AgentConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentObservation {
     pub health: AgentHealth,
+    pub health_reason_code: Option<ReasonCode>,
     pub hard_safety: HardSafetyState,
     pub runner_phase: RunnerPhase,
     pub links: Vec<LinkSnapshot>,
@@ -65,6 +66,7 @@ impl AgentObservation {
     pub fn unobserved() -> Self {
         Self {
             health: AgentHealth::Starting,
+            health_reason_code: Some(static_reason("agent-starting")),
             hard_safety: HardSafetyState::Unknown,
             runner_phase: RunnerPhase::Unknown,
             links: vec![LinkSnapshot {
@@ -244,6 +246,7 @@ where
             schema_version: self.config.schema_version,
             build: self.build.clone(),
             health: self.observation.health,
+            health_reason_code: self.observation.health_reason_code.clone(),
             zen: self.config.zen,
             user_mode: self.config.user_mode,
             node_state: self.decision.desired_node_state,
@@ -349,7 +352,7 @@ where
     }
 
     fn doctor_report(&self) -> DoctorReport {
-        let (status, reason_code) = match self.observation.health {
+        let (status, fallback_reason) = match self.observation.health {
             AgentHealth::Healthy => (DoctorStatus::Pass, None),
             AgentHealth::Degraded => (DoctorStatus::Warn, Some(static_reason("agent-degraded"))),
             AgentHealth::Unhealthy => (DoctorStatus::Fail, Some(static_reason("agent-unhealthy"))),
@@ -360,7 +363,11 @@ where
             checks: vec![DoctorCheck {
                 id: static_reason("agent-health"),
                 status,
-                reason_code,
+                reason_code: self
+                    .observation
+                    .health_reason_code
+                    .clone()
+                    .or(fallback_reason),
             }],
         }
     }
@@ -585,6 +592,7 @@ mod tests {
     fn probe_enablement_is_persisted_intent_and_runtime_state_is_reconstructed() {
         let observation = AgentObservation {
             health: AgentHealth::Healthy,
+            health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
             links: vec![LinkSnapshot {
@@ -656,9 +664,38 @@ mod tests {
     }
 
     #[test]
+    fn host_health_reason_is_preserved_in_snapshot_and_doctor() {
+        let mut observation = healthy_observation();
+        observation.health = AgentHealth::Degraded;
+        observation.health_reason_code =
+            Some(ReasonCode::new("host-observation-incomplete").unwrap());
+        let observer = QueueObserver::new(vec![observation]);
+        let reconciler = RecordingReconciler::default();
+        let store = MemoryConfigStore::default();
+        let mut core = AgentCore::new(observer, reconciler, store, build()).unwrap();
+
+        let snapshot = core.observe_decide_reconcile().unwrap();
+        assert_eq!(snapshot.health, AgentHealth::Degraded);
+        assert_eq!(
+            snapshot.health_reason_code.unwrap().as_str(),
+            "host-observation-incomplete"
+        );
+
+        let AgentResponse::Doctor(report) = core.handle_command(AgentCommand::RunDoctor).unwrap()
+        else {
+            panic!("doctor command must return the Agent health report");
+        };
+        assert_eq!(
+            report.checks[0].reason_code.as_ref().unwrap().as_str(),
+            "host-observation-incomplete"
+        );
+    }
+
+    #[test]
     fn zen_suspends_enabled_probe_runtime_without_disabling_configuration() {
         let observation = AgentObservation {
             health: AgentHealth::Healthy,
+            health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
             links: Vec::new(),
@@ -743,6 +780,7 @@ mod tests {
     fn healthy_observation() -> AgentObservation {
         AgentObservation {
             health: AgentHealth::Healthy,
+            health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
             links: vec![LinkSnapshot {

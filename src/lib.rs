@@ -2,6 +2,7 @@
 
 mod agent;
 mod cli;
+mod host;
 mod ipc;
 mod model;
 mod policy;
@@ -16,6 +17,11 @@ pub use agent::{
     ConfigStore, ConfigStoreError, FileConfigStore, MemoryConfigStore, CONFIG_SCHEMA_VERSION,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
+pub use host::{
+    AdoptionRefusal, ExistingListenerAdoption, HostEvidence, HostHealth, HostSnapshot, HostSource,
+    RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
+    RecoverySource, RecoveryTrigger, SessionState, WindowsHostSource,
+};
 pub use ipc::{
     IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResponseBody,
     IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,

@@ -344,6 +344,9 @@ pub struct AgentSnapshot {
     pub schema_version: u32,
     pub build: BuildProvenance,
     pub health: AgentHealth,
+    /// Machine reason for the current control-plane health, including
+    /// reconstructable host-observation evidence.
+    pub health_reason_code: Option<ReasonCode>,
     pub zen: ZenOverride,
     pub user_mode: UserMode,
     pub node_state: NodeState,
@@ -602,6 +605,7 @@ mod tests {
                 target: "x86_64-pc-windows-msvc".to_owned(),
             },
             health: AgentHealth::Healthy,
+            health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             zen: ZenOverride::Disabled,
             user_mode: UserMode::Auto,
             node_state: NodeState::Drained,
