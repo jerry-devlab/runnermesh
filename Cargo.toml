@@ -1,0 +1,8 @@
+[package]
+name = "runnermesh"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+description = "Human-first CI capacity orchestration for interactive developer workstations."
+
+[dependencies]
