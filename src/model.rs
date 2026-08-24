@@ -86,8 +86,7 @@ mod tests {
         }
 
         for invalid in ["full", "Full", "UNKNOWN"] {
-            assert!(serde_json::from_str::<NodeState>(&format!("\"{invalid}\""))
-                .is_err());
+            assert!(serde_json::from_str::<NodeState>(&format!("\"{invalid}\"")).is_err());
         }
     }
 
@@ -125,8 +124,7 @@ mod tests {
         }
 
         for invalid in ["force_ci", "ForceCi", "WORK", "unknown"] {
-            assert!(serde_json::from_str::<UserMode>(&format!("\"{invalid}\""))
-                .is_err());
+            assert!(serde_json::from_str::<UserMode>(&format!("\"{invalid}\"")).is_err());
         }
     }
 }
