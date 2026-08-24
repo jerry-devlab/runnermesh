@@ -8,6 +8,8 @@ Design validation was completed before this public product repository began. Pri
 
 ## v0.1 — Windows admission prototype
 
+The foundational `NodeState` and `UserMode` domain contracts are complete. All operational v0.1 behavior below remains planned.
+
 - status and doctor;
 - explicit modes;
 - `FULL`, `THROTTLED`, `DRAINED`, and `OFFLINE`;

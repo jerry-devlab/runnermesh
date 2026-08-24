@@ -27,7 +27,7 @@ Teams often have capable workstations with intermittent spare capacity, but thos
 
 ## Project status
 
-RunnerMesh is **pre-v0.1 / early development**. This repository currently contains public design documentation and a compile-clean Rust skeleton; it does not yet provide a working admission controller, daemon, resource backend, broker, or GitHub integration.
+RunnerMesh is **pre-v0.1 / early development**. The public library currently defines stable `NodeState` and `UserMode` contracts; it does not yet provide admission behavior, a daemon, resource backend, broker, or GitHub integration.
 
 ## Core concepts
 

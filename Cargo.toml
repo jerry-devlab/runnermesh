@@ -6,3 +6,7 @@ license = "MIT"
 description = "Human-first CI capacity orchestration for interactive developer workstations."
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.151"
