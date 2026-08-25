@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -24,14 +24,15 @@ use tray_icon::{
 };
 
 use crate::{
-    ActivityWorkloadProbe, AdmissionDecision, AgentCommand, AgentCore, AgentObservation,
-    AgentObserver, AgentReconciler, AgentResponse, AgentSnapshot, BuildProvenance, EffectiveLocale,
-    EffectiveTheme, FileConfigStore, HardSafetyState, HostSnapshot, HostSource, IpcEndpoint,
-    IpcServer, LanguagePreference, LinkKind, LinkSnapshot, LinkState, LocalAgentTransport,
+    ActivityWorkloadProbe, AdmissionDecision, AgentCommand, AgentCore, AgentHealth,
+    AgentObservation, AgentObserver, AgentReconciler, AgentResponse, AgentSnapshot,
+    BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
+    FileConfigStore, HardSafetyState, HostSnapshot, HostSource, IpcEndpoint, IpcServer,
+    LanguagePreference, LinkKind, LinkSnapshot, LinkState, LocalAgentTransport,
     NativeTrayEventLoop, OfficialRunnerObserver, ProcessListProbe, ReasonCode, RunnerPhase,
     ThemePreference, TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender,
     TrayUiUpdate, UserActivityProbe, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
-    WindowsSteamAppIdSource, WindowsUserActivitySource,
+    WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
 };
 
 /// Result persisted only inside the caller-owned development root, so automated
@@ -52,6 +53,29 @@ struct DevelopmentRuntimeEvidence {
     menu_hints_enabled: bool,
 }
 
+/// Reconstructable runtime readiness facts used only to extend the development
+/// Agent's doctor output. These facts never grant runner-control authority.
+struct RuntimeReadiness {
+    native_tray_ready: AtomicBool,
+    runner_observer_configured: bool,
+    supervisor_adapter_ready: bool,
+}
+
+impl RuntimeReadiness {
+    fn from_runner_home(runner_home: Option<&Path>) -> Self {
+        let runner_observer_configured = runner_home.is_some_and(Path::is_dir);
+        let supervisor_adapter_ready = runner_home.is_some_and(|home| {
+            WindowsUserSessionSupervisorAdapter::for_runner_home(home).readiness()
+                == crate::WindowsSupervisorReadiness::Ready
+        });
+        Self {
+            native_tray_ready: AtomicBool::new(false),
+            runner_observer_configured,
+            supervisor_adapter_ready,
+        }
+    }
+}
+
 type RuntimeCore = AgentCore<RuntimeObserver, NoRunnerControl, FileConfigStore>;
 
 /// Starts the development-only Agent. `development_root` must be a caller-owned
@@ -59,10 +83,12 @@ type RuntimeCore = AgentCore<RuntimeObserver, NoRunnerControl, FileConfigStore>;
 pub fn run_development_agent(
     development_root: PathBuf,
     runner_home: Option<PathBuf>,
+    process_probe_names: Vec<String>,
 ) -> Result<(), String> {
     fs::create_dir_all(&development_root).map_err(|error| error.to_string())?;
     let store = FileConfigStore::new(development_root.join("config.json"));
-    let observer = RuntimeObserver::new(runner_home);
+    let readiness = Arc::new(RuntimeReadiness::from_runner_home(runner_home.as_deref()));
+    let observer = RuntimeObserver::new(runner_home, process_probe_names);
     let mut core = AgentCore::new(observer, NoRunnerControl, store, build_provenance())
         .map_err(|error| error.to_string())?;
     let initial_snapshot = core
@@ -79,14 +105,17 @@ pub fn run_development_agent(
         server,
         Arc::clone(&core),
         Arc::clone(&exit_requested),
+        Arc::clone(&readiness),
         snapshot_sender,
     );
 
     let result = run_native_tray_loop(
         &development_root,
+        Arc::clone(&core),
         initial_snapshot,
         snapshot_receiver,
         Arc::clone(&exit_requested),
+        readiness,
     );
     exit_requested.store(true, Ordering::Release);
     // Exit is requested through the same typed local IPC route. The pipe loop
@@ -108,6 +137,7 @@ fn spawn_pipe_loop(
     server: IpcServer,
     core: Arc<Mutex<RuntimeCore>>,
     exit_requested: Arc<AtomicBool>,
+    readiness: Arc<RuntimeReadiness>,
     snapshot_sender: Sender<AgentSnapshot>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -115,6 +145,7 @@ fn spawn_pipe_loop(
             let core = Arc::clone(&core);
             let exit_requested = Arc::clone(&exit_requested);
             let exit_for_after_serve = Arc::clone(&exit_requested);
+            let readiness = Arc::clone(&readiness);
             let snapshot_sender = snapshot_sender.clone();
             let served = server.serve_once(move |command| {
                 let mut core = core
@@ -128,8 +159,15 @@ fn spawn_pipe_loop(
                         snapshot: core.snapshot(),
                     }
                 } else {
-                    core.handle_command(command)
-                        .map_err(|_| static_reason("agent-runtime-command-failed"))?
+                    let response = core
+                        .handle_command(command)
+                        .map_err(|_| static_reason("agent-runtime-command-failed"))?;
+                    if let AgentResponse::Doctor(mut report) = response {
+                        append_pre_h1_doctor_checks(&mut report, &core.snapshot(), &readiness);
+                        AgentResponse::Doctor(report)
+                    } else {
+                        response
+                    }
                 };
                 if let AgentResponse::Snapshot(snapshot) | AgentResponse::Accepted { snapshot } =
                     &response
@@ -149,9 +187,11 @@ fn spawn_pipe_loop(
 
 fn run_native_tray_loop(
     development_root: &Path,
+    core: Arc<Mutex<RuntimeCore>>,
     initial_snapshot: AgentSnapshot,
     snapshots: Receiver<AgentSnapshot>,
     exit_requested: Arc<AtomicBool>,
+    readiness: Arc<RuntimeReadiness>,
 ) -> Result<(), String> {
     let transport = LocalAgentTransport::new(Duration::from_secs(2));
     let mut frontend = NativeTrayEventLoop::new(transport);
@@ -168,6 +208,7 @@ fn run_native_tray_loop(
         current_snapshot.ui_preferences.theme != ThemePreference::System,
     )?;
     write_runtime_stage(development_root, "tray-backend-ready")?;
+    readiness.native_tray_ready.store(true, Ordering::Release);
     // UISettings.ColorValuesChanged runs outside the tray ownership boundary.
     // The callback only marks a refresh pending; this loop resolves and
     // applies the owner-draw palette on the UI thread.
@@ -177,9 +218,31 @@ fn run_native_tray_loop(
     write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
     write_runtime_stage(development_root, "runtime-ready")?;
     write_hint_evidence(development_root, &mut native)?;
+    let mut last_observation = Instant::now();
 
     while !exit_requested.load(Ordering::Acquire) {
         pump_windows_messages();
+        if last_observation.elapsed() >= Duration::from_secs(1) {
+            // Observation is reconstructed in the Agent Core on the normal
+            // Observe -> Decide -> Reconcile path. It is independent of tray
+            // rendering and has no pre-H1 runner-control backend.
+            if let Ok(mut core) = core.lock() {
+                if let Ok(snapshot) = core.observe_decide_reconcile() {
+                    current_snapshot = snapshot;
+                    let render = frontend
+                        .apply(TrayUiUpdate::Snapshot(current_snapshot.clone()))
+                        .map_err(|error| error.to_string())?;
+                    native.apply(
+                        render,
+                        current_snapshot.effective_ui_preferences.theme,
+                        current_snapshot.ui_preferences.theme != ThemePreference::System,
+                    )?;
+                    refreshes += 1;
+                    write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
+                }
+            }
+            last_observation = Instant::now();
+        }
         if native.take_dpi_refresh_request() {
             let render = frontend
                 .current_render()
@@ -653,12 +716,12 @@ struct RuntimeObserver {
 }
 
 impl RuntimeObserver {
-    fn new(runner_home: Option<PathBuf>) -> Self {
+    fn new(runner_home: Option<PathBuf>, process_probe_names: Vec<String>) -> Self {
         Self {
             host: WindowsHostSource::default(),
             user_activity: UserActivityProbe::new(WindowsUserActivitySource, 300),
             steam: crate::SteamGameProbe::new(WindowsSteamAppIdSource),
-            process_list: ProcessListProbe::new(WindowsProcessSource, Vec::new()),
+            process_list: ProcessListProbe::new(WindowsProcessSource, process_probe_names),
             runner_home,
         }
     }
@@ -705,6 +768,95 @@ impl AgentReconciler for NoRunnerControl {
         // This explicit pre-H1 reconciler has no process-control backend.
         Ok(())
     }
+}
+
+fn append_pre_h1_doctor_checks(
+    report: &mut DoctorReport,
+    snapshot: &AgentSnapshot,
+    readiness: &RuntimeReadiness,
+) {
+    let check = |id: &'static str, status, reason: Option<&'static str>| DoctorCheck {
+        id: static_reason(id),
+        status,
+        reason_code: reason.map(static_reason),
+    };
+    let probes_ready = ["user-activity", "steam-game", "process-list"]
+        .into_iter()
+        .all(|id| snapshot.probes.iter().any(|probe| probe.id.as_str() == id));
+    let host_status = if snapshot.health == AgentHealth::Healthy {
+        DoctorStatus::Pass
+    } else {
+        DoctorStatus::Warn
+    };
+    let host_reason = (host_status != DoctorStatus::Pass).then_some("host-observation-degraded");
+    let runner_status = if readiness.runner_observer_configured {
+        DoctorStatus::Pass
+    } else {
+        DoctorStatus::Warn
+    };
+    let supervisor_status = if readiness.supervisor_adapter_ready {
+        DoctorStatus::Pass
+    } else {
+        DoctorStatus::Warn
+    };
+    let pre_h1_ready = readiness.native_tray_ready.load(Ordering::Acquire)
+        && readiness.runner_observer_configured
+        && readiness.supervisor_adapter_ready
+        && probes_ready;
+
+    report.checks.extend([
+        check("agent-runtime", DoctorStatus::Pass, None),
+        check(
+            "native-tray",
+            if readiness.native_tray_ready.load(Ordering::Acquire) {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Warn
+            },
+            (!readiness.native_tray_ready.load(Ordering::Acquire))
+                .then_some("native-tray-starting"),
+        ),
+        check("local-ipc", DoctorStatus::Pass, None),
+        check(
+            "probe-system",
+            if probes_ready {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Warn
+            },
+            (!probes_ready).then_some("probe-set-incomplete"),
+        ),
+        check("host-observation", host_status, host_reason),
+        check(
+            "runner-observer",
+            runner_status,
+            (!readiness.runner_observer_configured).then_some("runner-home-not-configured"),
+        ),
+        check(
+            "supervisor-adapter",
+            supervisor_status,
+            (!readiness.supervisor_adapter_ready).then_some("supervisor-launch-context-not-ready"),
+        ),
+        check(
+            "work-root-safety",
+            DoctorStatus::Pass,
+            Some("work-root-verification-required-at-h1"),
+        ),
+        check(
+            "pre-h1-runtime-ready",
+            if pre_h1_ready {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Warn
+            },
+            (!pre_h1_ready).then_some("pre-h1-runtime-incomplete"),
+        ),
+        check(
+            "real-runner-drain",
+            DoctorStatus::Warn,
+            Some("h1-real-runner-lifecycle-required"),
+        ),
+    ]);
 }
 
 fn static_reason(value: &'static str) -> ReasonCode {
