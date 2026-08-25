@@ -312,11 +312,64 @@ pub enum LanguagePreference {
     EnUs,
 }
 
+/// The actual palette selected for presentation after resolving a user
+/// preference against the current user session. This is runtime observation,
+/// never a replacement for the persisted [`ThemePreference`].
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffectiveTheme {
+    Light,
+    Dark,
+    /// Windows high-contrast/accessibility colors take precedence over a
+    /// requested custom palette.
+    SystemAccessible,
+}
+
+/// The actual locale selected for presentation after resolving a user
+/// preference against the current user's UI-language list.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EffectiveLocale {
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en-US")]
+    EnUs,
+}
+
+/// Read-only current-user presentation facts supplied by a platform observer.
+/// They are reconstructable observations, not user intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemPreferences {
+    pub theme: EffectiveTheme,
+    pub locale: EffectiveLocale,
+}
+
+impl Default for SystemPreferences {
+    fn default() -> Self {
+        Self {
+            theme: EffectiveTheme::Light,
+            locale: EffectiveLocale::EnUs,
+        }
+    }
+}
+
+/// The resolved values frontends actually render. The accompanying
+/// [`UiPreferences`] fields retain the user-selected machine contract.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EffectiveUiPreferences {
+    pub theme: EffectiveTheme,
+    pub locale: EffectiveLocale,
+}
+
 /// Preferences that affect presentation only.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiPreferences {
     pub theme: ThemePreference,
     pub language: LanguagePreference,
+    /// Whether the native tray may show localized contextual option hints.
+    /// Missing values deserialize as enabled to preserve the v0.1 default for
+    /// existing sandbox configuration files.
+    #[serde(default = "menu_hints_default")]
+    pub menu_hints_enabled: bool,
 }
 
 impl Default for UiPreferences {
@@ -324,8 +377,32 @@ impl Default for UiPreferences {
         Self {
             theme: ThemePreference::System,
             language: LanguagePreference::System,
+            menu_hints_enabled: true,
         }
     }
+}
+
+impl UiPreferences {
+    /// Resolves presentation at runtime without rewriting the stored user
+    /// choices (`system` remains `system` in JSON/configuration).
+    pub fn resolve(&self, system: SystemPreferences) -> EffectiveUiPreferences {
+        EffectiveUiPreferences {
+            theme: match self.theme {
+                ThemePreference::System => system.theme,
+                ThemePreference::Light => EffectiveTheme::Light,
+                ThemePreference::Dark => EffectiveTheme::Dark,
+            },
+            locale: match self.language {
+                LanguagePreference::System => system.locale,
+                LanguagePreference::ZhCn => EffectiveLocale::ZhCn,
+                LanguagePreference::EnUs => EffectiveLocale::EnUs,
+            },
+        }
+    }
+}
+
+const fn menu_hints_default() -> bool {
+    true
 }
 
 /// Immutable build identity rendered by frontends without consulting their own
@@ -355,6 +432,8 @@ pub struct AgentSnapshot {
     pub links: Vec<LinkSnapshot>,
     pub probes: Vec<ProbeSnapshot>,
     pub ui_preferences: UiPreferences,
+    /// Runtime resolution of the persisted presentation preferences.
+    pub effective_ui_preferences: EffectiveUiPreferences,
     pub start_on_login_preference: bool,
     pub auto_idle_threshold_seconds: u64,
     pub update_checks_enabled: bool,
@@ -434,10 +513,10 @@ pub enum AgentResponse {
 mod tests {
     use super::{
         AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
-        BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState,
-        LanguagePreference, LinkKind, LinkSnapshot, LinkState, ProbeHealth, ProbeId,
-        ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference, UiPreferences,
-        ZenOverride,
+        BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
+        HardSafetyState, LanguagePreference, LinkKind, LinkSnapshot, LinkState, ProbeHealth,
+        ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, SystemPreferences,
+        ThemePreference, UiPreferences, ZenOverride,
     };
     use crate::{NodeState, UserMode};
 
@@ -495,10 +574,25 @@ mod tests {
         assert_round_trips(LanguagePreference::System, "system");
         assert_round_trips(LanguagePreference::ZhCn, "zh-CN");
         assert_round_trips(LanguagePreference::EnUs, "en-US");
+        assert_round_trips(EffectiveTheme::Light, "light");
+        assert_round_trips(EffectiveTheme::Dark, "dark");
+        assert_round_trips(EffectiveLocale::ZhCn, "zh-CN");
+        assert_round_trips(EffectiveLocale::EnUs, "en-US");
         assert_round_trips(DoctorStatus::Pass, "PASS");
         assert_round_trips(DoctorStatus::Warn, "WARN");
         assert_round_trips(DoctorStatus::Fail, "FAIL");
         assert_round_trips(DoctorStatus::Unknown, "UNKNOWN");
+    }
+
+    #[test]
+    fn missing_menu_hints_preference_defaults_to_enabled() {
+        let preferences: UiPreferences =
+            serde_json::from_str(r#"{"theme":"system","language":"system"}"#).unwrap();
+        assert!(preferences.menu_hints_enabled);
+        assert_eq!(
+            serde_json::to_string(&preferences).unwrap(),
+            r#"{"theme":"system","language":"system","menu_hints_enabled":true}"#
+        );
     }
 
     #[test]
@@ -629,6 +723,8 @@ mod tests {
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
             ui_preferences: UiPreferences::default(),
+            effective_ui_preferences: UiPreferences::default()
+                .resolve(SystemPreferences::default()),
             start_on_login_preference: false,
             auto_idle_threshold_seconds: 300,
             update_checks_enabled: true,

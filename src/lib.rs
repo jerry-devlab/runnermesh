@@ -1,6 +1,8 @@
 //! Stable domain contracts for RunnerMesh.
 
 mod agent;
+#[cfg(windows)]
+pub mod agent_runtime;
 mod cli;
 mod host;
 mod ipc;
@@ -11,6 +13,10 @@ mod runner_observer;
 mod runtime;
 mod supervisor;
 mod tray;
+#[cfg(windows)]
+pub mod windows_preferences;
+#[cfg(windows)]
+pub mod windows_tray_theme;
 
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
@@ -39,15 +45,16 @@ pub use runner_observer::{
 };
 pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
-    DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState, LanguagePreference, LinkKind,
-    LinkSnapshot, LinkState, ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-    RunnerPhase, ThemePreference, UiPreferences, ZenOverride,
+    DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
+    EffectiveUiPreferences, HardSafetyState, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
+    ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
+    SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
 };
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
     SupervisorOutcome, SupervisorRefusal, SupervisorRequest, SyntheticProcessBackend,
 };
 pub use tray::{
-    NativeTrayEventLoop, TrayActionResult, TrayError, TrayIconGlyph, TrayMenuEntry, TrayMenuId,
-    TrayMenuItem, TrayRender, TrayUiUpdate,
+    localized_menu_hint, NativeTrayEventLoop, TrayActionResult, TrayError, TrayHelpKey,
+    TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
 };

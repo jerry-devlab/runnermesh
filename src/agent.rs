@@ -15,7 +15,7 @@ use crate::{
     decide_admission, AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
     BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState, LinkKind,
     LinkSnapshot, LinkState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
-    UiPreferences, UserMode, ZenOverride,
+    SystemPreferences, UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -60,6 +60,9 @@ pub struct AgentObservation {
     pub runner_phase: RunnerPhase,
     pub links: Vec<LinkSnapshot>,
     pub probes: Vec<ProbeSnapshot>,
+    /// Current-user presentation facts gathered read-only by the platform
+    /// observer. They remain reconstructable observation rather than intent.
+    pub system_preferences: SystemPreferences,
 }
 
 impl AgentObservation {
@@ -75,6 +78,7 @@ impl AgentObservation {
                 reason_code: Some(static_reason("not-observed")),
             }],
             probes: Vec::new(),
+            system_preferences: SystemPreferences::default(),
         }
     }
 }
@@ -255,6 +259,10 @@ where
             links: self.observation.links.clone(),
             probes,
             ui_preferences: self.config.ui_preferences.clone(),
+            effective_ui_preferences: self
+                .config
+                .ui_preferences
+                .resolve(self.observation.system_preferences),
             start_on_login_preference: self.config.start_on_login,
             auto_idle_threshold_seconds: self.config.auto_idle_threshold_seconds,
             update_checks_enabled: self.config.update_checks_enabled,
@@ -534,7 +542,7 @@ mod tests {
     use crate::{
         AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, BuildProvenance, LinkKind,
         LinkSnapshot, LinkState, NodeState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-        RunnerPhase, ThemePreference, UiPreferences, UserMode, ZenOverride,
+        RunnerPhase, SystemPreferences, ThemePreference, UiPreferences, UserMode, ZenOverride,
     };
 
     #[test]
@@ -607,6 +615,7 @@ mod tests {
                 runtime_state: ProbeRuntimeState::Unknown,
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
+            system_preferences: SystemPreferences::default(),
         };
         let observer = QueueObserver::new(vec![observation]);
         let reconciler = RecordingReconciler::default();
@@ -647,6 +656,7 @@ mod tests {
                 ui_preferences: UiPreferences {
                     theme: ThemePreference::Dark,
                     language: crate::LanguagePreference::ZhCn,
+                    menu_hints_enabled: true,
                 },
             })
             .unwrap();
@@ -706,6 +716,7 @@ mod tests {
                 runtime_state: ProbeRuntimeState::Active,
                 reason_code: Some(ReasonCode::new("user-input-recent").unwrap()),
             }],
+            system_preferences: SystemPreferences::default(),
         };
         let observer = QueueObserver::new(vec![observation]);
         let reconciler = RecordingReconciler::default();
@@ -789,6 +800,7 @@ mod tests {
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
             probes: Vec::new(),
+            system_preferences: SystemPreferences::default(),
         }
     }
 

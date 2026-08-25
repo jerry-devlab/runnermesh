@@ -445,6 +445,8 @@ mod tests {
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
             ui_preferences: UiPreferences::default(),
+            effective_ui_preferences: UiPreferences::default()
+                .resolve(crate::SystemPreferences::default()),
             start_on_login_preference: false,
             auto_idle_threshold_seconds: 300,
             update_checks_enabled: true,
