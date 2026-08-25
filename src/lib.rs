@@ -16,6 +16,8 @@ mod tray;
 #[cfg(windows)]
 pub mod windows_preferences;
 #[cfg(windows)]
+pub mod windows_supervisor;
+#[cfg(windows)]
 pub mod windows_tray_theme;
 
 pub use agent::{
@@ -57,4 +59,9 @@ pub use supervisor::{
 pub use tray::{
     localized_menu_hint, NativeTrayEventLoop, TrayActionResult, TrayError, TrayHelpKey,
     TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
+};
+#[cfg(windows)]
+pub use windows_supervisor::{
+    PreparedWindowsSupervisorAction, UserSessionLaunch, WindowsSupervisorReadiness,
+    WindowsUserSessionSupervisorAdapter,
 };
