@@ -44,9 +44,18 @@ Any relevant active probe drains capacity. Unknown safety-relevant evidence drai
 
 Tray is the primary daily control surface. It shows build/version, Agent health, capacity/mode, runner phase, GitHub Actions link state, Zen, modes, per-probe enablement and runtime state, diagnostics, settings, update entry, and exit-after-drain.
 
-Theme preferences: `system`, `light`, `dark`.
+Theme preferences: `system`, `light`, `dark`. `system` means the current-user
+Windows effective application color mode, resolved at runtime from documented
+`UISettings` color observation; the persisted preference remains `system`.
 
-Language preferences: `system`, `zh-CN`, `en-US`.
+Language preferences: `system`, `zh-CN`, `en-US`. `system` means the current
+user's preferred UI language, resolved at runtime from the documented user UI
+language list; it is not the keyboard, region, or Windows installation locale.
+
+Tray option descriptions are a v0.1 presentation feature. They use stable
+semantic menu keys, are localized separately from menu labels, and are enabled
+by default through the `Show option descriptions` UI preference. They never
+alter command routing, policy, probes, or runner state.
 
 Localization is presentation-only. Stable JSON, config, IPC, menu/action IDs, enum values, and reason codes are never localized. UI mutation stays on the tray/event-loop owner thread.
 

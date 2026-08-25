@@ -23,9 +23,28 @@ Train A may run unattended across separate branches/PRs. Stop only for blocker, 
 
 Train B1 stops before G11.
 
+## Pre-H1 readiness recovery
+
+The initial G06 acceptance proved the presentation contracts, stable menu IDs,
+and synthetic event-loop adapter. It did not prove a persistent Windows Agent
+with a real notification-area backend. Those historical claims remain useful
+and are recorded precisely as:
+
+- **G06 presentation contract:** PASS;
+- **G06 native tray runtime:** UNPROVEN before G06R.
+
+- **G06R Native Tray + Persistent Agent Runtime** — real ordinary-user
+  `runnermesh-agent`, local Named Pipe, and native Windows tray backend.
+- **G10R Pre-H1 Integration** — non-mutating end-to-end readiness evidence for
+  the development Agent, CLI, host/runner observers, recovery, and the
+  supervisor adapter.
+
+G06R and G10R are autonomous focused Goals. They do not qualify real runner
+lifecycle control and stop before H1.
+
 ## Human Gate H1
 
-- **G11 Real Runner Lifecycle + Graceful Drain** — explicit Owner authorization required. Qualify real official-runner start/listen/busy/drain/stop/reconnect/adoption/work-root behavior in a trusted lane.
+- **G11 Real Runner Lifecycle + Graceful Drain** — explicit Owner authorization required. Qualify real official-runner start/listen/busy/drain/stop/reconnect/adoption/work-root behavior in a trusted lane, after G06R/G10R readiness passes.
 
 If graceful drain cannot be proven, stop and revise implementation/ADR; do not fake PASS.
 

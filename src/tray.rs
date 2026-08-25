@@ -1,9 +1,9 @@
 use std::{fmt, thread::ThreadId};
 
 use crate::{
-    AgentCommand, AgentResponse, AgentSnapshot, AgentTransport, DoctorReport, IpcRequest,
-    IpcResponseBody, IpcTransportError, LanguagePreference, LinkKind, LinkState, ProbeId,
-    ThemePreference, UiPreferences, UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
+    AgentCommand, AgentResponse, AgentSnapshot, AgentTransport, DoctorReport, EffectiveLocale,
+    IpcRequest, IpcResponseBody, IpcTransportError, LanguagePreference, LinkKind, LinkState,
+    ProbeId, ThemePreference, UiPreferences, UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
 };
 
 /// Stable identifiers for native tray actions. They are never localized.
@@ -22,6 +22,7 @@ pub enum TrayMenuId {
     Logs,
     Theme(ThemePreference),
     Language(LanguagePreference),
+    MenuHints,
     StartOnLogin,
     IdleThreshold(u64),
     UpdateChecks,
@@ -51,6 +52,7 @@ impl TrayMenuId {
             Self::Language(LanguagePreference::System) => "settings.language.system".to_owned(),
             Self::Language(LanguagePreference::ZhCn) => "settings.language.zh-CN".to_owned(),
             Self::Language(LanguagePreference::EnUs) => "settings.language.en-US".to_owned(),
+            Self::MenuHints => "settings.menu-hints".to_owned(),
             Self::StartOnLogin => "settings.start-on-login".to_owned(),
             Self::IdleThreshold(seconds) => format!("settings.idle-threshold.{seconds}"),
             Self::UpdateChecks => "settings.update-checks".to_owned(),
@@ -59,6 +61,61 @@ impl TrayMenuId {
             Self::CheckForUpdates => "action.check-for-updates".to_owned(),
             Self::ExitAfterDrain => "action.exit-after-drain".to_owned(),
         }
+    }
+}
+
+/// Stable, non-localized semantic keys for contextual tray descriptions.
+/// They are presentation-only and never route Agent commands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TrayHelpKey {
+    Zen,
+    Mode,
+    ModeChoice(UserMode),
+    Probes,
+    Probe(ProbeId),
+}
+
+impl TrayHelpKey {
+    pub fn from_menu_id(id: &TrayMenuId) -> Option<Self> {
+        match id {
+            TrayMenuId::Zen => Some(Self::Zen),
+            TrayMenuId::Mode(mode) => Some(Self::ModeChoice(*mode)),
+            TrayMenuId::ProbeToggle(id) => Some(Self::Probe(id.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// Maps semantic help keys to localized display text. Stable menu IDs and
+/// Agent commands remain independent of this presentation mapping.
+pub fn localized_menu_hint(key: &TrayHelpKey, locale: EffectiveLocale) -> Option<&'static str> {
+    let chinese = locale == EffectiveLocale::ZhCn;
+    match (chinese, key) {
+        (false, TrayHelpKey::Zen) => Some("Pause new CI work; after current work finishes safely, CI exits. Leaving Zen restores the previously selected mode."),
+        (true, TrayHelpKey::Zen) => Some("暂停新的 CI 任务；当前任务安全完成后退出 CI。退出 Zen 后恢复之前选择的模式。"),
+        (false, TrayHelpKey::Mode) => Some("Choose how this computer currently offers capacity to CI."),
+        (true, TrayHelpKey::Mode) => Some("选择这台电脑当前如何向 CI 提供计算能力。"),
+        (false, TrayHelpKey::ModeChoice(UserMode::Auto)) => Some("Automatically decides from user activity and enabled probes. When evidence is insufficient, no new CI work is accepted."),
+        (true, TrayHelpKey::ModeChoice(UserMode::Auto)) => Some("根据用户活动和启用的探针自动判断。证据不足时默认不接收新的 CI 任务。"),
+        (false, TrayHelpKey::ModeChoice(UserMode::Work)) => Some("Prioritize foreground work; do not accept new CI work."),
+        (true, TrayHelpKey::ModeChoice(UserMode::Work)) => Some("优先保证前台工作，不接收新的 CI 任务。"),
+        (false, TrayHelpKey::ModeChoice(UserMode::Gaming)) => Some("Reserve the computer for low-latency use; do not accept new CI work."),
+        (true, TrayHelpKey::ModeChoice(UserMode::Gaming)) => Some("为低延迟使用保留电脑，不接收新的 CI 任务。"),
+        (false, TrayHelpKey::ModeChoice(UserMode::Idle)) => Some("Explicitly offer this computer to CI until the mode changes."),
+        (true, TrayHelpKey::ModeChoice(UserMode::Idle)) => Some("明确将电脑提供给 CI，直到模式改变。"),
+        (false, TrayHelpKey::ModeChoice(UserMode::Maintenance)) => Some("Take the CI node offline while keeping RunnerMesh diagnostics and configuration available."),
+        (true, TrayHelpKey::ModeChoice(UserMode::Maintenance)) => Some("让 CI 节点离线，同时保留 RunnerMesh 诊断与配置能力。"),
+        (false, TrayHelpKey::ModeChoice(UserMode::ForceCi)) => Some("Ignore ordinary activity probes and offer CI; hard safety checks still take priority."),
+        (true, TrayHelpKey::ModeChoice(UserMode::ForceCi)) => Some("忽略普通活动探针并提供 CI；硬性安全检查仍然优先。"),
+        (false, TrayHelpKey::Probes) => Some("Local signals used by Auto mode to decide whether this computer is suitable for CI."),
+        (true, TrayHelpKey::Probes) => Some("Auto 模式用来判断电脑是否适合运行 CI 的本地信号。"),
+        (false, TrayHelpKey::Probe(id)) if id.as_str() == "user-activity" => Some("Detects recent input, idle time, and user session state."),
+        (true, TrayHelpKey::Probe(id)) if id.as_str() == "user-activity" => Some("检测最近输入、空闲时间和用户会话状态。"),
+        (false, TrayHelpKey::Probe(id)) if id.as_str() == "steam-game" => Some("Detects when Steam has actually launched an app or game; the Steam client alone does not trigger it."),
+        (true, TrayHelpKey::Probe(id)) if id.as_str() == "steam-game" => Some("检测 Steam 是否实际启动了应用/游戏；仅启动 Steam 客户端不会触发。"),
+        (false, TrayHelpKey::Probe(id)) if id.as_str() == "process-list" => Some("Detects configured programs to protect games, simulation, rendering, or other latency-sensitive software."),
+        (true, TrayHelpKey::Probe(id)) if id.as_str() == "process-list" => Some("检测配置的程序，可保护游戏、仿真、渲染或其他延迟敏感软件。"),
+        _ => None,
     }
 }
 
@@ -108,6 +165,11 @@ impl TrayIconGlyph {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrayRender {
     pub icon_glyph: TrayIconGlyph,
+    /// The runtime-resolved locale used for labels and contextual help. The
+    /// persisted language preference remains on [`AgentSnapshot`].
+    pub locale: EffectiveLocale,
+    /// Presentation-only user preference propagated to the native backend.
+    pub menu_hints_enabled: bool,
     pub tooltip: String,
     pub entries: Vec<TrayMenuEntry>,
 }
@@ -248,12 +310,21 @@ fn command_for(id: &TrayMenuId, snapshot: &AgentSnapshot) -> Option<AgentCommand
             ui_preferences: UiPreferences {
                 theme: *theme,
                 language: snapshot.ui_preferences.language,
+                menu_hints_enabled: snapshot.ui_preferences.menu_hints_enabled,
             },
         }),
         TrayMenuId::Language(language) => Some(AgentCommand::SetUiPreferences {
             ui_preferences: UiPreferences {
                 theme: snapshot.ui_preferences.theme,
                 language: *language,
+                menu_hints_enabled: snapshot.ui_preferences.menu_hints_enabled,
+            },
+        }),
+        TrayMenuId::MenuHints => Some(AgentCommand::SetUiPreferences {
+            ui_preferences: UiPreferences {
+                theme: snapshot.ui_preferences.theme,
+                language: snapshot.ui_preferences.language,
+                menu_hints_enabled: !snapshot.ui_preferences.menu_hints_enabled,
             },
         }),
         TrayMenuId::StartOnLogin => Some(AgentCommand::SetStartOnLoginPreference {
@@ -304,7 +375,10 @@ fn send(
 }
 
 fn render(snapshot: &AgentSnapshot) -> TrayRender {
-    let language = snapshot.ui_preferences.language;
+    let language = match snapshot.effective_ui_preferences.locale {
+        EffectiveLocale::ZhCn => LanguagePreference::ZhCn,
+        EffectiveLocale::EnUs => LanguagePreference::EnUs,
+    };
     let github = snapshot
         .links
         .iter()
@@ -319,6 +393,8 @@ fn render(snapshot: &AgentSnapshot) -> TrayRender {
     };
     TrayRender {
         icon_glyph,
+        locale: snapshot.effective_ui_preferences.locale,
+        menu_hints_enabled: snapshot.ui_preferences.menu_hints_enabled,
         tooltip: format!(
             "RunnerMesh {} · {} · {}",
             icon_glyph.marker(),
@@ -534,6 +610,12 @@ fn settings_entries(snapshot: &AgentSnapshot, language: LanguagePreference) -> V
             true,
         ),
         item(
+            TrayMenuId::MenuHints,
+            text(language, Text::MenuHints).to_owned(),
+            Some(snapshot.ui_preferences.menu_hints_enabled),
+            true,
+        ),
+        item(
             TrayMenuId::OpenConfig,
             text(language, Text::OpenConfig).to_owned(),
             None,
@@ -583,6 +665,7 @@ enum Text {
     StartOnLogin,
     IdleThreshold,
     UpdateChecks,
+    MenuHints,
     OpenConfig,
     OpenDataDirectory,
     CheckForUpdates,
@@ -608,6 +691,7 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (false, Text::StartOnLogin) => "Start on login",
         (false, Text::IdleThreshold) => "Auto idle threshold",
         (false, Text::UpdateChecks) => "Check for updates automatically",
+        (false, Text::MenuHints) => "Show option descriptions",
         (false, Text::OpenConfig) => "Open config",
         (false, Text::OpenDataDirectory) => "Open data directory",
         (false, Text::CheckForUpdates) => "Check for updates",
@@ -628,6 +712,7 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (true, Text::StartOnLogin) => "登录时启动",
         (true, Text::IdleThreshold) => "自动空闲阈值",
         (true, Text::UpdateChecks) => "自动检查更新",
+        (true, Text::MenuHints) => "显示选项说明",
         (true, Text::OpenConfig) => "打开配置",
         (true, Text::OpenDataDirectory) => "打开数据目录",
         (true, Text::CheckForUpdates) => "检查更新",
@@ -692,15 +777,15 @@ mod tests {
     use std::{cell::RefCell, rc::Rc, thread};
 
     use super::{
-        render, NativeTrayEventLoop, TrayActionResult, TrayError, TrayMenuEntry, TrayMenuId,
-        TrayUiUpdate,
+        localized_menu_hint, render, NativeTrayEventLoop, TrayActionResult, TrayError, TrayHelpKey,
+        TrayMenuEntry, TrayMenuId, TrayUiUpdate,
     };
     use crate::{
         AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, AgentTransport,
-        BuildProvenance, IpcRequest, IpcResponse, IpcResponseBody, IpcTransportError,
-        LanguagePreference, LinkKind, LinkSnapshot, LinkState, NodeState, ProbeId,
-        ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference, UiPreferences,
-        UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
+        BuildProvenance, EffectiveLocale, IpcRequest, IpcResponse, IpcResponseBody,
+        IpcTransportError, LanguagePreference, LinkKind, LinkSnapshot, LinkState, NodeState,
+        ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference,
+        UiPreferences, UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
     };
 
     #[test]
@@ -730,6 +815,7 @@ mod tests {
         chinese_snapshot.ui_preferences = UiPreferences {
             theme: ThemePreference::Dark,
             language: LanguagePreference::ZhCn,
+            menu_hints_enabled: true,
         };
         let english = render(&english_snapshot);
         let chinese = render(&chinese_snapshot);
@@ -752,10 +838,88 @@ mod tests {
                 ui_preferences: UiPreferences {
                     theme: ThemePreference::Dark,
                     language: LanguagePreference::System,
+                    menu_hints_enabled: true,
                 },
             }]
         );
         assert_eq!(english_snapshot.admission, chinese_snapshot.admission);
+    }
+
+    #[test]
+    fn contextual_hints_are_localized_and_have_no_command_authority() {
+        let snapshot = sample_snapshot();
+        let command_before = super::command_for(&TrayMenuId::Mode(UserMode::Auto), &snapshot);
+        assert_eq!(
+            localized_menu_hint(&TrayHelpKey::Zen, EffectiveLocale::ZhCn),
+            Some("暂停新的 CI 任务；当前任务安全完成后退出 CI。退出 Zen 后恢复之前选择的模式。")
+        );
+        assert!(localized_menu_hint(
+            &TrayHelpKey::Probe(ProbeId::new("steam-game").unwrap()),
+            EffectiveLocale::EnUs,
+        )
+        .unwrap()
+        .contains("actually launched"));
+        assert_eq!(
+            super::command_for(&TrayMenuId::Mode(UserMode::Auto), &snapshot),
+            command_before
+        );
+        assert_eq!(snapshot.admission, sample_snapshot().admission);
+    }
+
+    #[test]
+    fn repeated_hint_preference_switches_keep_stable_ids_and_policy() {
+        let mut snapshot = sample_snapshot();
+        let baseline = render(&snapshot);
+        let baseline_ids = collect_ids(&baseline.entries);
+        let admission = snapshot.admission.clone();
+        for enabled in [false, true, false, true] {
+            snapshot.ui_preferences.menu_hints_enabled = enabled;
+            let rendered = render(&snapshot);
+            assert_eq!(collect_ids(&rendered.entries), baseline_ids);
+            assert_eq!(snapshot.admission, admission);
+        }
+    }
+
+    #[test]
+    fn repeated_presentation_changes_keep_stable_ids_and_policy_unchanged() {
+        let baseline = sample_snapshot();
+        let expected_ids = collect_ids(&render(&baseline).entries);
+        for (theme, language, mode, probe_enabled) in [
+            (
+                ThemePreference::Light,
+                LanguagePreference::ZhCn,
+                UserMode::Work,
+                false,
+            ),
+            (
+                ThemePreference::Dark,
+                LanguagePreference::EnUs,
+                UserMode::Gaming,
+                true,
+            ),
+            (
+                ThemePreference::System,
+                LanguagePreference::ZhCn,
+                UserMode::Auto,
+                false,
+            ),
+        ]
+        .into_iter()
+        .cycle()
+        .take(24)
+        {
+            let mut snapshot = baseline.clone();
+            snapshot.ui_preferences = UiPreferences {
+                theme,
+                language,
+                menu_hints_enabled: true,
+            };
+            snapshot.user_mode = mode;
+            snapshot.probes[0].enabled = probe_enabled;
+            let rendered = render(&snapshot);
+            assert_eq!(collect_ids(&rendered.entries), expected_ids);
+            assert_eq!(snapshot.admission, baseline.admission);
+        }
     }
 
     #[test]
@@ -860,6 +1024,8 @@ mod tests {
                 reason_code: Some(ReasonCode::new("not-observed").unwrap()),
             }],
             ui_preferences: UiPreferences::default(),
+            effective_ui_preferences: UiPreferences::default()
+                .resolve(crate::SystemPreferences::default()),
             start_on_login_preference: false,
             auto_idle_threshold_seconds: 300,
             update_checks_enabled: true,

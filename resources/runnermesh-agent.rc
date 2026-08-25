@@ -1,0 +1,3 @@
+// 24 is the documented RT_MANIFEST resource type. Using the numeric type
+// keeps this Cargo resource independent of a particular SDK include path.
+1 24 "runnermesh-agent.manifest"
