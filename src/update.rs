@@ -373,6 +373,38 @@ impl UpdateCoordinator {
         self.read_json(self.receipt_path())
     }
 
+    /// Removes only the exact, terminal journal and receipt owned by this
+    /// coordinator. An in-flight transaction is never discarded; it must be
+    /// reconciled first. This permits a later ownership-safe uninstall to
+    /// remove an otherwise empty state directory.
+    pub fn clear_terminal_journal(&self) -> Result<bool, UpdateError> {
+        let Some(transaction) = self.read_transaction()? else {
+            return Ok(false);
+        };
+        if !transaction.phase.is_terminal() {
+            return Err(UpdateError::UnreconciledTransaction(transaction.phase));
+        }
+        let active_version = if transaction.phase == UpdatePhase::Committed {
+            &transaction.requested_version
+        } else {
+            &transaction.previous_version
+        };
+        let outcome = if transaction.phase == UpdatePhase::Committed {
+            UpdateOutcome::Committed
+        } else {
+            UpdateOutcome::RolledBack
+        };
+        self.ensure_terminal_receipt(&transaction, outcome, active_version)?;
+        for path in [self.receipt_path(), self.transaction_path()] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(UpdateError::io(error)),
+            }
+        }
+        Ok(true)
+    }
+
     fn verify_health(&self, health: &HealthObservation) -> Result<(), UpdateError> {
         let _ = self.installation.active_agent_path()?;
         match health {

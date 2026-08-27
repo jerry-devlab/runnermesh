@@ -8,6 +8,7 @@ mod host;
 mod installation;
 mod ipc;
 mod model;
+mod package;
 mod policy;
 mod probe;
 mod runner_observer;
@@ -43,6 +44,10 @@ pub use ipc::{
     IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
 };
 pub use model::{NodeState, ParseUserModeError, UserMode};
+pub use package::{
+    PackageDoctor, PackageDoctorInputs, PackageError, PackageInput, PackageManifest,
+    PackageProvenance, PackageReceipt, PackageVerifier,
+};
 pub use policy::decide_admission;
 pub use probe::{
     ActivityWorkloadProbe, ProbeReadError, ProcessListProbe, ProcessSource, SteamAppIdSource,

@@ -1,0 +1,49 @@
+name: RC Candidate Dry Run
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate version (artifact only; no release is published)
+        required: false
+        default: 0.1.0-rc.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc-candidate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Package candidate (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build Windows x64 candidates
+        run: cargo build --release --target x86_64-pc-windows-msvc --bins
+      - name: Create and verify artifact-only RC package
+        shell: pwsh
+        run: |
+          $version = '0.1.0-rc.0'
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $version = '${{ inputs.version }}'
+          }
+          $output = Join-Path $env:RUNNER_TEMP 'runnermesh-rc-candidate'
+          $release = 'target\x86_64-pc-windows-msvc\release'
+          cargo run --release --bin runnermesh-package -- `
+            $output $version '${{ github.sha }}' 'rc-dry-run' `
+            (Join-Path $release 'runnermesh.exe') `
+            (Join-Path $release 'runnermesh-agent.exe') `
+            'resources\runnermesh-agent.manifest'
+          $archive = Get-ChildItem -LiteralPath $output -Filter '*.zip' | Select-Object -First 1
+          if ($null -eq $archive) { throw 'candidate archive was not created' }
+          cargo run --release --bin runnermesh-package -- verify $archive.FullName
+      - name: Upload candidate artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: runnermesh-rc-dry-run-${{ github.sha }}
+          path: ${{ runner.temp }}/runnermesh-rc-candidate/*.zip
+          retention-days: 7
