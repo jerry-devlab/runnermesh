@@ -14,6 +14,7 @@ mod runner_observer;
 mod runtime;
 mod supervisor;
 mod tray;
+mod update;
 #[cfg(windows)]
 pub mod windows_preferences;
 #[cfg(windows)]
@@ -66,6 +67,11 @@ pub use supervisor::{
 pub use tray::{
     localized_menu_hint, NativeTrayEventLoop, TrayActionResult, TrayError, TrayHelpKey,
     TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
+};
+pub use update::{
+    payload_sha256, CumulativeProductizationAudit, HealthObservation, ReconcileReceipt,
+    UpdateCoordinator, UpdateError, UpdateOutcome, UpdatePhase, UpdateReceipt, UpdateRequest,
+    UpdateTransaction,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{

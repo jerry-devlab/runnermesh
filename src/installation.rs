@@ -725,14 +725,50 @@ fn atomic_write_io(path: &Path, bytes: &[u8]) -> io::Result<()> {
         unique_suffix()
     ));
     fs::write(&temporary, bytes)?;
-    match fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(_first_error) if path.exists() => {
-            fs::remove_file(path)?;
-            fs::rename(temporary, path)
-        }
-        Err(error) => Err(error),
+    {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary)?;
+        file.sync_all()?;
     }
+    replace_file(&temporary, path)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temporary: Vec<u16> = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both buffers are nul-terminated and remain alive for the call.
+    let result = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(temporary, destination)
 }
 
 fn unique_suffix() -> u128 {
