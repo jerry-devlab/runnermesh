@@ -5,6 +5,7 @@ mod agent;
 pub mod agent_runtime;
 mod cli;
 mod host;
+mod installation;
 mod ipc;
 mod model;
 mod policy;
@@ -29,6 +30,12 @@ pub use host::{
     AdoptionRefusal, ExistingListenerAdoption, HostEvidence, HostHealth, HostSnapshot, HostSource,
     RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
     RecoverySource, RecoveryTrigger, SessionState, WindowsHostSource,
+};
+#[cfg(windows)]
+pub use installation::WindowsRunKeyAutostartBackend;
+pub use installation::{
+    AutostartBackend, AutostartEntry, InstallError, InstallReceipt, Installation,
+    InstallationState, SandboxAutostartBackend, UninstallReceipt,
 };
 pub use ipc::{
     IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResponseBody,

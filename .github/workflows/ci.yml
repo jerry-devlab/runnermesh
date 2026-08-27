@@ -1,15 +1,24 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo fmt --all -- --check
+
   cargo:
     name: Cargo (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -19,7 +28,5 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
-      - run: cargo check
-      - run: cargo test
-      - run: cargo fmt --all -- --check
+      - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
