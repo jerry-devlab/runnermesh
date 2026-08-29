@@ -9,6 +9,7 @@ mod ipc;
 mod model;
 mod policy;
 mod probe;
+#[cfg(windows)]
 mod process_snapshot;
 mod runner_observer;
 mod runtime;
