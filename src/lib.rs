@@ -63,6 +63,8 @@ pub use tray::{
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
-    PreparedWindowsSupervisorAction, UserSessionLaunch, WindowsSupervisorReadiness,
+    BoundedRunnerProcessPort, NativeRunnerProcessPort, PreparedWindowsSupervisorAction,
+    UserSessionLaunch, VerifiedRunnerBinding, WindowsOfficialRunnerExecutor,
+    WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError, WindowsSupervisorReadiness,
     WindowsUserSessionSupervisorAdapter,
 };

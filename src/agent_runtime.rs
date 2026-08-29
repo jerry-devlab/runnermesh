@@ -1,8 +1,9 @@
 //! Ordinary-user development runtime for the persistent Windows Agent.
 //!
 //! This module deliberately requires an explicit development root. It never
-//! selects an installed runtime location and its reconciler does not control an
-//! official runner before H1.
+//! selects an installed runtime location. Its normal reconciler does not
+//! control an official runner before H1; the separate G11 entrypoint requires
+//! an explicit bound runner home and work root.
 
 use std::{
     collections::HashMap,
@@ -31,7 +32,8 @@ use crate::{
     LanguagePreference, LinkKind, LinkSnapshot, LinkState, LocalAgentTransport,
     NativeTrayEventLoop, OfficialRunnerObserver, ProcessListProbe, ReasonCode, RunnerPhase,
     ThemePreference, TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender,
-    TrayUiUpdate, UserActivityProbe, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
+    TrayUiUpdate, UserActivityProbe, VerifiedRunnerBinding, WindowsHostSource,
+    WindowsOfficialRunnerExecutor, WindowsProcessSource, WindowsRunnerSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
 };
 
@@ -76,7 +78,7 @@ impl RuntimeReadiness {
     }
 }
 
-type RuntimeCore = AgentCore<RuntimeObserver, NoRunnerControl, FileConfigStore>;
+type RuntimeCore = AgentCore<RuntimeObserver, RuntimeReconciler, FileConfigStore>;
 
 /// Starts the development-only Agent. `development_root` must be a caller-owned
 /// sandbox path; no default is intentionally provided.
@@ -85,11 +87,45 @@ pub fn run_development_agent(
     runner_home: Option<PathBuf>,
     process_probe_names: Vec<String>,
 ) -> Result<(), String> {
+    run_agent_runtime(
+        development_root,
+        runner_home,
+        process_probe_names,
+        RuntimeReconciler::NoRunnerControl(NoRunnerControl),
+    )
+}
+
+/// Starts the explicit H1/G11 source-runtime lane. It remains a caller-owned
+/// development root and binds to one already-configured runner only; it never
+/// installs, registers, or reconfigures a runner.
+pub fn run_g11_qualified_agent(
+    development_root: PathBuf,
+    runner_home: PathBuf,
+    work_root: PathBuf,
+    process_probe_names: Vec<String>,
+) -> Result<(), String> {
+    let binding =
+        VerifiedRunnerBinding::bind(&runner_home, &work_root).map_err(|error| error.to_string())?;
+    let observed_runner_home = binding.runner_home().to_path_buf();
+    run_agent_runtime(
+        development_root,
+        Some(observed_runner_home),
+        process_probe_names,
+        RuntimeReconciler::Bounded(BoundedRunnerControl::new(binding)),
+    )
+}
+
+fn run_agent_runtime(
+    development_root: PathBuf,
+    runner_home: Option<PathBuf>,
+    process_probe_names: Vec<String>,
+    reconciler: RuntimeReconciler,
+) -> Result<(), String> {
     fs::create_dir_all(&development_root).map_err(|error| error.to_string())?;
     let store = FileConfigStore::new(development_root.join("config.json"));
     let readiness = Arc::new(RuntimeReadiness::from_runner_home(runner_home.as_deref()));
     let observer = RuntimeObserver::new(runner_home, process_probe_names);
-    let mut core = AgentCore::new(observer, NoRunnerControl, store, build_provenance())
+    let mut core = AgentCore::new(observer, reconciler, store, build_provenance())
         .map_err(|error| error.to_string())?;
     let initial_snapshot = core
         .observe_decide_reconcile()
@@ -766,6 +802,51 @@ struct NoRunnerControl;
 impl AgentReconciler for NoRunnerControl {
     fn reconcile(&mut self, _decision: &AdmissionDecision) -> Result<(), String> {
         // This explicit pre-H1 reconciler has no process-control backend.
+        Ok(())
+    }
+}
+
+enum RuntimeReconciler {
+    NoRunnerControl(NoRunnerControl),
+    Bounded(BoundedRunnerControl),
+}
+
+impl AgentReconciler for RuntimeReconciler {
+    fn reconcile(&mut self, decision: &AdmissionDecision) -> Result<(), String> {
+        match self {
+            Self::NoRunnerControl(reconciler) => reconciler.reconcile(decision),
+            Self::Bounded(reconciler) => reconciler.reconcile(decision),
+        }
+    }
+}
+
+/// G11-only policy bridge. A drain decision emits a cooperative CTRL+BREAK to
+/// the exact owned runner child; it never force-terminates a Worker. A
+/// capacity-allowing decision starts only the frozen `run.cmd` binding.
+struct BoundedRunnerControl {
+    executor: WindowsOfficialRunnerExecutor,
+}
+
+impl BoundedRunnerControl {
+    fn new(binding: VerifiedRunnerBinding) -> Self {
+        Self {
+            executor: WindowsOfficialRunnerExecutor::new(binding),
+        }
+    }
+}
+
+impl AgentReconciler for BoundedRunnerControl {
+    fn reconcile(&mut self, decision: &AdmissionDecision) -> Result<(), String> {
+        if decision.drain_requested {
+            self.executor
+                .apply(crate::PreparedWindowsSupervisorAction::RequestGracefulDrain)
+                .map_err(|error| error.to_string())?;
+        } else if decision.allow_new_work {
+            let start = self.executor.binding().prepared_start();
+            self.executor
+                .apply(start)
+                .map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 }
