@@ -105,7 +105,7 @@ impl RunnerSource for WindowsRunnerSource {
     fn collect(&self) -> RunnerLocalEvidence {
         let home_exists = self.runner_home.is_dir();
         let metadata_present = self.runner_home.join(".runner").is_file();
-        let process_names = read_process_names();
+        let process_names = crate::process_snapshot::executable_names().unwrap_or_default();
         let listener_present = process_names
             .iter()
             .any(|name| name.eq_ignore_ascii_case("Runner.Listener.exe"));
@@ -158,29 +158,6 @@ fn derive_link(evidence: &RunnerLocalEvidence) -> LinkSnapshot {
         state,
         reason_code: Some(static_reason(reason)),
     }
-}
-
-fn read_process_names() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let output = std::process::Command::new("tasklist")
-            .args(["/FO", "CSV", "/NH"])
-            .output();
-        output
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.split('"').nth(1))
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[cfg(not(windows))]
-    Vec::new()
 }
 
 fn static_reason(value: &'static str) -> ReasonCode {

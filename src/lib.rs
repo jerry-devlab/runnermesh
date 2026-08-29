@@ -9,6 +9,7 @@ mod ipc;
 mod model;
 mod policy;
 mod probe;
+mod process_snapshot;
 mod runner_observer;
 mod runtime;
 mod supervisor;

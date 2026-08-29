@@ -284,8 +284,8 @@ impl SteamAppIdSource for WindowsSteamAppIdSource {
     }
 }
 
-/// Windows read-only process source. It reads the process list through the
-/// built-in `tasklist` query and does not mutate process state.
+/// Windows read-only process source. It reads the process snapshot without
+/// creating a child process and does not mutate process state.
 #[derive(Default)]
 pub struct WindowsProcessSource;
 
@@ -293,19 +293,12 @@ impl ProcessSource for WindowsProcessSource {
     fn executable_names(&self) -> Result<Vec<String>, ProbeReadError> {
         #[cfg(windows)]
         {
-            let output = std::process::Command::new("tasklist")
-                .args(["/FO", "CSV", "/NH"])
-                .output()
-                .map_err(|_| ProbeReadError::Unavailable)?;
-            if !output.status.success() {
-                Err(ProbeReadError::Failed)
-            } else {
-                Ok(String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.split('"').nth(1))
-                    .map(str::to_owned)
-                    .collect())
-            }
+            crate::process_snapshot::executable_names().map_err(|error| match error {
+                crate::process_snapshot::ProcessSnapshotError::Unavailable => {
+                    ProbeReadError::Unavailable
+                }
+                crate::process_snapshot::ProcessSnapshotError::Failed => ProbeReadError::Failed,
+            })
         }
 
         #[cfg(not(windows))]
