@@ -142,12 +142,13 @@ impl VerifiedRunnerBinding {
     ) -> Result<Self, WindowsRunnerExecutorError> {
         let runner_home = canonical_directory(runner_home.into(), "runner home")?;
         let work_root = canonical_directory(work_root.into(), "work root")?;
-        let expected_work_root = runner_home.join("_work").canonicalize().map_err(|error| {
-            WindowsRunnerExecutorError::Io {
-                operation: "canonicalize expected work root",
-                message: error.to_string(),
-            }
-        })?;
+        let expected_work_root =
+            canonicalize_win32_path(&runner_home.join("_work")).map_err(|error| {
+                WindowsRunnerExecutorError::Io {
+                    operation: "canonicalize expected work root",
+                    message: error.to_string(),
+                }
+            })?;
         if work_root != expected_work_root {
             return Err(WindowsRunnerExecutorError::WorkRootMismatch);
         }
@@ -191,17 +192,20 @@ impl VerifiedRunnerBinding {
         if self
             .runner_home
             .canonicalize()
+            .map(win32_compatible_path)
             .map_err(io_error("canonicalize runner home"))?
             != self.runner_home
             || self
                 .work_root
                 .canonicalize()
+                .map(win32_compatible_path)
                 .map_err(io_error("canonicalize work root"))?
                 != self.work_root
             || self
                 .runner_home
                 .join("_work")
                 .canonicalize()
+                .map(win32_compatible_path)
                 .map_err(io_error("canonicalize expected work root"))?
                 != self.work_root
         {
@@ -514,8 +518,29 @@ fn canonical_directory(
             _ => WindowsRunnerExecutorError::BindingDrift,
         });
     }
-    path.canonicalize()
-        .map_err(io_error("canonicalize runner binding"))
+    canonicalize_win32_path(&path).map_err(io_error("canonicalize runner binding"))
+}
+
+/// Rust returns verbatim `\\?\` paths from `canonicalize` on Windows. They
+/// remain correct filesystem identities, but `cmd.exe` cannot use the
+/// verbatim form as a batch-file entrypoint. Keep the binding canonical while
+/// returning a normal Win32 spelling for the exact `run.cmd` launch contract.
+fn canonicalize_win32_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize().map(win32_compatible_path)
+}
+
+fn win32_compatible_path(path: PathBuf) -> PathBuf {
+    // `Path::strip_prefix` compares parsed Windows path components. A
+    // verbatim path's prefix is intentionally a distinct component, so use
+    // the documented textual spelling at this process-creation boundary.
+    let spelling = path.to_string_lossy();
+    if let Some(unc_tail) = spelling.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc_tail}"));
+    }
+    if let Some(local_tail) = spelling.strip_prefix(r"\\?\") {
+        return PathBuf::from(local_tail);
+    }
+    path
 }
 
 fn sha256_file(path: &Path) -> Result<[u8; 32], WindowsRunnerExecutorError> {
@@ -724,6 +749,35 @@ mod tests {
             WindowsRunnerExecutorError::WorkRootMismatch
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_batch_launch_uses_a_cmd_compatible_path() {
+        let (root, binding) = bound_runner();
+        let PreparedWindowsSupervisorAction::StartUserSession(launch) = binding.prepared_start()
+        else {
+            panic!("the verified binding must prepare one user-session launch");
+        };
+        assert!(launch.executable.ends_with("run.cmd"));
+        assert!(
+            !launch.executable.to_string_lossy().starts_with(r"\\?\"),
+            "cmd.exe must not receive a verbatim batch-file path"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn win32_compatible_path_removes_verbatim_prefixes() {
+        assert_eq!(
+            super::win32_compatible_path(std::path::PathBuf::from(r"\\?\C:\runner\run.cmd")),
+            std::path::PathBuf::from(r"C:\runner\run.cmd")
+        );
+        assert_eq!(
+            super::win32_compatible_path(std::path::PathBuf::from(
+                r"\\?\UNC\server\share\runner\run.cmd"
+            )),
+            std::path::PathBuf::from(r"\\server\share\runner\run.cmd")
+        );
     }
 
     fn bound_runner() -> (std::path::PathBuf, VerifiedRunnerBinding) {
