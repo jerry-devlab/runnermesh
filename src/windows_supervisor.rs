@@ -9,19 +9,13 @@
 use std::{
     collections::HashMap,
     fmt, fs,
-    os::windows::process::CommandExt,
+    os::{windows::fs::MetadataExt, windows::process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::{
-    Foundation::GetLastError,
-    System::{
-        Console::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT},
-        Threading::{CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP},
-    },
-};
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::SupervisorAction;
 
@@ -39,11 +33,11 @@ pub struct UserSessionLaunch {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreparedWindowsSupervisorAction {
     StartUserSession(UserSessionLaunch),
-    RequestGracefulDrain,
-    StopListener,
-    StopListenerAfterDrain,
-    RestartConnection,
-    AdoptVerifiedListener,
+    DeferDrainUntilRunOnceCompletion,
+    WaitForRunOnceCompletion,
+    RefuseIdleWithdrawal,
+    RestartAfterRunOnceExit,
+    WaitForVerifiedBoundRunnerExit,
 }
 
 /// Read-only readiness result for the concrete user-session adapter.
@@ -99,20 +93,24 @@ impl WindowsUserSessionSupervisorAdapter {
             SupervisorAction::Start => {
                 PreparedWindowsSupervisorAction::StartUserSession(UserSessionLaunch {
                     executable: self.entrypoint.clone(),
-                    arguments: Vec::new(),
+                    arguments: vec!["--once".to_owned()],
                     working_directory: self.runner_home.clone(),
                 })
             }
-            SupervisorAction::RequestDrain => PreparedWindowsSupervisorAction::RequestGracefulDrain,
-            SupervisorAction::Stop => PreparedWindowsSupervisorAction::StopListener,
+            SupervisorAction::RequestDrain => {
+                PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion
+            }
+            // There is no race-free local idle-listener withdrawal primitive.
+            // This preparation is an explicit safe refusal, never a signal.
+            SupervisorAction::Stop => PreparedWindowsSupervisorAction::RefuseIdleWithdrawal,
             SupervisorAction::StopAfterDrain => {
-                PreparedWindowsSupervisorAction::StopListenerAfterDrain
+                PreparedWindowsSupervisorAction::WaitForRunOnceCompletion
             }
             SupervisorAction::RestartConnection => {
-                PreparedWindowsSupervisorAction::RestartConnection
+                PreparedWindowsSupervisorAction::RestartAfterRunOnceExit
             }
             SupervisorAction::AdoptExistingListener => {
-                PreparedWindowsSupervisorAction::AdoptVerifiedListener
+                PreparedWindowsSupervisorAction::WaitForVerifiedBoundRunnerExit
             }
         })
     }
@@ -131,6 +129,12 @@ pub struct VerifiedRunnerBinding {
     work_root: PathBuf,
     entrypoint: PathBuf,
     registration_sha256: [u8; 32],
+    entrypoint_sha256: [u8; 32],
+    listener_image: PathBuf,
+    listener_image_sha256: [u8; 32],
+    worker_image: PathBuf,
+    worker_image_sha256: [u8; 32],
+    work_root_creation_time: u64,
 }
 
 impl VerifiedRunnerBinding {
@@ -153,18 +157,35 @@ impl VerifiedRunnerBinding {
             return Err(WindowsRunnerExecutorError::WorkRootMismatch);
         }
 
-        let entrypoint = runner_home.join("run.cmd");
-        if !entrypoint.is_file() {
-            return Err(WindowsRunnerExecutorError::EntrypointMissing);
-        }
+        let entrypoint = canonical_file(runner_home.join("run.cmd"), "runner entrypoint")?;
+        let listener_image = canonical_file(
+            runner_home.join("bin").join("Runner.Listener.exe"),
+            "runner listener image",
+        )?;
+        let worker_image = canonical_file(
+            runner_home.join("bin").join("Runner.Worker.exe"),
+            "runner worker image",
+        )?;
 
         let registration = runner_home.join(".runner");
         let registration_sha256 = sha256_file(&registration)?;
+        let entrypoint_sha256 = sha256_file(&entrypoint)?;
+        let listener_image_sha256 = sha256_file(&listener_image)?;
+        let worker_image_sha256 = sha256_file(&worker_image)?;
+        let work_root_creation_time = fs::metadata(&work_root)
+            .map_err(io_error("read bound work-root metadata"))?
+            .creation_time();
         Ok(Self {
             runner_home,
             work_root,
             entrypoint,
             registration_sha256,
+            entrypoint_sha256,
+            listener_image,
+            listener_image_sha256,
+            worker_image,
+            worker_image_sha256,
+            work_root_creation_time,
         })
     }
 
@@ -176,10 +197,18 @@ impl VerifiedRunnerBinding {
         &self.work_root
     }
 
+    fn listener_image(&self) -> &Path {
+        &self.listener_image
+    }
+
+    fn worker_image(&self) -> &Path {
+        &self.worker_image
+    }
+
     fn launch(&self) -> UserSessionLaunch {
         UserSessionLaunch {
             executable: self.entrypoint.clone(),
-            arguments: Vec::new(),
+            arguments: vec!["--once".to_owned()],
             working_directory: self.runner_home.clone(),
         }
     }
@@ -211,41 +240,80 @@ impl VerifiedRunnerBinding {
         {
             return Err(WindowsRunnerExecutorError::BindingDrift);
         }
-        if !self.entrypoint.is_file() {
-            return Err(WindowsRunnerExecutorError::EntrypointMissing);
+        if canonical_file(self.entrypoint.clone(), "runner entrypoint")? != self.entrypoint
+            || sha256_file(&self.entrypoint)? != self.entrypoint_sha256
+        {
+            return Err(WindowsRunnerExecutorError::EntrypointDrift);
         }
         if sha256_file(&self.runner_home.join(".runner"))? != self.registration_sha256 {
             return Err(WindowsRunnerExecutorError::RegistrationDrift);
+        }
+        if canonical_file(self.listener_image.clone(), "runner listener image")?
+            != self.listener_image
+            || canonical_file(self.worker_image.clone(), "runner worker image")?
+                != self.worker_image
+            || sha256_file(&self.listener_image)? != self.listener_image_sha256
+            || sha256_file(&self.worker_image)? != self.worker_image_sha256
+        {
+            return Err(WindowsRunnerExecutorError::RunnerImageDrift);
+        }
+        if fs::metadata(&self.work_root)
+            .map_err(io_error("read bound work-root metadata"))?
+            .creation_time()
+            != self.work_root_creation_time
+        {
+            return Err(WindowsRunnerExecutorError::WorkRootIdentityDrift);
         }
         Ok(())
     }
 }
 
-/// Result of one bounded executor operation. No result represents a forced
-/// process termination or a registration/configuration change.
+/// Result of one bounded executor operation. No result represents a signal,
+/// forced process termination, or a registration/configuration change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowsRunnerExecutionOutcome {
     Started { process_id: u32 },
-    GracefulDrainRequested,
+    DrainDeferredUntilRunOnceCompletion,
+    WaitingForRunOnceCompletion,
     NoopAlreadyRunning,
     NoopAlreadyExited,
-    RefusedActiveJobMayExist,
-    RefusedUnownedListenerAdoption,
+    RefusedActiveRunOnceMayExist,
+    IdleWithdrawalAtomicityUnproven,
+    SafeWaitForExactBoundRunner { process_id: u32 },
+    IgnoredUnrelatedRunner,
 }
 
-/// A deliberately small process seam. The native implementation can launch
-/// only the bound `run.cmd`, ask only its own process group for CTRL+BREAK,
-/// and observe only children that it launched.
+/// Read-only result for the exact runner-home process scope. A recognized
+/// runner at a different executable path remains outside this executor's
+/// authority. A missing executable path is intentionally ambiguous.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BoundRunnerObservation {
+    #[default]
+    Absent,
+    ExactBoundListener {
+        process_id: u32,
+    },
+    UnrelatedRunnerPresent,
+    AmbiguousExecutablePath,
+}
+
+/// A deliberately small process seam. The native implementation launches only
+/// the bound `run.cmd --once`, observes only its children, and can perform a
+/// read-only exact-image scan for safe wait-only reconstruction. It deliberately
+/// has no signal or termination operation.
 pub trait BoundedRunnerProcessPort {
     fn start(&mut self, launch: &UserSessionLaunch) -> Result<u32, WindowsRunnerExecutorError>;
-    fn request_graceful_drain(&mut self, process_id: u32)
-        -> Result<(), WindowsRunnerExecutorError>;
     fn has_exited(&mut self, process_id: u32) -> Result<bool, WindowsRunnerExecutorError>;
+    fn observe_exact_bound_runner(
+        &mut self,
+        binding: &VerifiedRunnerBinding,
+    ) -> Result<BoundRunnerObservation, WindowsRunnerExecutorError>;
 }
 
 /// Bounded executor for one user-session official runner. It never discovers
 /// runner homes, touches services, kills a process, edits configuration, or
-/// adopts an unowned listener.
+/// takes control of an externally observed process. Restart reconstruction is
+/// wait-only until the exact observed process exits naturally.
 pub struct WindowsOfficialRunnerExecutor<P = NativeRunnerProcessPort> {
     binding: VerifiedRunnerBinding,
     port: P,
@@ -255,7 +323,14 @@ pub struct WindowsOfficialRunnerExecutor<P = NativeRunnerProcessPort> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveRunner {
     process_id: u32,
-    graceful_drain_requested: bool,
+    drain_pending: bool,
+    tracking: ActiveRunnerTracking,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveRunnerTracking {
+    OwnedChild,
+    WaitOnlyExactBound,
 }
 
 impl WindowsOfficialRunnerExecutor<NativeRunnerProcessPort> {
@@ -284,6 +359,20 @@ where
         &mut self.port
     }
 
+    /// Performs restart reconstruction without adopting or signalling an
+    /// existing runner. Exact image evidence may cause this executor to wait;
+    /// ambiguous evidence refuses the operation and unrelated runners are
+    /// ignored.
+    pub fn reconstruct_safely(
+        &mut self,
+    ) -> Result<WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError> {
+        self.binding.revalidate()?;
+        if self.active_runner_is_live()? {
+            return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyRunning);
+        }
+        self.observe_external_runner()
+    }
+
     /// Applies only a previously prepared action that exactly matches this
     /// binding. The executor rejects arbitrary `UserSessionLaunch` values.
     pub fn apply(
@@ -298,13 +387,17 @@ where
                 }
                 self.start()
             }
-            PreparedWindowsSupervisorAction::RequestGracefulDrain
-            | PreparedWindowsSupervisorAction::StopListener => self.request_graceful_drain(),
-            PreparedWindowsSupervisorAction::StopListenerAfterDrain => self.stop_after_drain(),
-            PreparedWindowsSupervisorAction::RestartConnection => self.restart_after_exit(),
-            PreparedWindowsSupervisorAction::AdoptVerifiedListener => {
-                Ok(WindowsRunnerExecutionOutcome::RefusedUnownedListenerAdoption)
+            PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion => {
+                self.defer_drain_until_run_once_completion()
             }
+            PreparedWindowsSupervisorAction::WaitForRunOnceCompletion
+            | PreparedWindowsSupervisorAction::WaitForVerifiedBoundRunnerExit => {
+                self.wait_for_run_once_completion()
+            }
+            PreparedWindowsSupervisorAction::RefuseIdleWithdrawal => {
+                Ok(WindowsRunnerExecutionOutcome::IdleWithdrawalAtomicityUnproven)
+            }
+            PreparedWindowsSupervisorAction::RestartAfterRunOnceExit => self.restart_after_exit(),
         }
     }
 
@@ -312,53 +405,57 @@ where
         if self.active_runner_is_live()? {
             return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyRunning);
         }
+        match self.observe_external_runner()? {
+            WindowsRunnerExecutionOutcome::NoopAlreadyExited
+            | WindowsRunnerExecutionOutcome::IgnoredUnrelatedRunner => {}
+            outcome => return Ok(outcome),
+        }
         let process_id = self.port.start(&self.binding.launch())?;
         self.active = Some(ActiveRunner {
             process_id,
-            graceful_drain_requested: false,
+            drain_pending: false,
+            tracking: ActiveRunnerTracking::OwnedChild,
         });
         Ok(WindowsRunnerExecutionOutcome::Started { process_id })
     }
 
-    fn request_graceful_drain(
+    fn defer_drain_until_run_once_completion(
         &mut self,
     ) -> Result<WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError> {
-        let Some(active) = self.active else {
-            return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited);
-        };
-        if self.port.has_exited(active.process_id)? {
-            self.active = None;
+        if self.active.is_none() {
             return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited);
         }
-        if active.graceful_drain_requested {
-            return Ok(WindowsRunnerExecutionOutcome::GracefulDrainRequested);
+        if !self.active_runner_is_live()? {
+            return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited);
         }
-        self.port.request_graceful_drain(active.process_id)?;
+        let active = self.active.expect("a live runner remains tracked");
+        if active.drain_pending {
+            return Ok(WindowsRunnerExecutionOutcome::DrainDeferredUntilRunOnceCompletion);
+        }
         self.active = Some(ActiveRunner {
-            graceful_drain_requested: true,
+            drain_pending: true,
             ..active
         });
-        Ok(WindowsRunnerExecutionOutcome::GracefulDrainRequested)
+        Ok(WindowsRunnerExecutionOutcome::DrainDeferredUntilRunOnceCompletion)
     }
 
-    fn stop_after_drain(
+    fn wait_for_run_once_completion(
         &mut self,
     ) -> Result<WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError> {
-        let Some(active) = self.active else {
-            return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited);
-        };
-        if self.port.has_exited(active.process_id)? {
-            self.active = None;
+        if self.active.is_none() {
             return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited);
         }
-        Ok(WindowsRunnerExecutionOutcome::RefusedActiveJobMayExist)
+        if !self.active_runner_is_live()? {
+            return Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited);
+        }
+        Ok(WindowsRunnerExecutionOutcome::WaitingForRunOnceCompletion)
     }
 
     fn restart_after_exit(
         &mut self,
     ) -> Result<WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError> {
         if self.active_runner_is_live()? {
-            return Ok(WindowsRunnerExecutionOutcome::RefusedActiveJobMayExist);
+            return Ok(WindowsRunnerExecutionOutcome::RefusedActiveRunOnceMayExist);
         }
         self.start()
     }
@@ -367,17 +464,58 @@ where
         let Some(active) = self.active else {
             return Ok(false);
         };
-        if self.port.has_exited(active.process_id)? {
+        let exited = match active.tracking {
+            ActiveRunnerTracking::OwnedChild => self.port.has_exited(active.process_id)?,
+            ActiveRunnerTracking::WaitOnlyExactBound => {
+                match self.port.observe_exact_bound_runner(&self.binding)? {
+                    BoundRunnerObservation::Absent
+                    | BoundRunnerObservation::UnrelatedRunnerPresent => true,
+                    BoundRunnerObservation::ExactBoundListener { process_id }
+                        if process_id == active.process_id =>
+                    {
+                        false
+                    }
+                    BoundRunnerObservation::ExactBoundListener { .. }
+                    | BoundRunnerObservation::AmbiguousExecutablePath => {
+                        return Err(WindowsRunnerExecutorError::AmbiguousExistingRunner)
+                    }
+                }
+            }
+        };
+        if exited {
             self.active = None;
             Ok(false)
         } else {
             Ok(true)
         }
     }
+
+    fn observe_external_runner(
+        &mut self,
+    ) -> Result<WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError> {
+        match self.port.observe_exact_bound_runner(&self.binding)? {
+            BoundRunnerObservation::Absent => Ok(WindowsRunnerExecutionOutcome::NoopAlreadyExited),
+            BoundRunnerObservation::UnrelatedRunnerPresent => {
+                Ok(WindowsRunnerExecutionOutcome::IgnoredUnrelatedRunner)
+            }
+            BoundRunnerObservation::AmbiguousExecutablePath => {
+                Err(WindowsRunnerExecutorError::AmbiguousExistingRunner)
+            }
+            BoundRunnerObservation::ExactBoundListener { process_id } => {
+                self.active = Some(ActiveRunner {
+                    process_id,
+                    drain_pending: false,
+                    tracking: ActiveRunnerTracking::WaitOnlyExactBound,
+                });
+                Ok(WindowsRunnerExecutionOutcome::SafeWaitForExactBoundRunner { process_id })
+            }
+        }
+    }
 }
 
-/// Native port used by the ordinary user-session executor. The process map is
-/// intentionally limited to children that this instance launched.
+/// Native port used by the ordinary user-session executor. The child map is
+/// intentionally limited to processes that this instance launched. Independent
+/// exact-image observation is read-only and never grants control authority.
 #[derive(Default)]
 pub struct NativeRunnerProcessPort {
     children: HashMap<u32, std::process::Child>,
@@ -388,11 +526,12 @@ impl BoundedRunnerProcessPort for NativeRunnerProcessPort {
         let child = Command::new("cmd.exe")
             .args(["/d", "/s", "/c"])
             .arg(&launch.executable)
+            .args(&launch.arguments)
             .current_dir(&launch.working_directory)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(io_error("start exact runner entrypoint"))?;
         let process_id = child.id();
@@ -400,40 +539,6 @@ impl BoundedRunnerProcessPort for NativeRunnerProcessPort {
             return Err(WindowsRunnerExecutorError::UnexpectedProcessCollision);
         }
         Ok(process_id)
-    }
-
-    fn request_graceful_drain(
-        &mut self,
-        process_id: u32,
-    ) -> Result<(), WindowsRunnerExecutorError> {
-        if !self.children.contains_key(&process_id) {
-            return Err(WindowsRunnerExecutorError::UnownedProcess);
-        }
-        // CTRL+BREAK is the official runner's cooperative console shutdown
-        // signal. This is deliberately not TerminateProcess/kill.
-        // The Agent is a Windows-subsystem executable and normally owns no
-        // console. Attach only to the private console of its exact child so
-        // CTRL+BREAK cannot reach an unrelated process group.
-        if unsafe { AttachConsole(process_id) } == 0 {
-            return Err(WindowsRunnerExecutorError::ConsoleAttachFailed(unsafe {
-                GetLastError()
-            }));
-        }
-        let signalled = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process_id) };
-        let signal_error = if signalled == 0 {
-            Some(unsafe { GetLastError() })
-        } else {
-            None
-        };
-        if unsafe { FreeConsole() } == 0 {
-            return Err(WindowsRunnerExecutorError::ConsoleDetachFailed(unsafe {
-                GetLastError()
-            }));
-        }
-        if let Some(error) = signal_error {
-            return Err(WindowsRunnerExecutorError::ConsoleSignalFailed(error));
-        }
-        Ok(())
     }
 
     fn has_exited(&mut self, process_id: u32) -> Result<bool, WindowsRunnerExecutorError> {
@@ -449,6 +554,60 @@ impl BoundedRunnerProcessPort for NativeRunnerProcessPort {
         }
         Ok(exited)
     }
+
+    fn observe_exact_bound_runner(
+        &mut self,
+        binding: &VerifiedRunnerBinding,
+    ) -> Result<BoundRunnerObservation, WindowsRunnerExecutorError> {
+        let images = crate::process_snapshot::executable_images()
+            .map_err(|_| WindowsRunnerExecutorError::ProcessSnapshotUnavailable)?;
+        let mut exact_listener = Vec::new();
+        let mut exact_worker = Vec::new();
+        let mut unrelated = false;
+        for image in images.into_iter().filter(|image| {
+            image
+                .executable_name
+                .eq_ignore_ascii_case("Runner.Listener.exe")
+                || image
+                    .executable_name
+                    .eq_ignore_ascii_case("Runner.Worker.exe")
+        }) {
+            let Some(path) = image.executable_path else {
+                return Ok(BoundRunnerObservation::AmbiguousExecutablePath);
+            };
+            let canonical = canonicalize_win32_path(&path)
+                .map_err(io_error("canonicalize runner process image"))?;
+            if image
+                .executable_name
+                .eq_ignore_ascii_case("Runner.Listener.exe")
+                && canonical == binding.listener_image()
+            {
+                exact_listener.push(image.process_id);
+            } else if image
+                .executable_name
+                .eq_ignore_ascii_case("Runner.Worker.exe")
+                && canonical == binding.worker_image()
+            {
+                exact_worker.push(image.process_id);
+            } else {
+                unrelated = true;
+            }
+        }
+        if exact_listener.len() > 1
+            || exact_worker.len() > 1
+            || exact_listener.is_empty() && !exact_worker.is_empty()
+        {
+            return Ok(BoundRunnerObservation::AmbiguousExecutablePath);
+        }
+        if let Some(process_id) = exact_listener.into_iter().next() {
+            return Ok(BoundRunnerObservation::ExactBoundListener { process_id });
+        }
+        if unrelated {
+            Ok(BoundRunnerObservation::UnrelatedRunnerPresent)
+        } else {
+            Ok(BoundRunnerObservation::Absent)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -457,14 +616,17 @@ pub enum WindowsRunnerExecutorError {
     WorkRootMissing,
     WorkRootMismatch,
     EntrypointMissing,
+    EntrypointDrift,
     RegistrationDrift,
+    RunnerImageMissing,
+    RunnerImageDrift,
+    WorkRootIdentityDrift,
     BindingDrift,
     LaunchBindingMismatch,
     UnexpectedProcessCollision,
     UnownedProcess,
-    ConsoleAttachFailed(u32),
-    ConsoleDetachFailed(u32),
-    ConsoleSignalFailed(u32),
+    ProcessSnapshotUnavailable,
+    AmbiguousExistingRunner,
     Io {
         operation: &'static str,
         message: String,
@@ -480,7 +642,13 @@ impl fmt::Display for WindowsRunnerExecutorError {
                 write!(formatter, "work root is not the bound runner _work root")
             }
             Self::EntrypointMissing => write!(formatter, "runner run.cmd entrypoint is missing"),
+            Self::EntrypointDrift => write!(formatter, "runner run.cmd fingerprint changed"),
             Self::RegistrationDrift => write!(formatter, "runner registration fingerprint changed"),
+            Self::RunnerImageMissing => write!(formatter, "runner executable image is missing"),
+            Self::RunnerImageDrift => {
+                write!(formatter, "runner executable image fingerprint changed")
+            }
+            Self::WorkRootIdentityDrift => write!(formatter, "runner work-root identity changed"),
             Self::BindingDrift => write!(formatter, "runner home or work root binding changed"),
             Self::LaunchBindingMismatch => {
                 write!(formatter, "prepared launch does not match the bound runner")
@@ -491,14 +659,11 @@ impl fmt::Display for WindowsRunnerExecutorError {
             Self::UnownedProcess => {
                 write!(formatter, "runner process is not owned by this executor")
             }
-            Self::ConsoleAttachFailed(error) => {
-                write!(formatter, "runner console attach failed: {error}")
+            Self::ProcessSnapshotUnavailable => {
+                write!(formatter, "runner process snapshot unavailable")
             }
-            Self::ConsoleDetachFailed(error) => {
-                write!(formatter, "runner console detach failed: {error}")
-            }
-            Self::ConsoleSignalFailed(error) => {
-                write!(formatter, "CTRL+BREAK delivery failed: {error}")
+            Self::AmbiguousExistingRunner => {
+                write!(formatter, "exact runner process ownership is ambiguous")
             }
             Self::Io { operation, message } => write!(formatter, "{operation}: {message}"),
         }
@@ -519,6 +684,22 @@ fn canonical_directory(
         });
     }
     canonicalize_win32_path(&path).map_err(io_error("canonicalize runner binding"))
+}
+
+fn canonical_file(
+    path: PathBuf,
+    role: &'static str,
+) -> Result<PathBuf, WindowsRunnerExecutorError> {
+    if !path.is_file() {
+        return Err(match role {
+            "runner entrypoint" => WindowsRunnerExecutorError::EntrypointMissing,
+            "runner listener image" | "runner worker image" => {
+                WindowsRunnerExecutorError::RunnerImageMissing
+            }
+            _ => WindowsRunnerExecutorError::BindingDrift,
+        });
+    }
+    canonicalize_win32_path(&path).map_err(io_error("canonicalize runner binding file"))
 }
 
 /// Rust returns verbatim `\\?\` paths from `canonicalize` on Windows. They
@@ -558,7 +739,7 @@ fn io_error(operation: &'static str) -> impl FnOnce(std::io::Error) -> WindowsRu
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashSet,
         fs,
         process::Command,
         thread,
@@ -566,9 +747,9 @@ mod tests {
     };
 
     use super::{
-        BoundedRunnerProcessPort, PreparedWindowsSupervisorAction, UserSessionLaunch,
-        VerifiedRunnerBinding, WindowsOfficialRunnerExecutor, WindowsRunnerExecutionOutcome,
-        WindowsRunnerExecutorError, WindowsSupervisorReadiness,
+        BoundRunnerObservation, BoundedRunnerProcessPort, PreparedWindowsSupervisorAction,
+        UserSessionLaunch, VerifiedRunnerBinding, WindowsOfficialRunnerExecutor,
+        WindowsRunnerExecutionOutcome, WindowsRunnerExecutorError, WindowsSupervisorReadiness,
         WindowsUserSessionSupervisorAdapter,
     };
     use crate::SupervisorAction;
@@ -581,6 +762,17 @@ mod tests {
         let root = std::env::temp_dir().join(format!("runnermesh-supervisor-test-{nonce}"));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("run.cmd"), "@echo off\r\nexit /b 0\r\n").unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(
+            root.join("bin").join("Runner.Listener.exe"),
+            "synthetic-listener",
+        )
+        .unwrap();
+        fs::write(
+            root.join("bin").join("Runner.Worker.exe"),
+            "synthetic-worker",
+        )
+        .unwrap();
         root
     }
 
@@ -595,33 +787,33 @@ mod tests {
             start,
             PreparedWindowsSupervisorAction::StartUserSession(super::UserSessionLaunch {
                 executable: root.join("run.cmd"),
-                arguments: Vec::new(),
+                arguments: vec!["--once".to_owned()],
                 working_directory: root.clone(),
             })
         );
         assert_eq!(
             adapter.prepare(SupervisorAction::RequestDrain).unwrap(),
-            PreparedWindowsSupervisorAction::RequestGracefulDrain
+            PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion
         );
         assert_eq!(
             adapter.prepare(SupervisorAction::StopAfterDrain).unwrap(),
-            PreparedWindowsSupervisorAction::StopListenerAfterDrain
+            PreparedWindowsSupervisorAction::WaitForRunOnceCompletion
         );
         assert_eq!(
             adapter.prepare(SupervisorAction::Stop).unwrap(),
-            PreparedWindowsSupervisorAction::StopListener
+            PreparedWindowsSupervisorAction::RefuseIdleWithdrawal
         );
         assert_eq!(
             adapter
                 .prepare(SupervisorAction::RestartConnection)
                 .unwrap(),
-            PreparedWindowsSupervisorAction::RestartConnection
+            PreparedWindowsSupervisorAction::RestartAfterRunOnceExit
         );
         assert_eq!(
             adapter
                 .prepare(SupervisorAction::AdoptExistingListener)
                 .unwrap(),
-            PreparedWindowsSupervisorAction::AdoptVerifiedListener
+            PreparedWindowsSupervisorAction::WaitForVerifiedBoundRunnerExit
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -647,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_executor_only_launches_the_frozen_runner_and_drains_cooperatively() {
+    fn bounded_executor_launches_run_once_and_defers_busy_drain_without_signals() {
         let (root, binding) = bound_runner();
         let adapter = WindowsUserSessionSupervisorAdapter::for_runner_home(binding.runner_home());
         let start = adapter.prepare(SupervisorAction::Start).unwrap();
@@ -661,34 +853,28 @@ mod tests {
         assert_eq!(executor.port_mut().starts.len(), 1);
         assert_eq!(
             executor
-                .apply(PreparedWindowsSupervisorAction::RequestGracefulDrain)
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
                 .unwrap(),
-            WindowsRunnerExecutionOutcome::GracefulDrainRequested
+            WindowsRunnerExecutionOutcome::DrainDeferredUntilRunOnceCompletion
         );
-        assert_eq!(executor.port_mut().graceful_breaks, vec![process_id]);
         assert_eq!(
             executor
-                .apply(PreparedWindowsSupervisorAction::RequestGracefulDrain)
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
                 .unwrap(),
-            WindowsRunnerExecutionOutcome::GracefulDrainRequested
+            WindowsRunnerExecutionOutcome::DrainDeferredUntilRunOnceCompletion
         );
-        assert_eq!(executor.port_mut().graceful_breaks, vec![process_id]);
         assert_eq!(
             executor
-                .apply(PreparedWindowsSupervisorAction::StopListenerAfterDrain)
+                .apply(PreparedWindowsSupervisorAction::WaitForRunOnceCompletion)
                 .unwrap(),
-            WindowsRunnerExecutionOutcome::RefusedActiveJobMayExist
+            WindowsRunnerExecutionOutcome::WaitingForRunOnceCompletion
         );
-        assert!(executor
-            .port_mut()
-            .graceful_breaks
-            .iter()
-            .all(|id| *id == process_id));
+        assert_eq!(executor.port_mut().starts[0].arguments, vec!["--once"]);
 
         executor.port_mut().exited.insert(process_id);
         assert_eq!(
             executor
-                .apply(PreparedWindowsSupervisorAction::StopListenerAfterDrain)
+                .apply(PreparedWindowsSupervisorAction::WaitForRunOnceCompletion)
                 .unwrap(),
             WindowsRunnerExecutionOutcome::NoopAlreadyExited
         );
@@ -696,23 +882,148 @@ mod tests {
     }
 
     #[test]
-    fn bounded_executor_refuses_binding_drift_and_unowned_adoption() {
+    fn completed_run_once_drain_does_not_relaunch_until_full_requests_one_replacement() {
+        let (root, binding) = bound_runner();
+        let mut executor =
+            WindowsOfficialRunnerExecutor::with_port(binding, FakeRunnerPort::default());
+        let start = executor.binding().prepared_start();
+        let WindowsRunnerExecutionOutcome::Started { process_id } = executor.apply(start).unwrap()
+        else {
+            panic!("expected the first exact run-once launch");
+        };
+        assert_eq!(
+            executor
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
+                .unwrap(),
+            WindowsRunnerExecutionOutcome::DrainDeferredUntilRunOnceCompletion
+        );
+        executor.port_mut().exited.insert(process_id);
+        assert_eq!(
+            executor
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
+                .unwrap(),
+            WindowsRunnerExecutionOutcome::NoopAlreadyExited,
+            "a DRAINED target leaves the naturally completed lease offline"
+        );
+        assert_eq!(executor.port_mut().starts.len(), 1);
+
+        let full = executor.binding().prepared_start();
+        assert!(matches!(
+            executor.apply(full).unwrap(),
+            WindowsRunnerExecutionOutcome::Started { .. }
+        ));
+        assert_eq!(executor.port_mut().starts.len(), 2);
+        let full_again = executor.binding().prepared_start();
+        assert_eq!(
+            executor.apply(full_again).unwrap(),
+            WindowsRunnerExecutionOutcome::NoopAlreadyRunning,
+            "a second admission cannot dispatch a second job in the same lease"
+        );
+        assert_eq!(executor.port_mut().starts.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_reconstruction_waits_for_exact_bound_runner_without_adopting_or_signalling() {
+        let (root, binding) = bound_runner();
+        let port = FakeRunnerPort {
+            observed: BoundRunnerObservation::ExactBoundListener { process_id: 44 },
+            ..FakeRunnerPort::default()
+        };
+        let mut executor = WindowsOfficialRunnerExecutor::with_port(binding, port);
+        assert_eq!(
+            executor.reconstruct_safely().unwrap(),
+            WindowsRunnerExecutionOutcome::SafeWaitForExactBoundRunner { process_id: 44 }
+        );
+        assert_eq!(
+            executor
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
+                .unwrap(),
+            WindowsRunnerExecutionOutcome::DrainDeferredUntilRunOnceCompletion
+        );
+        assert!(executor.port_mut().starts.is_empty());
+        executor.port_mut().observed = BoundRunnerObservation::Absent;
+        assert_eq!(
+            executor
+                .apply(PreparedWindowsSupervisorAction::WaitForVerifiedBoundRunnerExit)
+                .unwrap(),
+            WindowsRunnerExecutionOutcome::NoopAlreadyExited
+        );
+        let start = executor.binding().prepared_start();
+        assert!(matches!(
+            executor.apply(start).unwrap(),
+            WindowsRunnerExecutionOutcome::Started { .. }
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrelated_same_name_runner_does_not_block_the_exact_bound_launch() {
+        let (root, binding) = bound_runner();
+        let port = FakeRunnerPort {
+            observed: BoundRunnerObservation::UnrelatedRunnerPresent,
+            ..FakeRunnerPort::default()
+        };
+        let mut executor = WindowsOfficialRunnerExecutor::with_port(binding, port);
+        assert_eq!(
+            executor.reconstruct_safely().unwrap(),
+            WindowsRunnerExecutionOutcome::IgnoredUnrelatedRunner
+        );
+        let start = executor.binding().prepared_start();
+        assert!(matches!(
+            executor.apply(start).unwrap(),
+            WindowsRunnerExecutionOutcome::Started { .. }
+        ));
+        assert_eq!(executor.port_mut().starts.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_runner_image_path_refuses_without_launching() {
+        let (root, binding) = bound_runner();
+        let port = FakeRunnerPort {
+            observed: BoundRunnerObservation::AmbiguousExecutablePath,
+            ..FakeRunnerPort::default()
+        };
+        let mut executor = WindowsOfficialRunnerExecutor::with_port(binding, port);
+        let start = executor.binding().prepared_start();
+        assert_eq!(
+            executor.apply(start).unwrap_err(),
+            WindowsRunnerExecutorError::AmbiguousExistingRunner
+        );
+        assert!(executor.port_mut().starts.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounded_executor_refuses_registration_drift_before_any_control_or_reconstruction() {
         let (root, binding) = bound_runner();
         let mut executor =
             WindowsOfficialRunnerExecutor::with_port(binding, FakeRunnerPort::default());
 
-        assert_eq!(
-            executor
-                .apply(PreparedWindowsSupervisorAction::AdoptVerifiedListener)
-                .unwrap(),
-            WindowsRunnerExecutionOutcome::RefusedUnownedListenerAdoption
-        );
         fs::write(root.join(".runner"), "changed-registration").unwrap();
         assert_eq!(
             executor
-                .apply(PreparedWindowsSupervisorAction::RequestGracefulDrain)
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
                 .unwrap_err(),
             WindowsRunnerExecutorError::RegistrationDrift
+        );
+        assert!(executor.port_mut().starts.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounded_executor_refuses_recreated_work_root_identity() {
+        let (root, binding) = bound_runner();
+        fs::rename(root.join("_work"), root.join("old-work")).unwrap();
+        fs::create_dir(root.join("_work")).unwrap();
+        let mut executor =
+            WindowsOfficialRunnerExecutor::with_port(binding, FakeRunnerPort::default());
+        assert_eq!(
+            executor
+                .apply(PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
+                .unwrap_err(),
+            WindowsRunnerExecutorError::WorkRootIdentityDrift
         );
         assert!(executor.port_mut().starts.is_empty());
         fs::remove_dir_all(root).unwrap();
@@ -725,7 +1036,7 @@ mod tests {
             WindowsOfficialRunnerExecutor::with_port(binding, FakeRunnerPort::default());
         let foreign = UserSessionLaunch {
             executable: root.join("foreign-run.cmd"),
-            arguments: Vec::new(),
+            arguments: vec!["--once".to_owned()],
             working_directory: root.clone(),
         };
         assert_eq!(
@@ -759,6 +1070,7 @@ mod tests {
             panic!("the verified binding must prepare one user-session launch");
         };
         assert!(launch.executable.ends_with("run.cmd"));
+        assert_eq!(launch.arguments, vec!["--once"]);
         assert!(
             !launch.executable.to_string_lossy().starts_with(r"\\?\"),
             "cmd.exe must not receive a verbatim batch-file path"
@@ -780,6 +1092,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn busy_drain_api_has_no_console_control_signal() {
+        let forbidden = ["CTRL", "+", "BREAK"].concat();
+        assert!(
+            !include_str!("windows_supervisor.rs").contains(&forbidden),
+            "the bounded executor must not reintroduce a console-signal drain API"
+        );
+    }
+
     fn bound_runner() -> (std::path::PathBuf, VerifiedRunnerBinding) {
         let root = sandbox_runner_home();
         fs::create_dir_all(root.join("_work")).unwrap();
@@ -792,9 +1113,9 @@ mod tests {
     struct FakeRunnerPort {
         next_process_id: u32,
         starts: Vec<UserSessionLaunch>,
-        graceful_breaks: Vec<u32>,
         exited: HashSet<u32>,
-        active: HashMap<u32, UserSessionLaunch>,
+        active: HashSet<u32>,
+        observed: BoundRunnerObservation,
     }
 
     impl BoundedRunnerProcessPort for FakeRunnerPort {
@@ -802,26 +1123,22 @@ mod tests {
             self.next_process_id += 1;
             let process_id = self.next_process_id;
             self.starts.push(launch.clone());
-            self.active.insert(process_id, launch.clone());
+            self.active.insert(process_id);
             Ok(process_id)
         }
 
-        fn request_graceful_drain(
-            &mut self,
-            process_id: u32,
-        ) -> Result<(), WindowsRunnerExecutorError> {
-            if !self.active.contains_key(&process_id) {
-                return Err(WindowsRunnerExecutorError::UnownedProcess);
-            }
-            self.graceful_breaks.push(process_id);
-            Ok(())
-        }
-
         fn has_exited(&mut self, process_id: u32) -> Result<bool, WindowsRunnerExecutorError> {
-            if !self.active.contains_key(&process_id) {
+            if !self.active.contains(&process_id) {
                 return Err(WindowsRunnerExecutorError::UnownedProcess);
             }
             Ok(self.exited.contains(&process_id))
+        }
+
+        fn observe_exact_bound_runner(
+            &mut self,
+            _binding: &VerifiedRunnerBinding,
+        ) -> Result<BoundRunnerObservation, WindowsRunnerExecutorError> {
+            Ok(self.observed)
         }
     }
 }

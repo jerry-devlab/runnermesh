@@ -4,7 +4,10 @@ Human Gate: **H1 — explicit Owner authorization required before mutation**.
 
 ## Mission
 
-Qualify real official GitHub Actions runner behavior needed by v0.1 supervision and graceful drain in a trusted controlled lane.
+Qualify real official GitHub Actions runner behavior needed by v0.1 supervision
+in a trusted controlled lane. The bounded executor uses the run-once job-lease
+model in [ADR 0004](../docs/adr/0004-g11-run-once-job-lease.md); it does not
+claim a signal-based drain or race-free idle withdrawal.
 
 ## Prove
 
@@ -12,8 +15,8 @@ Qualify real official GitHub Actions runner behavior needed by v0.1 supervision 
 - connected/listening evidence;
 - trusted job accepted;
 - Busy observed;
-- drain requested;
-- no new capacity admitted after drain intent;
+- Busy drain requested without signalling the active Listener or Worker;
+- the active run-once job completes and its Listener exits naturally;
 - active job not destructively killed;
 - job completes;
 - Listener reaches desired drained/offline state;
@@ -26,7 +29,9 @@ Qualify real official GitHub Actions runner behavior needed by v0.1 supervision 
 
 No untrusted public PR code. No weakening runner/Organization access. No silent registration change. No global Git `safe.directory` workaround. Capture prestate and rollback before mutation.
 
-If the intended persistent-runner drain mechanism cannot be proven, disposition is `UNPROVEN`/`FAIL`; revise the implementation/ADR instead of manufacturing PASS.
+`CTRL_BREAK_BUSY_DRAIN=REJECTED`. If future idle-withdrawal atomicity cannot be
+proven, its disposition is `UNPROVEN`; do not manufacture a pass or weaken the
+frozen product invariant.
 
 ## Risk vector
 

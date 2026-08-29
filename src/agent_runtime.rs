@@ -111,7 +111,7 @@ pub fn run_g11_qualified_agent(
         development_root,
         Some(observed_runner_home),
         process_probe_names,
-        RuntimeReconciler::Bounded(BoundedRunnerControl::new(binding)),
+        RuntimeReconciler::Bounded(Box::new(BoundedRunnerControl::new(binding))),
     )
 }
 
@@ -808,7 +808,7 @@ impl AgentReconciler for NoRunnerControl {
 
 enum RuntimeReconciler {
     NoRunnerControl(NoRunnerControl),
-    Bounded(BoundedRunnerControl),
+    Bounded(Box<BoundedRunnerControl>),
 }
 
 impl AgentReconciler for RuntimeReconciler {
@@ -820,9 +820,10 @@ impl AgentReconciler for RuntimeReconciler {
     }
 }
 
-/// G11-only policy bridge. A drain decision emits a cooperative CTRL+BREAK to
-/// the exact owned runner child; it never force-terminates a Worker. A
-/// capacity-allowing decision starts only the frozen `run.cmd` binding.
+/// G11-only policy bridge. A drain decision records `DrainPending` and waits
+/// for the active run-once job to finish naturally. It never signals or
+/// force-terminates a Listener or Worker. A capacity-allowing decision starts
+/// only the frozen `run.cmd --once` binding.
 struct BoundedRunnerControl {
     executor: WindowsOfficialRunnerExecutor,
 }
@@ -839,7 +840,7 @@ impl AgentReconciler for BoundedRunnerControl {
     fn reconcile(&mut self, decision: &AdmissionDecision) -> Result<(), String> {
         if decision.drain_requested {
             self.executor
-                .apply(crate::PreparedWindowsSupervisorAction::RequestGracefulDrain)
+                .apply(crate::PreparedWindowsSupervisorAction::DeferDrainUntilRunOnceCompletion)
                 .map_err(|error| error.to_string())?;
         } else if decision.allow_new_work {
             let start = self.executor.binding().prepared_start();
