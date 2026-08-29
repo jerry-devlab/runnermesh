@@ -1,6 +1,7 @@
 //! Read-only executable-name and exact-image enumeration for local process
 //! observation. Neither path ever launches a child process or invokes a shell.
 
+#[cfg(windows)]
 use std::path::PathBuf;
 
 /// Deliberately small failure surface for consumers that must not expose OS
@@ -15,6 +16,7 @@ pub(crate) enum ProcessSnapshotError {
 /// One image observed in a point-in-time local process snapshot. `None` is an
 /// intentional evidence gap: consumers that need ownership proof must refuse
 /// rather than infer a path from an executable name.
+#[cfg(windows)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessImage {
     pub process_id: u32,
