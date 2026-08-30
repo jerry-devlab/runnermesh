@@ -105,7 +105,6 @@ Draft PR #21 contains the option study, formal model, and PR #17 salvage map.
 Draft PR #22 contains only the mechanism-neutral readiness/restore prototype.
 Neither draft is accepted architecture or product code, and neither authorizes
 real-host mutation.
-
 ## Update rule
 
 After every accepted Goal/PR merge or material blocker change, update only decision-relevant rows. Do not rewrite historical accepted rows merely for formatting. Private evidence may be referenced generically (for example, `private H1 receipt`) but never copied into this public ledger.
