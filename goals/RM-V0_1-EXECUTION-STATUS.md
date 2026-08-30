@@ -13,6 +13,8 @@ Last roadmap reset: 2026-08-30.
 - `REDESIGN` — product goal remains; mechanism must be reselected/reworked.
 - `SALVAGE` — useful draft implementation exists but is not accepted as-is.
 - `READY` — prerequisites are satisfied for the next defined gate.
+- `PROTOTYPE` — source-only framework or model exists in a draft, but its
+  prerequisite Goal is not accepted and it is not product/readiness acceptance.
 - `OWNER_ACTION_PENDING` — autonomous source/docs work is accepted, but a separate
   repository, trust, privilege, or production setting still requires the Owner.
 - `BLOCKED` — an external/trust/precondition boundary prevents progress.
@@ -41,9 +43,9 @@ Last roadmap reset: 2026-08-30.
 | PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
 | GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
-| G11R-A Admission architecture | TODO | N/A | N/A | choose/define linearization point without preselecting `--once` | P0 may remain independent; no real-host mutation required for design |
-| G11R-B Lifecycle implementation | TODO | N/A | N/A | salvage/refactor/supersede PR #17 on accepted ADR | G11R-A accepted ADR |
-| G11R-C Qualification readiness | TODO | N/A | N/A | routing/workflows/recovery/readiness complete before host mutation | G11R-B source candidate |
+| G11R-A Admission architecture | BLOCKED / OWNER_ACTION_PENDING | `cc1653fe60236f973f9b6d06afad97bfa3ecda23` | #21 draft | local persistent/`--once` mechanisms fail idle withdrawal; label barrier needs new GitHub write authority; JIT changes product category | Owner chooses explicit design-freeze/trust-authority change |
+| G11R-B Lifecycle implementation | BLOCKED | N/A | N/A | mechanism-specific implementation is not authorized while G11R-A is unaccepted | accepted G11R-A ADR with `DESIGN_FREEZE_CHANGE_REQUIRED=false` |
+| G11R-C Qualification readiness | PROTOTYPE / BLOCKED | `3f50af33b3e5b40d67ad82e7f39786f5e382d609` | #22 draft | typed fail-closed gate and restore/result failure model only; no real adapters or private workflow | accepted G11R-A/G11R-B, then mechanism-specific routing/host/workflow evidence |
 | H1 One-shot qualification | TODO | N/A | N/A | one prepared real qualification with automatic restore attempt | G11R-C `OWNER_GATE_READY=true` |
 | G12 Autostart | SALVAGE | draft implementation asset | #14 draft | old PR combines G12+G13; do not merge as-is | H1 PASS; extract clean G12 |
 | G13 Versioned install | SALVAGE | draft implementation asset | #14 draft | immutable-slot/install concepts reusable | H1 PASS; extract clean G13 |
@@ -85,6 +87,24 @@ never update `main` directly.
 The remaining lifecycle design must define a truthful linearization point for capacity withdrawal. `Busy -> Drain` active-job preservation is distinct from `Listening -> Drain` idle admission withdrawal. A successful test of only the former is not sufficient evidence for the v0.1 product contract.
 
 Do not optimize qualification infrastructure for a PASS before G11R-A chooses the product mechanism.
+
+The current decision boundary is:
+
+```text
+G11R_A=BLOCKED_OWNER_ARCHITECTURE_DECISION
+PROPOSED_ADMISSION_ARCHITECTURE=SERVER_SIDE_UNIQUE_ADMISSION_LABEL_PLUS_TWO_PHASE_WITHDRAWAL
+LOCAL_PERSISTENT_IDLE_WITHDRAWAL=UNPROVEN
+RUN_ONCE_IDLE_WITHDRAWAL=UNPROVEN
+DESIGN_FREEZE_CHANGE_REQUIRED=true
+G11R_B=NOT_AUTHORIZED
+G11R_C=PROTOTYPE_ONLY
+H1=NOT_READY
+```
+
+Draft PR #21 contains the option study, formal model, and PR #17 salvage map.
+Draft PR #22 contains only the mechanism-neutral readiness/restore prototype.
+Neither draft is accepted architecture or product code, and neither authorizes
+real-host mutation.
 
 ## Update rule
 
