@@ -10,6 +10,7 @@ mod model;
 mod policy;
 mod probe;
 mod process_snapshot;
+mod qualification;
 mod runner_observer;
 mod runtime;
 mod supervisor;
@@ -41,6 +42,12 @@ pub use probe::{
     ActivityWorkloadProbe, ProbeReadError, ProcessListProbe, ProcessSource, SteamAppIdSource,
     SteamGameProbe, UserActivityProbe, UserActivitySource, WindowsProcessSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource,
+};
+pub use qualification::{
+    qualify_readiness, EvidenceState, H1TransactionEvent, H1TransactionModel, H1TransactionPhase,
+    H1TransactionReceipt, QualificationDisposition, QualificationReadinessEvidence,
+    QualificationReadinessReceipt, ReadinessBlocker, ReadinessCheck, ReadinessDisposition,
+    RestoreDisposition, QUALIFICATION_READINESS_SCHEMA_VERSION,
 };
 pub use runner_observer::{
     ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,

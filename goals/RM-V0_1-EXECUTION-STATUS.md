@@ -13,6 +13,8 @@ Last roadmap reset: 2026-08-30.
 - `REDESIGN` — product goal remains; mechanism must be reselected/reworked.
 - `SALVAGE` — useful draft implementation exists but is not accepted as-is.
 - `READY` — prerequisites are satisfied for the next defined gate.
+- `PROTOTYPE` — source-only framework or model exists but its prerequisite Goal
+  is not accepted and it is not product/readiness acceptance.
 - `OWNER_ACTION_PENDING` — autonomous source/docs work is accepted, but a separate
   repository, trust, privilege, or production setting still requires the Owner.
 - `BLOCKED` — an external/trust/precondition boundary prevents progress.
@@ -43,7 +45,7 @@ Last roadmap reset: 2026-08-30.
 | GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
 | G11R-A Admission architecture | TODO | N/A | N/A | choose/define linearization point without preselecting `--once` | P0 may remain independent; no real-host mutation required for design |
 | G11R-B Lifecycle implementation | TODO | N/A | N/A | salvage/refactor/supersede PR #17 on accepted ADR | G11R-A accepted ADR |
-| G11R-C Qualification readiness | TODO | N/A | N/A | routing/workflows/recovery/readiness complete before host mutation | G11R-B source candidate |
+| G11R-C Qualification readiness | PROTOTYPE / BLOCKED | readiness prototype PR candidate | draft readiness PR | typed fail-closed gate and restore/result failure model only; no real adapters or private workflow | accepted G11R-A/G11R-B, then mechanism-specific routing/host/workflow evidence |
 | H1 One-shot qualification | TODO | N/A | N/A | one prepared real qualification with automatic restore attempt | G11R-C `OWNER_GATE_READY=true` |
 | G12 Autostart | SALVAGE | draft implementation asset | #14 draft | old PR combines G12+G13; do not merge as-is | H1 PASS; extract clean G12 |
 | G13 Versioned install | SALVAGE | draft implementation asset | #14 draft | immutable-slot/install concepts reusable | H1 PASS; extract clean G13 |
