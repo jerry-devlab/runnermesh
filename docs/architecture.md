@@ -25,8 +25,9 @@ v0.1 implements the single-node admission/lifecycle slice. Multi-node placement 
 ordinary Windows user session
 
 CLI -----\
-          >-- Named Pipe --> RunnerMesh Agent --> official Runner.Listener --> Runner.Worker --> GitHub
-Tray ----/
+          >-- Named Pipe --> RunnerMesh Agent --+--> official Runner.Listener --> Runner.Worker --> GitHub
+Tray ----/                                      |
+                                                +--> typed admission control --> exact GitHub runner label
 ```
 
 The Agent Core is the sole authority. CLI and Tray render `AgentSnapshot` and issue typed `AgentCommand`s. The Agent follows `Observe -> Decide -> Reconcile`.
@@ -47,9 +48,27 @@ Policy consumes normalized probe evidence, not provider-specific implementation 
 
 ## Capacity and lifecycle
 
-Supervision covers local runner observation, launch/listening/busy phase, graceful drain, stop/restart/reconnect, safe adoption after Agent restart, and work-root ownership.
+Supervision covers exact local runner observation, launch/listening/busy phase,
+graceful drain, restart/reconnect, safe adoption after Agent restart, and
+work-root ownership. Admission control is a separate typed boundary that may
+only observe, add, or remove the reserved `runnermesh-admit` label on the exact
+configured runner.
 
-`DRAINED` means no new capacity is admitted while eligible active work may still be finishing. It is not synonymous with `RunnerPhase::Stopped`.
+Desired `DRAINED` starts two-phase withdrawal; it is distinct from achieved
+`DRAINED`. RunnerMesh first removes and reads back the reserved selector, then
+settles any observed racing assignment without signalling an active Worker.
+Achieved `DRAINED` requires selector absence, no exact bound active Worker, and
+consistent local evidence. It is not synonymous with `RunnerPhase::Stopped`.
+
+GitHub does not document the label response/readback as a globally linearizable
+scheduler barrier. Selector absence supports only a no-new-RunnerMesh-eligibility
+claim; an assignment already in flight is represented as `DrainPending` and may
+finish naturally. API or identity uncertainty reports `WithdrawalBlocked`,
+`Unknown`, or `Refused`, never false success.
+
+Every workflow job intended for RunnerMesh-managed capacity must include
+`runnermesh-admit` in its cumulative GitHub-native `runs-on` labels. RunnerMesh
+does not govern generic-label jobs that omit this selector.
 
 ## Work-root contract
 
@@ -57,7 +76,11 @@ Each execution identity owns one active work root. The same identity can reuse i
 
 ## Connection model
 
-v0.1 exposes a typed GitHub Actions link state rather than a generic boolean. Process existence is not sufficient proof of remote connectivity; ambiguous evidence reports `Unknown`. Future broker connectivity is a separate connection kind.
+v0.1 exposes typed GitHub Actions link and admission-control state rather than a
+generic boolean. Process existence is not sufficient proof of remote
+connectivity, and an API acknowledgement is not selector readback; ambiguous
+evidence reports `Unknown`. Future broker connectivity is a separate connection
+kind.
 
 ## Presentation
 
@@ -65,7 +88,22 @@ Windows Tray is the v0.1 daily UI and CLI is the automation/diagnostic interface
 
 ## Persistence and recovery
 
-Persist user intent/configuration and durable install/update receipts. Reconstruct transient process, host, link, and derived-state observations after restart. Agent restart may safely adopt an existing listener after verifying identity/home/work-root authority.
+Persist user intent/configuration, the non-secret exact runner/selector binding,
+an opaque credential reference, and durable transaction receipts. Reconstruct
+selector, process, host, link, and derived-state observations independently
+after restart. Agent restart may safely adopt an existing listener only after
+verifying identity/home/work-root authority; it never infers a previous label
+mutation succeeded merely because it was attempted.
+
+## GitHub authority boundary
+
+Managed v0.1 admission expands the trust boundary to the least documented
+fine-grained label authority for the configured scope: organization
+`Self-hosted runners: write` or repository `Administration: write`. Normal JSON
+contains only an opaque secret reference. The Windows adapter uses an OS-backed
+credential facility; tokens are not logged or stored in normal configuration.
+RunnerMesh never replaces all labels, deletes all labels, changes runner groups,
+or mutates registration through this boundary.
 
 ## Privileged operations
 

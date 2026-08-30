@@ -11,7 +11,9 @@ Teams often have capable workstations with intermittent spare capacity, but thos
 ## Product invariants
 
 - **Human first.** Foreground use always has priority over CI.
-- **Zero developer workflow change.** Existing CI workflows remain CI-platform workflows.
+- **GitHub Actions native workflow contract.** Workflows remain ordinary GitHub
+  Actions workflows; jobs targeting RunnerMesh-managed capacity add one reserved
+  native `runs-on` selector.
 - **CI-platform native.** RunnerMesh manages capacity, not workflow semantics.
 - **Fail open for the workstation; fail closed for CI admission.** Uncertainty must preserve the human's machine and reject new CI work.
 - **No inbound workstation requirement.** Ordinary operation starts outbound connections.
@@ -29,7 +31,12 @@ Teams often have capable workstations with intermittent spare capacity, but thos
 
 RunnerMesh is **pre-v0.1 / active development**. The accepted foundation already includes the domain/runtime contracts, Agent Core, local Named Pipe IPC, CLI, native Windows tray, User Activity/Steam/Process List probes, conservative Auto Lite, host observation, official-runner observation, supervisor foundations, persistent ordinary-user development runtime, and the Windows native process snapshot used by observation/probes.
 
-The remaining v0.1 work is concentrated in real admission/lifecycle semantics, one-shot qualification, productized install/autostart/update/rollback/package flows, real workstation dogfood, and release closeout. The historical G11 qualification path has been superseded by the roadmap-v2 G11R architecture/implementation/readiness sequence; the project is not yet an installable stable product.
+The remaining v0.1 work is concentrated in implementing and qualifying the
+accepted GitHub-native dynamic admission-label lifecycle, productized
+install/autostart/update/rollback/package flows, real workstation dogfood, and
+release closeout. The historical G11 qualification path has been superseded by
+the roadmap-v2 G11R sequence; the project is not yet an installable stable
+product.
 
 See [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md) for the durable current execution ledger.
 
@@ -52,7 +59,9 @@ Machine-facing states are:
 
 - `FULL` — normal eligible capacity is available.
 - `THROTTLED` — only constrained capacity is available.
-- `DRAINED` — no new work is admitted while existing work is allowed to finish.
+- `DRAINED` — the reserved selector is absent, no exact bound Worker is active,
+  and evidence is consistent; active/racing work remains `DrainPending` until
+  natural completion.
 - `OFFLINE` — the node is unavailable for admission.
 
 `THROTTLED` is stable vocabulary but real resource enforcement is deferred beyond v0.1.
@@ -68,6 +77,23 @@ Machine-facing states are:
 ## Capacity model
 
 A node contributes only the capacity it can safely offer at the moment. v0.1 focuses on one Windows workstation and the admission/lifecycle slice; later mesh versions add multi-node placement and richer capability negotiation. GitHub Actions remains the authority for workflow scheduling and the official job protocol.
+
+Jobs intended to consume RunnerMesh-managed workstation capacity must use the
+reserved GitHub custom label in addition to the normal self-hosted platform
+labels:
+
+```yaml
+runs-on:
+  - self-hosted
+  - Windows
+  - X64
+  - runnermesh-admit
+```
+
+RunnerMesh adds or removes only `runnermesh-admit` on its exact bound runner.
+The selector is case-insensitive in GitHub, but RunnerMesh configuration and
+documentation use this lowercase canonical spelling. Generic-label jobs that
+omit it are not governed by RunnerMesh admission withdrawal.
 
 ## Networking model
 

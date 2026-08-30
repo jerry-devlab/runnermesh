@@ -72,34 +72,31 @@ GitHub Organization/repository setting changes remain an Owner action; source/do
 
 ## G11R-A — Admission Linearization Architecture
 
-Autonomous architecture/research train. No real runner mutation.
+Accepted architecture: one GitHub-native dynamic custom label named
+`runnermesh-admit`, managed only on the exact configured runner, plus explicit
+two-phase withdrawal. See ADR 0004.
 
-Mission: define the exact capacity-withdrawal semantic and its linearization point before another real qualification attempt.
+The Owner accepted the trust-boundary expansion and semantic clarification
+after comparing persistent local Listener control, `run.cmd --once`,
+server-side labels/groups, ephemeral/JIT, and clarification alone. The accepted
+contract does not claim the label API response/readback is a globally
+linearizable scheduler barrier. An observed racing assignment remains visible
+and may complete normally.
 
-The analysis must compare at least:
-
-1. persistent official runner + local Listener lifecycle control;
-2. `run.cmd --once` job leases;
-3. GitHub server-side labels/runner groups as an admission barrier;
-4. ephemeral/JIT runner leases;
-5. an explicit clarification of the v0.1 withdrawal transition if the existing product semantic can be preserved without claiming impossible instantaneous revocation.
-
-For every option evaluate human-first correctness, no-new-job boundary, active-job survival, GitHub authority, registration mutation, local privilege, upstream support/deprecation risk, restart recovery, implementation complexity, and fit with the frozen v0.1 contract.
-
-Do not select a mechanism merely because existing code already implements it.
-
-Exit requires an accepted ADR with:
+Exit:
 
 ```text
-ADMISSION_ARCHITECTURE=ACCEPTED
-LINEARIZATION_POINT=DEFINED
-ACTIVE_JOB_POLICY=DEFINED
-IDLE_WITHDRAWAL_POLICY=DEFINED
-REQUIRED_GITHUB_AUTHORITY=DEFINED
-REQUIRED_LOCAL_AUTHORITY=DEFINED
+G11R_A=ACCEPTED
+ADMISSION_ARCHITECTURE=GITHUB_NATIVE_DYNAMIC_ADMISSION_LABEL
+WITHDRAWAL_PROTOCOL=TWO_PHASE
+RESERVED_ADMISSION_LABEL=runnermesh-admit
+SCHEDULER_LINEARIZABILITY=NOT_CLAIMED_WITHOUT_UPSTREAM_GUARANTEE
+ACTIVE_JOB_POLICY=COMPLETE_NATURALLY
+NORMAL_LOCAL_SIGNAL_POLICY=NONE
+REQUIRED_GITHUB_AUTHORITY=MINIMAL_RESERVED_LABEL_MUTATION_AUTHORITY
+DESIGN_FREEZE_CHANGE=TRUST_BOUNDARY_EXPANSION_PLUS_SEMANTIC_CLARIFICATION
+SEMANTIC_WEAKENING=FALSE
 ```
-
-If the winning design weakens the frozen product semantic or adds materially new server/JIT authority, update the design freeze through an explicit ADR before G11R-B.
 
 ## G11R-B — Lifecycle Implementation
 
@@ -107,17 +104,28 @@ Autonomous source-development train, normally 6-12 hours. No real production run
 
 Implement the accepted G11R-A lifecycle architecture, including:
 
-- FULL/listening/busy/withdraw-requested-or-drain-pending/withdrawn/reconnect semantics;
+- a typed exact-scope admission-control seam with synthetic and product
+  backends;
+- reserved-label observation, add, and remove only—never replace/delete-all;
+- explicit desired versus observed/achieved admission state;
+- FULL/advertising/listening/busy/withdraw-requested/withdrawing/
+  withdrawal-blocked/drain-pending/drained/re-advertising semantics;
 - exact runner-home/process ownership;
 - active-job preservation;
-- idle withdrawal behavior defined by the accepted ADR;
+- idle withdrawal and racing-assignment behavior from ADR 0004;
 - restart/reconnect/reconstruction;
 - unrelated same-name runner isolation;
-- registration and work-root drift refusal;
+- runner identity, registration, reserved-label ownership, and work-root drift
+  refusal;
+- opaque secret references with no token in normal JSON;
+- bounded API/auth/rate-limit/unavailable failure behavior;
 - one-identity/one-work-root enforcement;
 - source/runtime separation.
 
-PR #17 may be salvaged, refactored, or superseded. Its useful evidence includes exact process scoping, rejection of CTRL+C/CTRL+BREAK for Busy drain, safe-wait reconstruction, and run-once experiments. `RUN_ONCE_JOB_LEASE` is not preselected as the final product architecture.
+PR #17 is salvage-only. Useful evidence includes exact process scoping,
+rejection of Ctrl+C/Ctrl+Break for Busy drain, safe-wait reconstruction, and
+unrelated-runner isolation. `RUN_ONCE_JOB_LEASE` is not an architectural
+requirement, and G11R-B starts from accepted main rather than PR #17.
 
 Exit:
 
@@ -134,7 +142,8 @@ Autonomous readiness train. Prepare everything before mutating the real host.
 Required readiness surfaces:
 
 - exact trusted private qualification workflow;
-- exact runner selector/routing strategy;
+- exact runner identity and reserved-selector binding;
+- configured GitHub authority without exposing credential material;
 - primary/no-admission/reconnect/failure witnesses;
 - source candidate frozen;
 - host prestate verifier;
@@ -148,11 +157,14 @@ No real host mutation may begin unless all are true:
 ```text
 SOURCE_READY=true
 HOST_PRESTATE_READY=true
+GITHUB_AUTHORITY_CONFIGURED=true
+EXACT_RUNNER_IDENTITY_READY=true
+RESERVED_SELECTOR_READY=true
+SELECTOR_UNIQUE=true
 ROUTING_READY=true
 TRUSTED_WORKFLOW_READY=true
 ROLLBACK_READY=true
 RECOVERY_READY=true
-SELECTOR_UNIQUE=true
 OWNER_GATE_READY=true
 ```
 
@@ -160,9 +172,16 @@ Principle: **prepare everything first; mutate the real host last.**
 
 ## Human Gate H1 — One-shot real qualification
 
-One prepared transaction proves the accepted admission/lifecycle architecture on the real trusted runner.
+One prepared transaction proves the accepted admission/lifecycle architecture
+on the real trusted runner. It verifies/establishes reserved-label control,
+qualifies advertised capacity, executes the primary trusted job, withdraws,
+witnesses racing/no-new-eligibility behavior, waits for active completion,
+re-advertises, witnesses reconnect, and restores the original baseline.
 
-Owner interaction should be one explicit authorization/UAC wherever feasible. The transaction performs bounded qualification and attempts automatic restoration for PASS, FAIL, BLOCKED, timeout, or controller loss.
+Owner interaction should be one explicit authorization/UAC wherever feasible.
+The transaction performs bounded qualification and attempts automatic
+restoration for PASS, FAIL, BLOCKED, timeout, or controller loss. No H1 dispatch
+or real label mutation occurs during G11R-C readiness work.
 
 Final receipt always separates:
 

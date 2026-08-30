@@ -43,9 +43,9 @@ Last roadmap reset: 2026-08-30.
 | PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
 | GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
-| G11R-A Admission architecture | BLOCKED / OWNER GATE | PR #21 candidate | #21 draft | local persistent/`--once` mechanisms fail idle withdrawal; label barrier needs new GitHub write authority; JIT changes product category | Owner chooses explicit design-freeze/trust-authority change |
-| G11R-B Lifecycle implementation | BLOCKED | N/A | N/A | mechanism-specific implementation is not authorized while G11R-A is unaccepted | accepted G11R-A ADR with `DESIGN_FREEZE_CHANGE_REQUIRED=false` |
-| G11R-C Qualification readiness | PROTOTYPE / BLOCKED | `3f50af33b3e5b40d67ad82e7f39786f5e382d609` | #22 draft | typed fail-closed gate and restore/result failure model only; no real adapters or private workflow | accepted G11R-A/G11R-B, then mechanism-specific routing/host/workflow evidence |
+| G11R-A Admission architecture | ACCEPTED | PR #21 accepted package | #21 | ADR 0004 selects `runnermesh-admit` plus two-phase withdrawal; trust expansion accepted without semantic weakening | merge exact-head PR #21, then G11R-B |
+| G11R-B Lifecycle implementation | READY | N/A | N/A | typed exact-runner reserved-label control; desired/achieved states; no normal Worker signal | accepted G11R-A on main |
+| G11R-C Qualification readiness | PROTOTYPE / BLOCKED | `3f50af33b3e5b40d67ad82e7f39786f5e382d609` | #22 draft | mechanism-neutral prototype is salvage-only; no real adapters or private workflow | accepted G11R-B, then label-specific readiness adaptation |
 | H1 One-shot qualification | TODO | N/A | N/A | one prepared real qualification with automatic restore attempt | G11R-C `OWNER_GATE_READY=true` |
 | G12 Autostart | SALVAGE | draft implementation asset | #14 draft | old PR combines G12+G13; do not merge as-is | H1 PASS; extract clean G12 |
 | G13 Versioned install | SALVAGE | draft implementation asset | #14 draft | immutable-slot/install concepts reusable | H1 PASS; extract clean G13 |
@@ -82,29 +82,34 @@ ruleset. Until the Owner applies the documented recommendation, autonomous work
 must self-enforce focused branch -> PR -> exact-head hosted CI -> merge and must
 never update `main` directly.
 
-## Current architectural blocker
+## Current admission decision
 
-The remaining lifecycle design must define a truthful linearization point for capacity withdrawal. `Busy -> Drain` active-job preservation is distinct from `Listening -> Drain` idle admission withdrawal. A successful test of only the former is not sufficient evidence for the v0.1 product contract.
-
-Do not optimize qualification infrastructure for a PASS before G11R-A chooses the product mechanism.
-
-The current decision boundary is:
+The Owner accepted GitHub-native dynamic admission through the unique reserved
+label `runnermesh-admit` with two-phase withdrawal. Desired withdrawal starts at
+accepted local policy intent. Achieved `DRAINED` requires selector absence, no
+exact bound Worker, and consistent evidence. Mutation/readback is not described
+as a globally linearizable scheduler barrier; a racing assignment is treated as
+in-flight and may finish naturally.
 
 ```text
-G11R_A=BLOCKED_OWNER_ARCHITECTURE_DECISION
-PROPOSED_ADMISSION_ARCHITECTURE=SERVER_SIDE_UNIQUE_ADMISSION_LABEL_PLUS_TWO_PHASE_WITHDRAWAL
+G11R_A=ACCEPTED
+ADMISSION_ARCHITECTURE=GITHUB_NATIVE_DYNAMIC_ADMISSION_LABEL
+RESERVED_ADMISSION_LABEL=runnermesh-admit
+WITHDRAWAL_PROTOCOL=TWO_PHASE
+SCHEDULER_LINEARIZABILITY=NOT_CLAIMED_WITHOUT_UPSTREAM_GUARANTEE
 LOCAL_PERSISTENT_IDLE_WITHDRAWAL=UNPROVEN
 RUN_ONCE_IDLE_WITHDRAWAL=UNPROVEN
-DESIGN_FREEZE_CHANGE_REQUIRED=true
-G11R_B=NOT_AUTHORIZED
+DESIGN_FREEZE_CHANGE=TRUST_BOUNDARY_EXPANSION_PLUS_SEMANTIC_CLARIFICATION
+SEMANTIC_WEAKENING=FALSE
+G11R_B=AUTHORIZED_AFTER_PR21_MERGE
 G11R_C=PROTOTYPE_ONLY
 H1=NOT_READY
 ```
 
-Draft PR #21 contains the option study, formal model, and PR #17 salvage map.
-Draft PR #22 contains only the mechanism-neutral readiness/restore prototype.
-Neither draft is accepted architecture or product code, and neither authorizes
-real-host mutation.
+PR #21 contains the accepted ADR, formal model, workflow contract, and PR #17
+salvage map. Draft PR #22 remains only a mechanism-neutral readiness/restore
+prototype until G11R-B is accepted. No source-development phase authorizes real
+host, runner, registration, label/group, work-root, or H1 mutation.
 ## Update rule
 
 After every accepted Goal/PR merge or material blocker change, update only decision-relevant rows. Do not rewrite historical accepted rows merely for formatting. Private evidence may be referenced generically (for example, `private H1 receipt`) but never copied into this public ledger.
