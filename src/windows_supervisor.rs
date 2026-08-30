@@ -1,10 +1,10 @@
 //! Windows/user-session supervisor preparation for the H1 boundary.
 //!
 //! This adapter deliberately prepares and validates operations without
-//! executing them. G11 owns qualification of any real official-runner launch,
-//! drain, stop, reconnect, or adoption mechanism. The G10R sandbox test below
-//! exercises a harmless child process only; it is never wired to the Agent's
-//! pre-H1 reconciler.
+//! executing them. G11R-B owns synthetic lifecycle implementation and H1 owns
+//! qualification of any real official-runner launch, drain, stop, reconnect,
+//! or adoption mechanism. The G10R sandbox test below exercises a harmless
+//! child process only; it is never wired to the Agent's pre-H1 reconciler.
 
 use std::path::{Path, PathBuf};
 

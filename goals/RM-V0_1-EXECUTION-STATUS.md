@@ -13,6 +13,8 @@ Last roadmap reset: 2026-08-30.
 - `REDESIGN` — product goal remains; mechanism must be reselected/reworked.
 - `SALVAGE` — useful draft implementation exists but is not accepted as-is.
 - `READY` — prerequisites are satisfied for the next defined gate.
+- `OWNER_ACTION_PENDING` — autonomous source/docs work is accepted, but a separate
+  repository, trust, privilege, or production setting still requires the Owner.
 - `BLOCKED` — an external/trust/precondition boundary prevents progress.
 - `TODO` — not yet implemented/qualified.
 
@@ -34,10 +36,11 @@ Last roadmap reset: 2026-08-30.
 | G06R Native tray/runtime | ACCEPTED | historical main | #12 | ordinary-user persistent Agent + native tray | none |
 | G10R Pre-H1 integration | ACCEPTED | `2078c22bc9c8a2c409b651923ccca76ae3b2af45` | #13 | pre-H1 runtime readiness; no real runner control | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
+| Roadmap v2 | ACCEPTED | `2621548d685fde4a9910b675192de39ee791649f` | #19 merged | authoritative remaining v0.1 sequence and historical G11 supersession | GOV1 source/docs closeout |
 | Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S retained as private evidence; do not proliferate variants | P0 recovery-only closeout + G11R-A |
 | PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
-| GOV1 Governance reset | TODO | N/A | N/A | ledger/roadmap docs plus recommended main protection | docs first; GitHub settings remain Owner action |
+| GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
 | G11R-A Admission architecture | TODO | N/A | N/A | choose/define linearization point without preselecting `--once` | P0 may remain independent; no real-host mutation required for design |
 | G11R-B Lifecycle implementation | TODO | N/A | N/A | salvage/refactor/supersede PR #17 on accepted ADR | G11R-A accepted ADR |
 | G11R-C Qualification readiness | TODO | N/A | N/A | routing/workflows/recovery/readiness complete before host mutation | G11R-B source candidate |
@@ -57,10 +60,25 @@ Last roadmap reset: 2026-08-30.
 At the roadmap-v2 reset, authoritative `main` was:
 
 ```text
-b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b
+2621548d685fde4a9910b675192de39ee791649f
 ```
 
 Future agents must refresh remote state rather than assuming this SHA remains current.
+
+## Governance status
+
+```text
+ROADMAP_V2=ACCEPTED
+ROADMAP_V2_PR=19
+ROADMAP_V2_PR_STATE=MERGED
+GOV1_DOCS=ACCEPTED
+MAIN_PROTECTION=OWNER_ACTION_PENDING
+```
+
+As verified on 2026-08-30, `main` had neither branch protection nor a repository
+ruleset. Until the Owner applies the documented recommendation, autonomous work
+must self-enforce focused branch -> PR -> exact-head hosted CI -> merge and must
+never update `main` directly.
 
 ## Current architectural blocker
 

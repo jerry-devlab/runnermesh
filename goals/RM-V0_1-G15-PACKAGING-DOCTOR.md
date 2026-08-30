@@ -28,6 +28,7 @@ Package inspection, checksum/provenance checks, sandbox install/update/rollback,
 
 ## Exit
 
-A candidate artifact is ready for authorized real workstation cutover.
+A candidate artifact is ready for G15R integrated sandbox qualification. Only
+the exact immutable RC accepted by G15R may enter real workstation cutover.
 
-Next: G16 Human Gate H2.
+Next: G15R.
