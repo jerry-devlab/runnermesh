@@ -226,7 +226,7 @@ fn send(transport: &impl AgentTransport, command: AgentCommand) -> Result<AgentR
         });
     }
     match response.body {
-        IpcResponseBody::Success(response) => Ok(response),
+        IpcResponseBody::Success(response) => Ok(*response),
         IpcResponseBody::Failure(error) => Err(CliError::AgentRejected(error.reason_code)),
     }
 }
@@ -242,11 +242,29 @@ fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
         .find(|link| link.kind == LinkKind::GithubActions)
         .map(|link| link.state)
         .unwrap_or(LinkState::Unknown);
+    let achieved = snapshot
+        .achieved_node_state
+        .map(|state| state.to_string())
+        .unwrap_or_else(|| "TRANSITIONAL".to_owned());
+    let admission_reason = snapshot
+        .admission_control
+        .reason_code
+        .as_ref()
+        .map(|reason| reason.as_str())
+        .unwrap_or("none");
     format!(
-        "Agent: {}\nCapacity: {} · {}\nRunner: {}\nGitHub: {}\nZen: {}",
+        "Agent: {}\nDesired capacity: {} · {}\nAchieved capacity: {}\nAdmission control: {} · {} · {}\nRunner: {}\nGitHub: {}\nZen: {}",
         snapshot.health,
-        snapshot.node_state,
+        snapshot.desired_node_state,
         snapshot.user_mode,
+        achieved,
+        snapshot.admission_control.lifecycle,
+        admission_reason,
+        if snapshot.admission_control.active_bound_worker {
+            "worker-active"
+        } else {
+            "worker-absent"
+        },
         snapshot.runner_phase,
         github,
         snapshot.zen
@@ -277,21 +295,41 @@ fn render_probe_list(snapshot: &AgentSnapshot) -> String {
 }
 
 fn render_runner_status(snapshot: &AgentSnapshot) -> String {
+    let achieved = snapshot
+        .achieved_node_state
+        .map(|state| state.to_string())
+        .unwrap_or_else(|| "TRANSITIONAL".to_owned());
+    let reason = snapshot
+        .admission_control
+        .reason_code
+        .as_ref()
+        .map(|reason| reason.as_str())
+        .unwrap_or("none");
     format!(
-        "Runner: {}\nCapacity: {}\nAdmission: {}",
-        snapshot.runner_phase, snapshot.node_state, snapshot.admission.reason_code
+        "Runner: {}\nDesired capacity: {}\nAchieved capacity: {}\nAdmission control: {} ({})\nPolicy reason: {}",
+        snapshot.runner_phase,
+        snapshot.desired_node_state,
+        achieved,
+        snapshot.admission_control.lifecycle,
+        reason,
+        snapshot.admission.reason_code
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_cli, parse_cli, AgentTransport, CliCommand};
+    use super::{
+        execute_cli, parse_cli, render_runner_status, render_snapshot_text, AgentTransport,
+        CliCommand,
+    };
     use crate::{
-        AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
-        BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, IpcRequest, IpcResponse,
-        IpcResponseBody, IpcTransportError, LinkKind, LinkSnapshot, LinkState, NodeState, ProbeId,
-        ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, UiPreferences, UserMode,
-        ZenOverride, IPC_PROTOCOL_VERSION,
+        AdmissionControlSnapshot, AdmissionDecision, AdmissionLifecycleState,
+        AdmissionSelectorState, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
+        BuildProvenance, DesiredAdmissionState, DoctorCheck, DoctorReport, DoctorStatus,
+        ExactRunnerIdentityState, IpcRequest, IpcResponse, IpcResponseBody, IpcTransportError,
+        LinkKind, LinkSnapshot, LinkState, NodeState, ProbeId, ProbeRuntimeState, ProbeSnapshot,
+        ReasonCode, ReservedLabelOwnershipState, RunnerPhase, UiPreferences, UserMode, ZenOverride,
+        IPC_PROTOCOL_VERSION,
     };
 
     #[test]
@@ -317,6 +355,31 @@ mod tests {
         );
         assert!(parse_cli(&arguments(["mode", "ForceCi"])).is_err());
         assert!(parse_cli(&arguments(["status", "--pretty"])).is_err());
+    }
+
+    #[test]
+    fn text_status_explains_desired_withdrawal_blocked_and_unachieved_state() {
+        let mut snapshot = snapshot();
+        snapshot.admission_control = AdmissionControlSnapshot {
+            desired: DesiredAdmissionState::Drained,
+            lifecycle: AdmissionLifecycleState::WithdrawalBlocked,
+            selector: AdmissionSelectorState::Present,
+            exact_runner_identity: ExactRunnerIdentityState::Verified,
+            reserved_label_ownership: ReservedLabelOwnershipState::Verified,
+            active_bound_worker: true,
+            reason_code: Some(ReasonCode::new("admission-api-unavailable").unwrap()),
+            retry: None,
+        };
+
+        for text in [
+            render_snapshot_text(&snapshot),
+            render_runner_status(&snapshot),
+        ] {
+            assert!(text.contains("Desired capacity: DRAINED"));
+            assert!(text.contains("Achieved capacity: TRANSITIONAL"));
+            assert!(text.contains("WITHDRAWAL_BLOCKED"));
+            assert!(text.contains("admission-api-unavailable"));
+        }
     }
 
     #[test]
@@ -402,7 +465,7 @@ mod tests {
             Ok(IpcResponse {
                 protocol_version: IPC_PROTOCOL_VERSION,
                 request_id: request.request_id,
-                body: IpcResponseBody::Success(self.response.clone()),
+                body: IpcResponseBody::Success(Box::new(self.response.clone())),
             })
         }
     }
@@ -424,13 +487,17 @@ mod tests {
             health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             zen: ZenOverride::Disabled,
             user_mode: UserMode::Auto,
-            node_state: NodeState::Drained,
+            desired_node_state: NodeState::Drained,
+            achieved_node_state: None,
             admission: AdmissionDecision {
                 allow_new_work: false,
                 desired_node_state: NodeState::Drained,
                 reason_code: ReasonCode::new("awaiting-auto-policy").unwrap(),
                 drain_requested: true,
             },
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             runner_phase: RunnerPhase::Unknown,
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,

@@ -33,7 +33,7 @@ pub struct IpcResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "kebab-case")]
 pub enum IpcResponseBody {
-    Success(AgentResponse),
+    Success(Box<AgentResponse>),
     Failure(IpcError),
 }
 
@@ -304,7 +304,7 @@ where
         }
     } else {
         let body = match handle_command(request.command) {
-            Ok(response) => IpcResponseBody::Success(response),
+            Ok(response) => IpcResponseBody::Success(Box::new(response)),
             Err(reason_code) => IpcResponseBody::Failure(IpcError {
                 code: IpcErrorCode::AgentUnavailable,
                 reason_code,

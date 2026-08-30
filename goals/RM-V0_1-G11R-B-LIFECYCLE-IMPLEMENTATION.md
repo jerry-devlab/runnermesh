@@ -59,6 +59,31 @@ At minimum cover:
 
 Settle one candidate and run the normal code gates plus risk-selected lifecycle/concurrency tests. Public CI remains hosted.
 
+## Implemented candidate contract
+
+The focused G11R-B candidate implements:
+
+- typed `observe_admission_selector`, `advertise_capacity`, and
+  `withdraw_capacity` operations with no generic administration surface;
+- exact organization/repository, runner ID/name, reserved-label, ownership,
+  and opaque credential-reference binding;
+- add-one/remove-one REST requests plus mandatory observation/readback through
+  an injected transport boundary that is not enabled in the product runtime;
+- explicit desired, selector, lifecycle, exact identity, label ownership,
+  active-Worker, reason-code, and bounded-retry snapshot fields;
+- Agent `Observe -> Decide -> Reconcile` integration and distinct desired and
+  achieved node state in JSON, CLI, and Tray presentation;
+- no-signal active-job completion, racing-assignment `DrainPending`, restart
+  reconstruction, and truthful blocked/refused/unknown outcomes;
+- exact executable-path observation using the native process snapshot, with
+  same-name processes from unrelated runner homes excluded; and
+- synthetic REST, auth/rate/error, drift, lifecycle/race, restart, presentation,
+  privacy, and source-regression tests.
+
+Runtime admission control remains explicitly `NotConfigured` until a later
+Owner-authorized OS-backed credential provider and transport are configured.
+No test or runtime path in this Goal sends a real GitHub request.
+
 ## Hard boundaries
 
 No UAC, Windows Service mutation, real runner registration mutation, Organization runner setting changes, trusted real job dispatch, destructive work-root mutation, or installed production runtime mutation.
@@ -71,6 +96,7 @@ SYNTHETIC_LIFECYCLE_TESTS=PASS
 LIFECYCLE_RACE_FIXTURES=PASS
 UNRELATED_RUNNER_ISOLATION=PASS
 DRIFT_REFUSAL=PASS
+NO_TASKLIST_REGRESSION=PASS
 REAL_HOST_MUTATION=false
 ```
 

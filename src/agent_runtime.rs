@@ -24,15 +24,16 @@ use tray_icon::{
 };
 
 use crate::{
-    ActivityWorkloadProbe, AdmissionDecision, AgentCommand, AgentCore, AgentHealth,
-    AgentObservation, AgentObserver, AgentReconciler, AgentResponse, AgentSnapshot,
-    BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
-    FileConfigStore, HardSafetyState, HostSnapshot, HostSource, IpcEndpoint, IpcServer,
-    LanguagePreference, LinkKind, LinkSnapshot, LinkState, LocalAgentTransport,
-    NativeTrayEventLoop, OfficialRunnerObserver, ProcessListProbe, ReasonCode, RunnerPhase,
-    ThemePreference, TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender,
-    TrayUiUpdate, UserActivityProbe, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
-    WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
+    ActivityWorkloadProbe, AdmissionControlSnapshot, AdmissionDecision, AgentCommand, AgentCore,
+    AgentHealth, AgentObservation, AgentObserver, AgentReconciler, AgentResponse, AgentSnapshot,
+    BuildProvenance, DesiredAdmissionState, DoctorCheck, DoctorReport, DoctorStatus,
+    EffectiveLocale, EffectiveTheme, ExecutionIdentityEvidence, FileConfigStore, HardSafetyState,
+    HostSnapshot, HostSource, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot,
+    LinkState, LocalAgentTransport, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
+    ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph, TrayMenuEntry,
+    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe, WindowsHostSource,
+    WindowsProcessSource, WindowsRunnerSource, WindowsSteamAppIdSource, WindowsUserActivitySource,
+    WindowsUserSessionSupervisorAdapter,
 };
 
 /// Result persisted only inside the caller-owned development root, so automated
@@ -325,7 +326,7 @@ fn run_native_tray_loop(
                 .map_err(|error| error.to_string())?
             {
                 crate::TrayActionResult::Snapshot(snapshot) => {
-                    current_snapshot = snapshot;
+                    current_snapshot = *snapshot;
                     let render = frontend
                         .current_render()
                         .expect("a successful tray action updates the render");
@@ -425,7 +426,7 @@ fn maybe_toggle_menu_hints_for_development(
         .activate(&TrayMenuId::MenuHints, current_snapshot)
         .map_err(|error| error.to_string())?
     {
-        crate::TrayActionResult::Snapshot(snapshot) => Ok(Some(snapshot)),
+        crate::TrayActionResult::Snapshot(snapshot) => Ok(Some(*snapshot)),
         crate::TrayActionResult::Doctor(_)
         | crate::TrayActionResult::Rejected(_)
         | crate::TrayActionResult::NoOp => {
@@ -730,14 +731,21 @@ impl RuntimeObserver {
 impl AgentObserver for RuntimeObserver {
     fn observe(&mut self) -> Result<AgentObservation, String> {
         let host = HostSnapshot::from_evidence(self.host.collect());
-        let (runner_phase, links) = match &self.runner_home {
+        let (runner_phase, execution_identity, work_root, links) = match &self.runner_home {
             Some(home) => {
                 let observed =
                     OfficialRunnerObserver::new(WindowsRunnerSource::new(home)).observe();
-                (observed.phase, vec![observed.github_link])
+                (
+                    observed.phase,
+                    observed.execution_identity,
+                    observed.work_root,
+                    vec![observed.github_link],
+                )
             }
             None => (
                 RunnerPhase::Unknown,
+                ExecutionIdentityEvidence::Unknown,
+                OwnershipEvidence::Unknown,
                 vec![LinkSnapshot {
                     kind: LinkKind::GithubActions,
                     state: LinkState::NotConfigured,
@@ -750,6 +758,11 @@ impl AgentObserver for RuntimeObserver {
             health_reason_code: Some(host.health.reason_code),
             hard_safety: HardSafetyState::Clear,
             runner_phase,
+            execution_identity,
+            work_root,
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             links,
             probes: vec![
                 self.user_activity.observe(),
@@ -764,9 +777,16 @@ impl AgentObserver for RuntimeObserver {
 struct NoRunnerControl;
 
 impl AgentReconciler for NoRunnerControl {
-    fn reconcile(&mut self, _decision: &AdmissionDecision) -> Result<(), String> {
+    fn reconcile(
+        &mut self,
+        decision: &AdmissionDecision,
+        observation: &AgentObservation,
+    ) -> Result<AdmissionControlSnapshot, String> {
         // This explicit pre-H1 reconciler has no process-control backend.
-        Ok(())
+        Ok(observation
+            .admission_control
+            .clone()
+            .with_desired(DesiredAdmissionState::from_decision(decision)))
     }
 }
 
