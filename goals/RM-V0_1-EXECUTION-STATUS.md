@@ -40,7 +40,7 @@ Last roadmap reset: 2026-08-30.
 | Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S retained as private evidence; do not proliferate variants | P0 recovery-only closeout + G11R-A |
 | PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
-| GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | roadmap-v2 main + GOV1 closeout | GOV1 closeout PR | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
+| GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
 | G11R-A Admission architecture | TODO | N/A | N/A | choose/define linearization point without preselecting `--once` | P0 may remain independent; no real-host mutation required for design |
 | G11R-B Lifecycle implementation | TODO | N/A | N/A | salvage/refactor/supersede PR #17 on accepted ADR | G11R-A accepted ADR |
 | G11R-C Qualification readiness | TODO | N/A | N/A | routing/workflows/recovery/readiness complete before host mutation | G11R-B source candidate |
