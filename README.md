@@ -27,14 +27,18 @@ Teams often have capable workstations with intermittent spare capacity, but thos
 
 ## Project status
 
-RunnerMesh is **pre-v0.1 / early development**. The public library currently defines stable `NodeState` and `UserMode` contracts; it does not yet provide admission behavior, a daemon, resource backend, broker, or GitHub integration.
+RunnerMesh is **pre-v0.1 / active development**. The accepted foundation already includes the domain/runtime contracts, Agent Core, local Named Pipe IPC, CLI, native Windows tray, User Activity/Steam/Process List probes, conservative Auto Lite, host observation, official-runner observation, supervisor foundations, persistent ordinary-user development runtime, and the Windows native process snapshot used by observation/probes.
+
+The remaining v0.1 work is concentrated in real admission/lifecycle semantics, one-shot qualification, productized install/autostart/update/rollback/package flows, real workstation dogfood, and release closeout. The historical G11 qualification path has been superseded by the roadmap-v2 G11R architecture/implementation/readiness sequence; the project is not yet an installable stable product.
+
+See [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md) for the durable current execution ledger.
 
 ## Core concepts
 
 RunnerMesh manages contributed CI **supply**, not a replacement workflow scheduler:
 
 1. **CI demand** — GitHub Actions owns workflow demand, queue semantics, dependencies, assignment mechanics, logs, and checks.
-2. **Placement** — RunnerMesh will determine eligible contributed capacity and capabilities.
+2. **Placement** — RunnerMesh determines eligible contributed capacity and capabilities.
 3. **Admission** — Each workstation decides whether it should accept new CI work now.
 4. **Resource policy** — Native operating-system mechanisms determine how admitted work coexists with foreground use.
 
@@ -44,12 +48,14 @@ See [the architecture](docs/architecture.md) for the planned boundary in more de
 
 Planned human-facing modes are `auto`, `work`, `gaming`, `idle`, `maintenance`, and `force-ci`. Manual policy wins over automatic sensing.
 
-Planned machine-facing states are:
+Machine-facing states are:
 
 - `FULL` — normal eligible capacity is available.
 - `THROTTLED` — only constrained capacity is available.
 - `DRAINED` — no new work is admitted while existing work is allowed to finish.
 - `OFFLINE` — the node is unavailable for admission.
+
+`THROTTLED` is stable vocabulary but real resource enforcement is deferred beyond v0.1.
 
 ## Workload classes
 
@@ -61,7 +67,7 @@ Planned machine-facing states are:
 
 ## Capacity model
 
-A node contributes only the capacity it can safely offer at the moment. Planned placement considers declared capabilities and requirements; planned admission applies local human, workload, and resource policy. GitHub Actions remains the authority for workflow scheduling and job protocol.
+A node contributes only the capacity it can safely offer at the moment. v0.1 focuses on one Windows workstation and the admission/lifecycle slice; later mesh versions add multi-node placement and richer capability negotiation. GitHub Actions remains the authority for workflow scheduling and the official job protocol.
 
 ## Networking model
 
@@ -73,17 +79,17 @@ Persistent personal workstations must not execute arbitrary untrusted public-for
 
 ## Initial scope
 
-The first supported path is planned around GitHub Actions, Windows interactive workstations, and the official GitHub self-hosted runner. The default execution model is an ordinary intended user session running RunnerMesh and the official runner; it does not require `NETWORK SERVICE` or another service identity. PowerShell 7 must be resolvable and functional for the selected execution identity, regardless of supported installation method.
+The first supported path is GitHub Actions, Windows interactive workstations, and the official GitHub self-hosted runner. The default execution model is an ordinary intended user session running RunnerMesh and the official runner; it does not require `NETWORK SERVICE` or another service identity. PowerShell 7 must be resolvable and functional for the selected execution identity, regardless of supported installation method.
 
 RunnerMesh will not reimplement the GitHub Actions runner protocol. An execution identity may reuse its own work root, but separate identities must not share an active work root. Ownership conflicts must not be solved by globally weakening Git safe-directory protections.
 
 ## Installation / current availability
 
-There is no released binary or published crate yet. Do not treat this repository as installable product software.
+There is no stable released binary or published crate yet. Do not treat this repository as installable product software until the v0.1 release gates are complete.
 
 ## CLI direction
 
-Future CLI direction includes inspectable commands such as status, doctor, mode selection, drain, and explain. Names, contracts, and behavior are not yet stable.
+The current development CLI exposes typed status/control/diagnostic surfaces over Agent IPC. Contracts remain pre-v0.1 and may still change before the first stable release.
 
 ## Non-goals
 
@@ -91,11 +97,11 @@ RunnerMesh is not a GitHub Actions replacement, generic workflow engine, Kuberne
 
 ## Roadmap
 
-The staged plan is documented in [docs/roadmap.md](docs/roadmap.md). Roadmap items are planned work, not claims of current functionality.
+The public multi-version direction is documented in [docs/roadmap.md](docs/roadmap.md). The authoritative remaining v0.1 implementation sequence is [`goals/RM-V0_1-ROADMAP.md`](goals/RM-V0_1-ROADMAP.md), with current status in [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md).
 
 ## Development
 
-With a standard Rust toolchain available, validate the skeleton with:
+With a standard Rust toolchain available, validate the repository with:
 
 ```powershell
 cargo check
