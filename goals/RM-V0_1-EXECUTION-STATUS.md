@@ -43,6 +43,7 @@ Last roadmap reset: 2026-08-30.
 | PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
 | GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
+| Fast Lane v2 CI/audit automation | ACCEPTED / OWNER_ACTION_PENDING | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative docs/code classification, deterministic public audit, one stable `CI Gate`, and exact-head hosted Windows/Ubuntu code coverage; full main-push CI retained | Owner requires `CI Gate` and blocks direct/force pushes and branch deletion on `main` |
 | G11R-A Admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 merged | ADR 0004 selects `runnermesh-admit` plus two-phase withdrawal; hosted Windows and Ubuntu exact-head CI passed; trust expansion accepted without semantic weakening | G11R-B |
 | G11R-B Lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 merged | exact-runner reserved-label REST seam; desired/achieved Agent state; no normal Worker signal; hosted Windows and Ubuntu CI passed | G11R-C |
 | G11R-C Qualification readiness | ACCEPTED / OWNER_ACTION_PENDING | focused label-specific source package | #25 | eleven-gate fail-closed verifier, inert trusted-workflow template, one durable H1 transaction family, and synthetic restore/failure proof; no live trust or host evidence | separate P0 recovery and live H1 preparation Owner transactions |
@@ -74,6 +75,8 @@ ROADMAP_V2=ACCEPTED
 ROADMAP_V2_PR=19
 ROADMAP_V2_PR_STATE=MERGED
 GOV1_DOCS=ACCEPTED
+FAST_LANE_V2=ACCEPTED
+FAST_LANE_REQUIRED_CHECK=CI Gate
 MAIN_PROTECTION=OWNER_ACTION_PENDING
 ```
 
