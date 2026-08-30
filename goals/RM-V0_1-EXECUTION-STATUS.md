@@ -44,8 +44,8 @@ Last roadmap reset: 2026-08-30.
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
 | GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
 | G11R-A Admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 merged | ADR 0004 selects `runnermesh-admit` plus two-phase withdrawal; hosted Windows and Ubuntu exact-head CI passed; trust expansion accepted without semantic weakening | G11R-B |
-| G11R-B Lifecycle implementation | READY | focused candidate on accepted G11R-A main | pending | typed exact-runner reserved-label control; desired/achieved states; no normal Worker signal; synthetic gates pass locally | exact-head hosted CI and focused merge |
-| G11R-C Qualification readiness | PROTOTYPE / BLOCKED | `3f50af33b3e5b40d67ad82e7f39786f5e382d609` | #22 draft | mechanism-neutral prototype is salvage-only; no real adapters or private workflow | accepted G11R-B, then label-specific readiness adaptation |
+| G11R-B Lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 merged | exact-runner reserved-label REST seam; desired/achieved Agent state; no normal Worker signal; hosted Windows and Ubuntu CI passed | G11R-C |
+| G11R-C Qualification readiness | ACCEPTED / OWNER_ACTION_PENDING | focused label-specific source package | #25 | eleven-gate fail-closed verifier, inert trusted-workflow template, one durable H1 transaction family, and synthetic restore/failure proof; no live trust or host evidence | separate P0 recovery and live H1 preparation Owner transactions |
 | H1 One-shot qualification | TODO | N/A | N/A | one prepared real qualification with automatic restore attempt | G11R-C `OWNER_GATE_READY=true` |
 | G12 Autostart | SALVAGE | draft implementation asset | #14 draft | old PR combines G12+G13; do not merge as-is | H1 PASS; extract clean G12 |
 | G13 Versioned install | SALVAGE | draft implementation asset | #14 draft | immutable-slot/install concepts reusable | H1 PASS; extract clean G13 |
@@ -101,9 +101,13 @@ LOCAL_PERSISTENT_IDLE_WITHDRAWAL=UNPROVEN
 RUN_ONCE_IDLE_WITHDRAWAL=UNPROVEN
 DESIGN_FREEZE_CHANGE=TRUST_BOUNDARY_EXPANSION_PLUS_SEMANTIC_CLARIFICATION
 SEMANTIC_WEAKENING=FALSE
-G11R_B=CANDIDATE_LOCAL_GATES_PASS
-G11R_C=PROTOTYPE_ONLY
-H1=NOT_READY
+G11R_B=ACCEPTED
+G11R_B_MAIN=0c76e10f67d563f2dadc4914b5eefaa29a73d858
+G11R_C=ACCEPTED_SOURCE
+H1_READINESS_VERIFIER=PASS_SYNTHETIC
+H1_TRANSACTION_FAMILY_READY=true
+H1_MUTATION_ALLOWED=false
+H1=WAITING_FOR_OWNER_P0_AND_H1_PREPARATION
 ```
 
 PR #21 contains the accepted ADR, formal model, workflow contract, and PR #17

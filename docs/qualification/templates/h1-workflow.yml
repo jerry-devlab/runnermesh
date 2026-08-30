@@ -1,0 +1,85 @@
+# Inert public template. Copy only into the Owner-selected trusted private
+# qualification repository after replacing repository variables there. Do not
+# activate or dispatch this file from the public RunnerMesh repository.
+name: RunnerMesh H1 trusted witness
+
+on:
+  workflow_dispatch:
+    inputs:
+      witness:
+        description: Predefined H1 witness
+        required: true
+        type: choice
+        options:
+          - primary
+          - no-new-admission
+          - reconnect
+      candidate_sha:
+        description: Exact accepted RunnerMesh source SHA
+        required: true
+        type: string
+      transaction_id:
+        description: Bounded H1 transaction token
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-witness:
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - runnermesh-admit
+    timeout-minutes: 20
+    env:
+      H1_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      H1_EXPECTED_QUALIFICATION_REPOSITORY: ${{ vars.RUNNERMESH_EXPECTED_QUALIFICATION_REPOSITORY }}
+      H1_EXPECTED_RUNNER_NAME: ${{ vars.RUNNERMESH_EXPECTED_RUNNER_NAME }}
+      H1_OBSERVED_QUALIFICATION_REPOSITORY: ${{ github.repository }}
+      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}
+      H1_TRANSACTION_ID: ${{ inputs.transaction_id }}
+    steps:
+      - name: Assert immutable envelope and runtime identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:H1_CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw 'candidate identity is invalid'
+          }
+          if ($env:H1_TRANSACTION_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+            throw 'transaction identity is invalid'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:H1_EXPECTED_QUALIFICATION_REPOSITORY) -or
+              $env:H1_EXPECTED_QUALIFICATION_REPOSITORY -cne $env:H1_OBSERVED_QUALIFICATION_REPOSITORY) {
+            throw 'qualification repository identity is not exact'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:H1_EXPECTED_RUNNER_NAME) -or
+              $env:H1_EXPECTED_RUNNER_NAME -cne $env:H1_OBSERVED_RUNNER_NAME) {
+            throw 'runtime runner identity is not exact'
+          }
+
+      - name: Refuse an admitted no-new-admission witness
+        if: ${{ inputs.witness == 'no-new-admission' }}
+        shell: pwsh
+        run: throw 'withdrawn capacity unexpectedly admitted the witness'
+
+      - name: Check out exact accepted source
+        if: ${{ inputs.witness != 'no-new-admission' }}
+        uses: actions/checkout@v7
+        with:
+          repository: jerry-devlab/runnermesh
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Run predefined primary witness
+        if: ${{ inputs.witness == 'primary' }}
+        shell: pwsh
+        run: cargo test --all-targets
+
+      - name: Run predefined reconnect witness
+        if: ${{ inputs.witness == 'reconnect' }}
+        shell: pwsh
+        run: cargo check

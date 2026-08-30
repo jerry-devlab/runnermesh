@@ -31,8 +31,8 @@ Teams often have capable workstations with intermittent spare capacity, but thos
 
 RunnerMesh is **pre-v0.1 / active development**. The accepted foundation already includes the domain/runtime contracts, Agent Core, local Named Pipe IPC, CLI, native Windows tray, User Activity/Steam/Process List probes, conservative Auto Lite, host observation, official-runner observation, supervisor foundations, persistent ordinary-user development runtime, and the Windows native process snapshot used by observation/probes.
 
-The remaining v0.1 work is concentrated in implementing and qualifying the
-accepted GitHub-native dynamic admission-label lifecycle, productized
+The remaining v0.1 work is concentrated in live Owner-gated qualification of
+the accepted GitHub-native dynamic admission-label lifecycle, productized
 install/autostart/update/rollback/package flows, real workstation dogfood, and
 release closeout. The historical G11 qualification path has been superseded by
 the roadmap-v2 G11R sequence; the project is not yet an installable stable
