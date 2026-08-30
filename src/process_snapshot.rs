@@ -1,19 +1,21 @@
 //! Read-only executable-name and exact-image enumeration for local process
 //! observation. Neither path ever launches a child process or invokes a shell.
 
+#[cfg(any(windows, test))]
 use std::path::PathBuf;
 
 /// Deliberately small failure surface for consumers that must not expose OS
 /// error details through stable RunnerMesh contracts.
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessSnapshotError {
     Unavailable,
-    #[cfg(windows)]
     Failed,
 }
 
 /// One image observed in a point-in-time local process snapshot. Missing path
 /// evidence never grants exact-runner authority.
+#[cfg(any(windows, test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessImage {
     pub process_id: u32,
@@ -23,19 +25,12 @@ pub(crate) struct ProcessImage {
 
 /// Returns executable names from one local process snapshot without launching
 /// any child process or invoking a shell.
+#[cfg(windows)]
 pub(crate) fn executable_names() -> Result<Vec<String>, ProcessSnapshotError> {
-    #[cfg(windows)]
-    {
-        Ok(executable_images()?
-            .into_iter()
-            .map(|image| image.executable_name)
-            .collect())
-    }
-
-    #[cfg(not(windows))]
-    {
-        Err(ProcessSnapshotError::Unavailable)
-    }
+    Ok(executable_images()?
+        .into_iter()
+        .map(|image| image.executable_name)
+        .collect())
 }
 
 #[cfg(windows)]

@@ -133,6 +133,7 @@ fn exact_runner_process_presence(runner_home: &std::path::Path) -> (bool, bool) 
     bound_process_presence(runner_home, &images)
 }
 
+#[cfg(any(windows, test))]
 fn bound_process_presence(
     runner_home: &std::path::Path,
     images: &[crate::process_snapshot::ProcessImage],
