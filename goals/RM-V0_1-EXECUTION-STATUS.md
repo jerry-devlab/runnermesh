@@ -43,8 +43,8 @@ Last roadmap reset: 2026-08-30.
 | PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
 | P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
 | GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
-| G11R-A Admission architecture | ACCEPTED | PR #21 accepted package | #21 | ADR 0004 selects `runnermesh-admit` plus two-phase withdrawal; trust expansion accepted without semantic weakening | merge exact-head PR #21, then G11R-B |
-| G11R-B Lifecycle implementation | READY | N/A | N/A | typed exact-runner reserved-label control; desired/achieved states; no normal Worker signal | accepted G11R-A on main |
+| G11R-A Admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 merged | ADR 0004 selects `runnermesh-admit` plus two-phase withdrawal; hosted Windows and Ubuntu exact-head CI passed; trust expansion accepted without semantic weakening | G11R-B |
+| G11R-B Lifecycle implementation | READY | focused candidate on accepted G11R-A main | pending | typed exact-runner reserved-label control; desired/achieved states; no normal Worker signal; synthetic gates pass locally | exact-head hosted CI and focused merge |
 | G11R-C Qualification readiness | PROTOTYPE / BLOCKED | `3f50af33b3e5b40d67ad82e7f39786f5e382d609` | #22 draft | mechanism-neutral prototype is salvage-only; no real adapters or private workflow | accepted G11R-B, then label-specific readiness adaptation |
 | H1 One-shot qualification | TODO | N/A | N/A | one prepared real qualification with automatic restore attempt | G11R-C `OWNER_GATE_READY=true` |
 | G12 Autostart | SALVAGE | draft implementation asset | #14 draft | old PR combines G12+G13; do not merge as-is | H1 PASS; extract clean G12 |
@@ -101,7 +101,7 @@ LOCAL_PERSISTENT_IDLE_WITHDRAWAL=UNPROVEN
 RUN_ONCE_IDLE_WITHDRAWAL=UNPROVEN
 DESIGN_FREEZE_CHANGE=TRUST_BOUNDARY_EXPANSION_PLUS_SEMANTIC_CLARIFICATION
 SEMANTIC_WEAKENING=FALSE
-G11R_B=AUTHORIZED_AFTER_PR21_MERGE
+G11R_B=CANDIDATE_LOCAL_GATES_PASS
 G11R_C=PROTOTYPE_ONLY
 H1=NOT_READY
 ```

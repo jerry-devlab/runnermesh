@@ -12,10 +12,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    decide_admission, AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
-    BuildProvenance, DoctorCheck, DoctorReport, DoctorStatus, HardSafetyState, LinkKind,
-    LinkSnapshot, LinkState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
-    SystemPreferences, UiPreferences, UserMode, ZenOverride,
+    decide_admission, AdmissionControlSnapshot, AdmissionDecision, AgentCommand, AgentHealth,
+    AgentResponse, AgentSnapshot, BuildProvenance, DesiredAdmissionState, DoctorCheck,
+    DoctorReport, DoctorStatus, ExecutionIdentityEvidence, HardSafetyState, LinkKind, LinkSnapshot,
+    LinkState, OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
+    RunnerPhase, SystemPreferences, UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -58,6 +59,9 @@ pub struct AgentObservation {
     pub health_reason_code: Option<ReasonCode>,
     pub hard_safety: HardSafetyState,
     pub runner_phase: RunnerPhase,
+    pub execution_identity: ExecutionIdentityEvidence,
+    pub work_root: OwnershipEvidence,
+    pub admission_control: AdmissionControlSnapshot,
     pub links: Vec<LinkSnapshot>,
     pub probes: Vec<ProbeSnapshot>,
     /// Current-user presentation facts gathered read-only by the platform
@@ -72,6 +76,11 @@ impl AgentObservation {
             health_reason_code: Some(static_reason("agent-starting")),
             hard_safety: HardSafetyState::Unknown,
             runner_phase: RunnerPhase::Unknown,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+            work_root: OwnershipEvidence::Unknown,
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,
                 state: LinkState::Unknown,
@@ -92,7 +101,11 @@ pub trait AgentObserver {
 /// Boundary for applying the Agent's desired admission intent. G03 uses only
 /// synthetic implementations and does not control an official runner.
 pub trait AgentReconciler {
-    fn reconcile(&mut self, decision: &AdmissionDecision) -> Result<(), String>;
+    fn reconcile(
+        &mut self,
+        decision: &AdmissionDecision,
+        observation: &AgentObservation,
+    ) -> Result<AdmissionControlSnapshot, String>;
 }
 
 /// Persistent configuration storage boundary.
@@ -203,6 +216,7 @@ pub struct AgentCore<O, R, S> {
     build: BuildProvenance,
     observation: AgentObservation,
     decision: AdmissionDecision,
+    admission_control: AdmissionControlSnapshot,
 }
 
 impl<O, R, S> AgentCore<O, R, S>
@@ -221,6 +235,10 @@ where
         validate_schema(&config)?;
         let observation = AgentObservation::unobserved();
         let decision = decide(&config, &observation);
+        let admission_control = observation
+            .admission_control
+            .clone()
+            .with_desired(DesiredAdmissionState::from_decision(&decision));
 
         Ok(Self {
             observer,
@@ -230,6 +248,7 @@ where
             build,
             observation,
             decision,
+            admission_control,
         })
     }
 
@@ -253,8 +272,13 @@ where
             health_reason_code: self.observation.health_reason_code.clone(),
             zen: self.config.zen,
             user_mode: self.config.user_mode,
-            node_state: self.decision.desired_node_state,
+            desired_node_state: self.decision.desired_node_state,
+            achieved_node_state: self.admission_control.achieved_node_state(
+                self.decision.desired_node_state,
+                self.observation.runner_phase,
+            ),
             admission: self.decision.clone(),
+            admission_control: self.admission_control.clone(),
             runner_phase: self.observation.runner_phase,
             links: self.observation.links.clone(),
             probes,
@@ -273,11 +297,13 @@ where
     pub fn observe_decide_reconcile(&mut self) -> Result<AgentSnapshot, AgentCoreError> {
         let observation = self.observer.observe().map_err(AgentCoreError::Observer)?;
         let decision = decide(&self.config, &observation);
-        self.reconciler
-            .reconcile(&decision)
+        let admission_control = self
+            .reconciler
+            .reconcile(&decision, &observation)
             .map_err(AgentCoreError::Reconciler)?;
         self.observation = observation;
         self.decision = decision;
+        self.admission_control = admission_control;
         Ok(self.snapshot())
     }
 
@@ -540,9 +566,11 @@ mod tests {
         CONFIG_SCHEMA_VERSION,
     };
     use crate::{
-        AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, BuildProvenance, LinkKind,
-        LinkSnapshot, LinkState, NodeState, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-        RunnerPhase, SystemPreferences, ThemePreference, UiPreferences, UserMode, ZenOverride,
+        AdmissionControlSnapshot, AdmissionDecision, AgentCommand, AgentHealth, AgentResponse,
+        BuildProvenance, DesiredAdmissionState, ExecutionIdentityEvidence, LinkKind, LinkSnapshot,
+        LinkState, NodeState, OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot,
+        ReasonCode, RunnerPhase, SystemPreferences, ThemePreference, UiPreferences, UserMode,
+        ZenOverride,
     };
 
     #[test]
@@ -561,7 +589,8 @@ mod tests {
         let AgentResponse::Accepted { snapshot } = response else {
             panic!("mode changes must be acknowledged with an Agent snapshot");
         };
-        assert_eq!(snapshot.node_state, NodeState::Drained);
+        assert_eq!(snapshot.desired_node_state, NodeState::Drained);
+        assert_eq!(snapshot.achieved_node_state, None);
         assert!(!snapshot.admission.allow_new_work);
         assert_eq!(snapshot.admission.reason_code.as_str(), "manual-work");
         assert!(snapshot.admission.drain_requested);
@@ -591,7 +620,7 @@ mod tests {
         };
         assert_eq!(snapshot.user_mode, UserMode::ForceCi);
         assert_eq!(snapshot.zen, ZenOverride::Enabled);
-        assert_eq!(snapshot.node_state, NodeState::Offline);
+        assert_eq!(snapshot.desired_node_state, NodeState::Offline);
         assert_eq!(snapshot.admission.reason_code.as_str(), "zen-enabled");
         assert!(snapshot.admission.drain_requested);
     }
@@ -603,6 +632,11 @@ mod tests {
             health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+            work_root: OwnershipEvidence::Unknown,
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,
                 state: LinkState::Unknown,
@@ -708,6 +742,11 @@ mod tests {
             health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+            work_root: OwnershipEvidence::Unknown,
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             links: Vec::new(),
             probes: vec![ProbeSnapshot {
                 id: ProbeId::new("user-activity").unwrap(),
@@ -794,6 +833,11 @@ mod tests {
             health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             hard_safety: crate::HardSafetyState::Clear,
             runner_phase: RunnerPhase::Listening,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+            work_root: OwnershipEvidence::Unknown,
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Full,
+            ),
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,
                 state: LinkState::Unknown,
@@ -810,9 +854,16 @@ mod tests {
     }
 
     impl AgentReconciler for RecordingReconciler {
-        fn reconcile(&mut self, decision: &AdmissionDecision) -> Result<(), String> {
+        fn reconcile(
+            &mut self,
+            decision: &AdmissionDecision,
+            observation: &AgentObservation,
+        ) -> Result<AdmissionControlSnapshot, String> {
             self.decisions.push(decision.clone());
-            Ok(())
+            Ok(observation
+                .admission_control
+                .clone()
+                .with_desired(DesiredAdmissionState::from_decision(decision)))
         }
     }
 

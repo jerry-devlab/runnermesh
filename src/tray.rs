@@ -183,7 +183,7 @@ pub enum TrayUiUpdate {
 /// Result of a stable menu action after the Agent responds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TrayActionResult {
-    Snapshot(AgentSnapshot),
+    Snapshot(Box<AgentSnapshot>),
     Doctor(DoctorReport),
     Rejected(crate::ReasonCode),
     NoOp,
@@ -270,7 +270,7 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
         match response {
             AgentResponse::Snapshot(snapshot) | AgentResponse::Accepted { snapshot } => {
                 self.current_render = Some(render(&snapshot));
-                Ok(TrayActionResult::Snapshot(snapshot))
+                Ok(TrayActionResult::Snapshot(Box::new(snapshot)))
             }
             AgentResponse::Doctor(report) => Ok(TrayActionResult::Doctor(report)),
             AgentResponse::Rejected { reason_code } => Ok(TrayActionResult::Rejected(reason_code)),
@@ -367,7 +367,7 @@ fn send(
         });
     }
     match response.body {
-        IpcResponseBody::Success(response) => Ok(response),
+        IpcResponseBody::Success(response) => Ok(*response),
         IpcResponseBody::Failure(error) => Ok(AgentResponse::Rejected {
             reason_code: error.reason_code,
         }),
@@ -385,7 +385,10 @@ fn render(snapshot: &AgentSnapshot) -> TrayRender {
         .find(|link| link.kind == LinkKind::GithubActions)
         .map(|link| link.state)
         .unwrap_or(LinkState::Unknown);
-    let icon_glyph = match snapshot.node_state {
+    let displayed_capacity = snapshot
+        .achieved_node_state
+        .unwrap_or(snapshot.desired_node_state);
+    let icon_glyph = match displayed_capacity {
         crate::NodeState::Full => TrayIconGlyph::Full,
         crate::NodeState::Throttled => TrayIconGlyph::Throttled,
         crate::NodeState::Drained => TrayIconGlyph::Drained,
@@ -396,9 +399,10 @@ fn render(snapshot: &AgentSnapshot) -> TrayRender {
         locale: snapshot.effective_ui_preferences.locale,
         menu_hints_enabled: snapshot.ui_preferences.menu_hints_enabled,
         tooltip: format!(
-            "RunnerMesh {} · {} · {}",
+            "RunnerMesh {} · desired {} · {} · {}",
             icon_glyph.marker(),
-            snapshot.node_state,
+            snapshot.desired_node_state,
+            snapshot.admission_control.lifecycle,
             snapshot.user_mode
         ),
         entries: vec![
@@ -420,10 +424,16 @@ fn render(snapshot: &AgentSnapshot) -> TrayRender {
             item(
                 TrayMenuId::Capacity,
                 format!(
-                    "{}: {} · {}",
+                    "{}: desired {} · {} · {}",
                     text(language, Text::Capacity),
-                    snapshot.node_state,
-                    snapshot.user_mode
+                    snapshot.desired_node_state,
+                    snapshot.admission_control.lifecycle,
+                    snapshot
+                        .admission_control
+                        .reason_code
+                        .as_ref()
+                        .map(|reason| reason.as_str())
+                        .unwrap_or("none")
                 ),
                 None,
                 false,
@@ -781,11 +791,13 @@ mod tests {
         TrayMenuEntry, TrayMenuId, TrayUiUpdate,
     };
     use crate::{
-        AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, AgentTransport,
-        BuildProvenance, EffectiveLocale, IpcRequest, IpcResponse, IpcResponseBody,
-        IpcTransportError, LanguagePreference, LinkKind, LinkSnapshot, LinkState, NodeState,
-        ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, ThemePreference,
-        UiPreferences, UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
+        AdmissionControlSnapshot, AdmissionDecision, AdmissionLifecycleState,
+        AdmissionSelectorState, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot,
+        AgentTransport, BuildProvenance, DesiredAdmissionState, EffectiveLocale,
+        ExactRunnerIdentityState, IpcRequest, IpcResponse, IpcResponseBody, IpcTransportError,
+        LanguagePreference, LinkKind, LinkSnapshot, LinkState, NodeState, ProbeId,
+        ProbeRuntimeState, ProbeSnapshot, ReasonCode, ReservedLabelOwnershipState, RunnerPhase,
+        ThemePreference, UiPreferences, UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
     };
 
     #[test]
@@ -962,7 +974,7 @@ mod tests {
             Ok(IpcResponse {
                 protocol_version: IPC_PROTOCOL_VERSION,
                 request_id: request.request_id,
-                body: IpcResponseBody::Success(self.response.clone()),
+                body: IpcResponseBody::Success(Box::new(self.response.clone())),
             })
         }
     }
@@ -1003,13 +1015,17 @@ mod tests {
             health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             zen: ZenOverride::Disabled,
             user_mode: UserMode::Auto,
-            node_state: NodeState::Drained,
+            desired_node_state: NodeState::Drained,
+            achieved_node_state: None,
             admission: AdmissionDecision {
                 allow_new_work: false,
                 desired_node_state: NodeState::Drained,
                 reason_code: ReasonCode::new("awaiting-auto-policy").unwrap(),
                 drain_requested: true,
             },
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             runner_phase: RunnerPhase::Unknown,
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,
@@ -1030,5 +1046,36 @@ mod tests {
             auto_idle_threshold_seconds: 300,
             update_checks_enabled: true,
         }
+    }
+
+    #[test]
+    fn tray_explains_withdrawal_blocked_without_claiming_achieved_drained() {
+        let mut snapshot = sample_snapshot();
+        snapshot.admission_control = AdmissionControlSnapshot {
+            desired: DesiredAdmissionState::Drained,
+            lifecycle: AdmissionLifecycleState::WithdrawalBlocked,
+            selector: AdmissionSelectorState::Present,
+            exact_runner_identity: ExactRunnerIdentityState::Verified,
+            reserved_label_ownership: ReservedLabelOwnershipState::Verified,
+            active_bound_worker: true,
+            reason_code: Some(ReasonCode::new("admission-api-unavailable").unwrap()),
+            retry: None,
+        };
+        snapshot.achieved_node_state = None;
+
+        let rendered = render(&snapshot);
+        assert!(rendered.tooltip.contains("WITHDRAWAL_BLOCKED"));
+        let capacity = rendered
+            .entries
+            .iter()
+            .find(|entry| {
+                matches!(entry, TrayMenuEntry::Item(item) if item.id == TrayMenuId::Capacity)
+            })
+            .expect("capacity entry must be present");
+        let TrayMenuEntry::Item(capacity) = capacity else {
+            panic!("capacity entry must be an item");
+        };
+        assert!(capacity.label.contains("WITHDRAWAL_BLOCKED"));
+        assert!(capacity.label.contains("admission-api-unavailable"));
     }
 }

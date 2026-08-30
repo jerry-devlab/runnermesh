@@ -87,7 +87,9 @@ impl<S: RunnerSource> OfficialRunnerObserver<S> {
 
 /// Read-only Windows source. It accepts a caller-selected runner home rather
 /// than scanning unrelated paths. It reads only existence/metadata evidence and
-/// process names; it does not parse, alter, or expose runner configuration.
+/// exact executable paths; it does not parse, alter, or expose runner
+/// configuration. Same-name processes from another runner home are not local
+/// evidence for this selected runner.
 #[derive(Clone, Debug)]
 pub struct WindowsRunnerSource {
     runner_home: PathBuf,
@@ -105,13 +107,7 @@ impl RunnerSource for WindowsRunnerSource {
     fn collect(&self) -> RunnerLocalEvidence {
         let home_exists = self.runner_home.is_dir();
         let metadata_present = self.runner_home.join(".runner").is_file();
-        let process_names = crate::process_snapshot::executable_names().unwrap_or_default();
-        let listener_present = process_names
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case("Runner.Listener.exe"));
-        let worker_present = process_names
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case("Runner.Worker.exe"));
+        let (listener_present, worker_present) = exact_runner_process_presence(&self.runner_home);
 
         RunnerLocalEvidence {
             runner_home: home_exists.then(|| self.runner_home.clone()),
@@ -129,6 +125,57 @@ impl RunnerSource for WindowsRunnerSource {
             },
         }
     }
+}
+
+#[cfg(windows)]
+fn exact_runner_process_presence(runner_home: &std::path::Path) -> (bool, bool) {
+    let images = crate::process_snapshot::executable_images().unwrap_or_default();
+    bound_process_presence(runner_home, &images)
+}
+
+fn bound_process_presence(
+    runner_home: &std::path::Path,
+    images: &[crate::process_snapshot::ProcessImage],
+) -> (bool, bool) {
+    let expected_listener = runner_home.join("bin").join("Runner.Listener.exe");
+    let expected_worker = runner_home.join("bin").join("Runner.Worker.exe");
+    let Ok(expected_listener) = expected_listener.canonicalize() else {
+        return (false, false);
+    };
+    let Ok(expected_worker) = expected_worker.canonicalize() else {
+        return (false, false);
+    };
+    let mut listener_present = false;
+    let mut worker_present = false;
+    for image in images {
+        let Some(path) = image
+            .executable_path
+            .as_ref()
+            .and_then(|path| path.canonicalize().ok())
+        else {
+            continue;
+        };
+        if image
+            .executable_name
+            .eq_ignore_ascii_case("Runner.Listener.exe")
+            && path == expected_listener
+        {
+            listener_present = true;
+        }
+        if image
+            .executable_name
+            .eq_ignore_ascii_case("Runner.Worker.exe")
+            && path == expected_worker
+        {
+            worker_present = true;
+        }
+    }
+    (listener_present, worker_present)
+}
+
+#[cfg(not(windows))]
+fn exact_runner_process_presence(_runner_home: &std::path::Path) -> (bool, bool) {
+    (false, false)
 }
 
 fn derive_phase(evidence: &RunnerLocalEvidence) -> RunnerPhase {
@@ -166,13 +213,49 @@ fn static_reason(value: &'static str) -> ReasonCode {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::PathBuf,
+        process,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use super::{
         ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
         RunnerLocalEvidence, RunnerSource,
     };
     use crate::{LinkState, RunnerPhase};
+
+    #[test]
+    fn unrelated_same_name_process_images_remain_outside_the_exact_runner_home() {
+        let root = temporary_root();
+        let target = root.join("target");
+        let unrelated = root.join("unrelated");
+        for home in [&target, &unrelated] {
+            fs::create_dir_all(home.join("bin")).unwrap();
+            fs::write(home.join("bin").join("Runner.Listener.exe"), b"fixture").unwrap();
+            fs::write(home.join("bin").join("Runner.Worker.exe"), b"fixture").unwrap();
+        }
+        let images = vec![
+            crate::process_snapshot::ProcessImage {
+                process_id: 10,
+                executable_name: "Runner.Listener.exe".to_owned(),
+                executable_path: Some(unrelated.join("bin").join("Runner.Listener.exe")),
+            },
+            crate::process_snapshot::ProcessImage {
+                process_id: 11,
+                executable_name: "Runner.Worker.exe".to_owned(),
+                executable_path: Some(unrelated.join("bin").join("Runner.Worker.exe")),
+            },
+        ];
+
+        assert_eq!(
+            super::bound_process_presence(&target, &images),
+            (false, false)
+        );
+        assert_eq!(images[0].process_id, 10);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn process_presence_does_not_claim_connected_without_link_evidence() {
@@ -241,5 +324,14 @@ mod tests {
         fn collect(&self) -> RunnerLocalEvidence {
             self.0.clone()
         }
+    }
+
+    fn temporary_root() -> PathBuf {
+        static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ROOT_ID.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("runnermesh-runner-observer-{}-{id}", process::id()));
+        fs::create_dir(&root).unwrap();
+        root
     }
 }

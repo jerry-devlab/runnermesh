@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{de, Deserialize, Deserializer, Serialize};
 
-use crate::{NodeState, UserMode};
+use crate::{AdmissionControlSnapshot, NodeState, UserMode};
 
 /// The observed lifecycle phase of the official runner.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -426,8 +426,13 @@ pub struct AgentSnapshot {
     pub health_reason_code: Option<ReasonCode>,
     pub zen: ZenOverride,
     pub user_mode: UserMode,
-    pub node_state: NodeState,
+    /// Policy target. Transitional/achieved admission truth is separate.
+    pub desired_node_state: NodeState,
+    /// Present only when the composite remote/local evidence proves a stable
+    /// v0.1 node state. Withdrawal transitions deliberately serialize `null`.
+    pub achieved_node_state: Option<NodeState>,
     pub admission: AdmissionDecision,
+    pub admission_control: AdmissionControlSnapshot,
     pub runner_phase: RunnerPhase,
     pub links: Vec<LinkSnapshot>,
     pub probes: Vec<ProbeSnapshot>,
@@ -518,7 +523,7 @@ mod tests {
         ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase, SystemPreferences,
         ThemePreference, UiPreferences, ZenOverride,
     };
-    use crate::{NodeState, UserMode};
+    use crate::{AdmissionControlSnapshot, DesiredAdmissionState, NodeState, UserMode};
 
     #[test]
     fn runtime_enum_json_contracts_are_exact() {
@@ -641,7 +646,15 @@ mod tests {
 
         assert_eq!(encoded["type"], "accepted");
         assert_eq!(encoded["payload"]["snapshot"]["user_mode"], "auto");
-        assert_eq!(encoded["payload"]["snapshot"]["node_state"], "DRAINED");
+        assert_eq!(
+            encoded["payload"]["snapshot"]["desired_node_state"],
+            "DRAINED"
+        );
+        assert!(encoded["payload"]["snapshot"]["achieved_node_state"].is_null());
+        assert_eq!(
+            encoded["payload"]["snapshot"]["admission_control"]["lifecycle"],
+            "NOT_CONFIGURED"
+        );
         assert_eq!(
             encoded["payload"]["snapshot"]["probes"][0]["runtime_state"],
             "UNKNOWN"
@@ -702,13 +715,17 @@ mod tests {
             health_reason_code: Some(ReasonCode::new("host-observed").unwrap()),
             zen: ZenOverride::Disabled,
             user_mode: UserMode::Auto,
-            node_state: NodeState::Drained,
+            desired_node_state: NodeState::Drained,
+            achieved_node_state: None,
             admission: AdmissionDecision {
                 allow_new_work: false,
                 desired_node_state: NodeState::Drained,
                 reason_code: ReasonCode::new("awaiting-auto-evidence").unwrap(),
                 drain_requested: false,
             },
+            admission_control: AdmissionControlSnapshot::not_configured(
+                DesiredAdmissionState::Drained,
+            ),
             runner_phase: RunnerPhase::Unknown,
             links: vec![LinkSnapshot {
                 kind: LinkKind::GithubActions,

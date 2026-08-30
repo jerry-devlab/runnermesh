@@ -1,5 +1,6 @@
 //! Stable domain contracts for RunnerMesh.
 
+mod admission;
 mod agent;
 #[cfg(windows)]
 pub mod agent_runtime;
@@ -21,6 +22,15 @@ pub mod windows_supervisor;
 #[cfg(windows)]
 pub mod windows_tray_theme;
 
+pub use admission::{
+    AdmissionAgentReconciler, AdmissionBackendError, AdmissionBinding, AdmissionControlBackend,
+    AdmissionControlSnapshot, AdmissionController, AdmissionLifecycleState, AdmissionSelectorState,
+    CredentialLease, CredentialProvider, CredentialReference, DesiredAdmissionState,
+    ExactRunnerIdentityState, GithubHttpRequest, GithubHttpResponse, GithubHttpTransport,
+    GithubRestAdmissionBackend, GithubTransportError, HttpMethod, LocalAdmissionEvidence,
+    RegistrationScope, RemoteAdmissionObservation, ReservedLabelOwnership,
+    ReservedLabelOwnershipState, RetryDirective, RetryPolicy, RESERVED_ADMISSION_LABEL,
+};
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
     ConfigStore, ConfigStoreError, FileConfigStore, MemoryConfigStore, CONFIG_SCHEMA_VERSION,
