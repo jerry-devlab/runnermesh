@@ -27,6 +27,11 @@ sync authoritative main
 
 Remote Git `main`, PR state, hosted CI, and the public execution ledger are durable checkpoints. Do not invent a parallel custom lock/slot system for normal source development.
 
+After a passing exact-head PR merges, verify remote `main` immediately.  Work on
+the next safe Goal may overlap the post-merge main CI run, but the next PR must
+not merge until that prior main run is healthy.  Latch a post-merge failure and
+stop the merge pipeline until it is understood or resolved.
+
 ## Writer model
 
 Exactly one Implementer writes a branch/worktree. Preserve foreign work. Architect/reviewer/auditor roles are read-oriented unless write authority is explicitly transferred.

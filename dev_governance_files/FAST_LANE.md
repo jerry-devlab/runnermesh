@@ -6,12 +6,27 @@ Authority: `QUALITY_GATES.md`.
 
 ```text
 classify changed risk
--> implement/focused tests
--> settle one candidate
+-> implement/focused local tests
+-> self-review and settle one candidate
+-> normally push once
 -> run one final gate per active risk dimension
 -> reuse unchanged-risk evidence
 -> merge
 ```
+
+Run the repository-owned local entrypoint from the settled candidate:
+
+```text
+python tools/quality/fast_gate.py --base <accepted-main>
+```
+
+On a governed Windows Conda host where the `python` app alias is disabled, use
+`conda run -n base python` in place of `python`.
+
+Use `--full` when candidate-level all-target tests and Clippy are required.
+`DOCS_ONLY` runs the lightweight docs/public/diff gates without Cargo.  The
+classifier's path hints are assistance only; the Goal still declares semantic
+risk and any additional gate.
 
 ## Quick classes
 
@@ -36,6 +51,19 @@ If relevant risk diff is empty:
 ```
 
 Do not rerun simply because HEAD advanced.
+
+Independent review uses accepted prior evidence plus the current risk delta.
+Routine code needs Implementer self-review, focused tests, and one candidate CI,
+not an automatic independent auditor.  Aim for 2-5 minutes on an ordinary delta
+and 10-20 minutes on material runner/source risk; trust/security and H1/H2/release
+take the depth they require.  These aims never create an automatic PASS.
+
+## Post-merge overlap
+
+After merge, verify remote `main` and start the next safe Goal while main CI runs
+asynchronously.  Do not merge the next PR until that prior main run passes; latch
+a failure immediately.  Full main-push CI remains required while main protection
+and the stable required PR gate are not machine-enforced.
 
 ## Blockers
 

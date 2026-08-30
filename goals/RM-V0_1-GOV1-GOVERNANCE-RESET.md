@@ -19,12 +19,21 @@ Make future 6-24 hour autonomous development rely on durable repository state in
 When the Owner chooses to apply it, `main` should require:
 
 - pull-request based updates;
-- required hosted CI for admitted source changes;
+- the stable required hosted check named `CI Gate`;
 - no force push;
 - no branch deletion;
 - no ordinary direct push bypass for autonomous writers.
 
 Changing GitHub repository/Organization settings is not authorized by this Goal unless the Owner explicitly grants that separate action.
+
+Only after the Owner verifies all three conditions below may a future Goal
+consider replacing full main-push code CI with a lightweight integrity check:
+
+```text
+MAIN_PROTECTION=ENFORCED
+REQUIRED_PR_GATE=ENFORCED
+DIRECT_PUSH_BLOCKED=true
+```
 
 ## Acceptance
 
