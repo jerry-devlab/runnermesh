@@ -36,9 +36,9 @@ Preferred flow:
 1. synchronize authoritative `main` or admitted predecessor;
 2. require a clean/owned worktree;
 3. create one focused branch for independently revertible work;
-4. implement with focused tests;
-5. settle one candidate head;
-6. push/open or update the focused PR;
+4. implement and iterate locally with focused tests;
+5. self-review the bounded delta and settle one candidate head;
+6. normally push/open the focused PR once, after the candidate is reasonably settled;
 7. run only gates selected by `QUALITY_GATES.md`;
 8. reuse accepted evidence when the relevant risk diff is empty;
 9. merge intentionally after required gates pass;
@@ -47,6 +47,10 @@ Preferred flow:
 12. emit a concise receipt.
 
 Do not manufacture extra commits solely for governance checkpoints.
+
+Hosted CI is final candidate evidence, not the ordinary edit/compile loop.
+Mechanical CI failures may receive bounded repair pushes, but avoid using repeated
+full hosted runs to discover changes that focused local gates would have found.
 
 ## 4. RunnerMesh risk vector
 
@@ -231,6 +235,10 @@ Dedicated auditors are reserved for changed destructive/persistent external writ
 
 Do not chain auditors over unchanged evidence.
 
+Ordinary code uses Implementer self-review, focused tests, and one settled-head
+hosted CI run.  When an independent audit is required, its basis is accepted
+prior evidence plus the current risk delta, not an automatic full-history audit.
+
 Once an unchanged blocker is proven, record:
 
 ```text
@@ -238,6 +246,11 @@ BLOCKER_LATCHED=true
 ```
 
 Re-evaluate only after relevant source, evidence, trust state, Owner action, or external prerequisite changes.
+
+After an exact-head PR passes and merges, verify the remote `main` SHA
+immediately.  The next safe source Goal may begin while post-merge `main` CI runs,
+but no next PR may merge until the prior `main` run is healthy.  A failure latches
+a blocker and stops that pipeline.
 
 ## 17. Execution ledger
 

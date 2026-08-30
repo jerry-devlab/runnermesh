@@ -9,9 +9,75 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  classify:
+    name: Change classification
+    runs-on: ubuntu-latest
+    outputs:
+      change_class: ${{ steps.changes.outputs.change_class }}
+      base_sha: ${{ steps.changes.outputs.base_sha }}
+      head_sha: ${{ steps.changes.outputs.head_sha }}
+      diff_mode: ${{ steps.changes.outputs.diff_mode }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Classify candidate delta
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          mode=merge-base
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            mode=direct
+          fi
+          python tools/quality/change_classifier.py \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --diff-mode "$mode" \
+            --github-output "$GITHUB_OUTPUT"
+
+  fast-gate:
+    name: Fast Gate
+    needs: classify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - name: Test repository quality tools
+        run: python -m unittest discover -s tools/quality/tests -v
+      - name: Audit public delta
+        run: >-
+          python tools/quality/public_audit.py
+          --base "${{ needs.classify.outputs.base_sha }}"
+          --head "${{ needs.classify.outputs.head_sha }}"
+          --diff-mode "${{ needs.classify.outputs.diff_mode }}"
+
+  format:
+    name: Format
+    needs: classify
+    if: needs.classify.result == 'success' && (github.event_name != 'pull_request' || needs.classify.outputs.change_class != 'DOCS_ONLY')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - run: cargo fmt --all -- --check
+
   cargo:
-    name: Cargo (${{ matrix.os }})
+    name: Cargo tests + Clippy (${{ matrix.os }})
+    needs: classify
+    if: needs.classify.result == 'success' && (github.event_name != 'pull_request' || needs.classify.outputs.change_class != 'DOCS_ONLY')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,7 +85,53 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
-      - run: cargo check
-      - run: cargo test
-      - run: cargo fmt --all -- --check
+        with:
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - name: Resolve compiler identity
+        id: toolchain
+        shell: bash
+        run: |
+          release="$(rustc --version --verbose | sed -n 's/^release: //p')"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: Cache Cargo inputs and build output
+        id: cargo-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.release }}-${{ hashFiles('Cargo.lock') }}
+      - name: Report cache state
+        shell: bash
+        run: echo "CARGO_CACHE_HIT=${{ steps.cargo-cache.outputs.cache-hit }}"
+      - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  gate:
+    name: CI Gate
+    if: always()
+    needs: [classify, fast-gate, format, cargo]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the risk-appropriate jobs
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CHANGE_CLASS: ${{ needs.classify.outputs.change_class }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
+          FORMAT_RESULT: ${{ needs.format.result }}
+          CARGO_RESULT: ${{ needs.cargo.result }}
+        run: |
+          [[ "$CLASSIFY_RESULT" == "success" ]]
+          [[ "$FAST_GATE_RESULT" == "success" ]]
+          if [[ "$EVENT_NAME" == "pull_request" && "$CHANGE_CLASS" == "DOCS_ONLY" ]]; then
+            [[ "$FORMAT_RESULT" == "skipped" ]]
+            [[ "$CARGO_RESULT" == "skipped" ]]
+          else
+            [[ "$FORMAT_RESULT" == "success" ]]
+            [[ "$CARGO_RESULT" == "success" ]]
+          fi
+          echo "CI_GATE=PASS"
