@@ -18,6 +18,8 @@ Ownership/minimal-mutation/idempotence/drift/restore family + hosted CI.
 
 ## Exit
 
-Autostart can be managed safely in sandbox qualification and is ready for G16 activation.
+Autostart can be managed safely in sandbox qualification and is ready for G15R
+integration after G13-G15 are accepted. It is not yet authorized for real
+workstation activation.
 
 Next: G13.
