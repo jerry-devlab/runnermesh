@@ -1,5 +1,11 @@
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -553,14 +559,39 @@ fn workflow_contents_path(binding: &TrustedWorkflowBinding) -> String {
 }
 
 fn path_kind_state(path: &Path, directory: bool) -> EvidenceState {
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.file_type().is_symlink() => EvidenceState::Fail,
-        Ok(metadata) if directory && metadata.is_dir() => EvidenceState::Pass,
-        Ok(metadata) if !directory && metadata.is_file() => EvidenceState::Pass,
-        Ok(_) => EvidenceState::Fail,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => EvidenceState::Fail,
-        Err(_) => EvidenceState::Unknown,
+    let mut leaf = None;
+    for (index, ancestor) in path.ancestors().enumerate() {
+        match ancestor.symlink_metadata() {
+            Ok(metadata) if metadata_is_link_or_reparse(&metadata) => return EvidenceState::Fail,
+            Ok(metadata) if index == 0 => leaf = Some(metadata),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return EvidenceState::Fail
+            }
+            Err(_) => return EvidenceState::Unknown,
+        }
     }
+    match leaf {
+        Some(metadata) if directory && metadata.is_dir() => EvidenceState::Pass,
+        Some(metadata) if !directory && metadata.is_file() => EvidenceState::Pass,
+        Some(_) | None => EvidenceState::Fail,
+    }
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    if windows_file_attributes_are_reparse(metadata.file_attributes()) {
+        return true;
+    }
+    false
+}
+
+#[cfg(windows)]
+fn windows_file_attributes_are_reparse(attributes: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 fn percent_encode_component(value: &str) -> String {
@@ -839,6 +870,39 @@ mod tests {
 
         std::fs::remove_dir_all(&binding.runner_home).unwrap();
         std::fs::remove_dir_all(&binding.work_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_binding_source_refuses_a_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "runnermesh-symlink-ancestor-{}",
+            std::process::id()
+        ));
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("bin")).unwrap();
+        std::fs::write(real.join("bin").join("Runner.Listener.exe"), b"synthetic").unwrap();
+        symlink(&real, root.join("linked")).unwrap();
+
+        assert_eq!(
+            path_kind_state(
+                &root.join("linked").join("bin").join("Runner.Listener.exe"),
+                false,
+            ),
+            EvidenceState::Fail
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reparse_attribute_is_refused() {
+        assert!(windows_file_attributes_are_reparse(
+            FILE_ATTRIBUTE_REPARSE_POINT
+        ));
+        assert!(!windows_file_attributes_are_reparse(0));
     }
 
     struct FakeAdmissionBackend(Result<RemoteAdmissionObservation, AdmissionBackendError>);

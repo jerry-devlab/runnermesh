@@ -215,24 +215,34 @@ pub fn assess_h1_workflow_template() -> H1WorkflowTemplateAssessment {
 pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
     let lowercase = source.to_ascii_lowercase();
     let secret_context = ["secrets", "."].concat();
+    let frozen_template_exact =
+        normalize_workflow_source(source) == normalize_workflow_source(H1_WORKFLOW_TEMPLATE);
     let triggers = top_level_child_keys(source, "on", 2);
     let workflow_inputs = nested_child_keys(source, "workflow_dispatch", "inputs", 6);
     let selectors = list_values(source, "runs-on");
     H1WorkflowTemplateAssessment {
-        workflow_dispatch_only: triggers == ["workflow_dispatch"],
-        reserved_selector_exact: selectors
-            == ["self-hosted", "Windows", "X64", RESERVED_ADMISSION_LABEL],
-        runtime_identity_asserted: source.contains("H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}")
+        workflow_dispatch_only: frozen_template_exact && triggers == ["workflow_dispatch"],
+        reserved_selector_exact: frozen_template_exact
+            && selectors == ["self-hosted", "Windows", "X64", RESERVED_ADMISSION_LABEL],
+        runtime_identity_asserted: frozen_template_exact
+            && source.contains("H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}")
             && source.contains("RUNNERMESH_EXPECTED_RUNNER_NAME")
             && source.contains("-cne $env:H1_OBSERVED_RUNNER_NAME"),
-        arbitrary_command_input_absent: workflow_inputs
-            == ["witness", "candidate_sha", "transaction_id"]
+        arbitrary_command_input_absent: frozen_template_exact
+            && workflow_inputs == ["witness", "candidate_sha", "transaction_id"]
             && !lowercase.contains("inputs.command")
             && !lowercase.contains("inputs.script")
             && !lowercase.contains("run: ${{ inputs.")
             && !lowercase.contains("invoke-expression"),
-        secret_context_absent: !lowercase.contains(&secret_context),
+        secret_context_absent: frozen_template_exact
+            && !lowercase.contains(&secret_context)
+            && !lowercase.contains("secrets[")
+            && !lowercase.contains("secrets ["),
     }
+}
+
+fn normalize_workflow_source(source: &str) -> String {
+    source.replace("\r\n", "\n")
 }
 
 fn top_level_child_keys<'a>(source: &'a str, root: &str, child_indent: usize) -> Vec<&'a str> {
@@ -763,6 +773,24 @@ mod tests {
             "      command:\n        required: true\n        type: string\n      candidate_sha:",
         );
         assert!(!assess_h1_workflow_source(&command_input).arbitrary_command_input_absent);
+
+        let duplicate_on = format!("{H1_WORKFLOW_TEMPLATE}\non:\n  workflow_dispatch:\n");
+        assert!(!assess_h1_workflow_source(&duplicate_on).source_contract_ready());
+
+        let extra_job = H1_WORKFLOW_TEMPLATE.replace(
+            "jobs:",
+            "jobs:\n  untrusted:\n    runs-on: ubuntu-latest\n    steps: []",
+        );
+        assert!(!assess_h1_workflow_source(&extra_job).source_contract_ready());
+
+        let commented_identity = H1_WORKFLOW_TEMPLATE.replace(
+            "      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
+            "      # H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
+        );
+        assert!(!assess_h1_workflow_source(&commented_identity).source_contract_ready());
+
+        let bracket_secret = format!("{H1_WORKFLOW_TEMPLATE}\n# ${{{{ secrets['UNSAFE'] }}}}\n");
+        assert!(!assess_h1_workflow_source(&bracket_secret).secret_context_absent);
     }
 
     #[test]

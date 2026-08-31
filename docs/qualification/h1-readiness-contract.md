@@ -59,12 +59,17 @@ The prepared source layer consists of:
 
 Binding and response drift fail closed. The workflow client can only read the
 configured file at an immutable commit reference; it has no dispatch method.
+Fetched workflow bytes must match the frozen inert template (apart from line
+ending normalization), preventing duplicate-key or equivalent-YAML ambiguity.
 That read proves source identity but leaves the private runtime runner-name
 variable `UNKNOWN` until a separate Owner-side verifier proves its exact value.
 The admission client retains only exact-runner observation and add-one/remove-
 one reserved-label operations with positive readback. The source adapters are
 not activated by default and tests inject only synthetic credentials and fake
 HTTP responses.
+
+The local filesystem collector rejects a symlink or Windows reparse point at
+the leaf or any ancestor before accepting runner-home or image-path evidence.
 
 ## Evidence meanings
 
