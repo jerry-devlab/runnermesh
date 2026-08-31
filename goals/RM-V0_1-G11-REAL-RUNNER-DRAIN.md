@@ -1,6 +1,6 @@
 # G11 — Historical Real Runner Lifecycle and Graceful Drain Goal
 
-Status: **SUPERSEDED by roadmap v2 G11R-A / G11R-B / G11R-C + one-shot H1**
+Status: **SUPERSEDED by accepted G11R-A / G11R-B / G11R-C and Roadmap v3**
 
 This file is retained as historical context only. Do not start a new V3/V4/V4R/V4S-style qualification from this Goal.
 

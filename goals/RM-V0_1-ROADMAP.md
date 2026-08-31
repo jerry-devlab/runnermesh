@@ -1,325 +1,211 @@
-# RunnerMesh v0.1 Implementation Roadmap v2
+# RunnerMesh v0.1 Implementation Roadmap v3
 
 Status: **Accepted implementation sequence**
 
-This roadmap supersedes the original post-G10R execution sequence from G11 onward. G01-G10, G06R, and G10R remain accepted. The product contract in `docs/v0.1-design-freeze.md` remains authoritative unless an explicit ADR changes it.
+Roadmap v3 adopts the accepted 2026-08-31 comprehensive health-audit
+conclusions as the current planning truth. It supersedes roadmap v2 for
+remaining execution without reopening the accepted G11R architecture or the
+frozen product contract in `docs/v0.1-design-freeze.md`.
 
-The reset follows the 2026-08-30 product/architecture audit. The audit concluded that the original G11 qualification path had drifted toward a qualification framework, that `Busy -> Drain` and `Listening -> Drain` must be separated, and that real-host mutation must not begin before routing, workflow, recovery, and rollback prerequisites are ready.
+The project is not globally blocked. Safe source preparation and Owner-gated
+live work are separate lanes:
+
+```text
+EXECUTION_MODEL=PARALLEL_SOURCE_PREP_WITH_H1_MERGE_GATE
+P0_PRODUCT_BLOCKER=false
+P0_H1_BLOCKER=true
+P0_SOURCE_DEVELOPMENT_BLOCKER=false
+H1_SHOULD_BLOCK_SOURCE_PREPARATION=false
+```
+
+P0 and H1 may block live qualification and product acceptance. They do not
+automatically stop bounded, non-mutating source work. G12-G15 may be extracted,
+refactored, tested, and prepared before H1, but they may not be accepted or
+merged as product milestones until H1 qualification and baseline restoration
+both pass.
 
 ## Product invariant carried forward
 
-RunnerMesh v0.1 remains a Windows, single-workstation, human-first GitHub Actions admission/lifecycle controller for an already-configured official self-hosted runner.
-
-Key invariants remain:
+RunnerMesh v0.1 remains a Windows, single-workstation, human-first GitHub
+Actions admission/lifecycle controller for an already-configured official
+self-hosted runner.
 
 - human activity has priority over CI;
 - uncertainty fails closed for new CI admission;
-- active normal jobs are not destructively terminated for ordinary Work/Gaming/Zen/drain transitions;
+- active normal jobs are not destructively terminated for ordinary mode or
+  drain transitions;
 - GitHub Actions owns workflow scheduling and the job protocol;
 - RunnerMesh manages contributed capacity, admission, and lifecycle;
 - one execution identity owns one active work root;
 - `SOURCE != BUILD != RELEASE != INSTALLED RUNTIME != ACTIVE VERSION`;
-- production-style mutations occur only behind explicit Owner gates.
+- production, privilege, and trust mutations occur only behind explicit Owner
+  gates.
 
 ## Accepted foundation
 
-The following implementation is accepted and remains the baseline:
+G01-G10, G06R, G10R, the native process-observation hotfix, G11R-A, G11R-B,
+G11R-C, and Fast Lane v2 are accepted on authoritative `main`.
 
-- G01 Domain foundation;
-- G02 Runtime contracts;
-- G03 Agent Core;
-- G04 Local Named Pipe IPC;
-- G05 CLI control;
-- G06 Tray presentation contracts;
-- G07 Probes + Auto Lite;
-- G08 Runner observer;
-- G09 Supervisor core;
-- G10 Host observation + recovery model;
-- G06R Native tray + persistent ordinary-user Agent runtime;
-- G10R Pre-H1 integration readiness;
-- PR #18 Windows native process snapshot hotfix removing runtime `tasklist` polling.
+The accepted G11R mechanism is the exact-runner GitHub-native custom label
+`runnermesh-admit` with two-phase withdrawal, positive readback, drift refusal,
+and natural completion of active work. ADR 0004 remains authoritative. The
+historical `run.cmd --once` executor in PR #17 is superseded; its useful
+exact-scope and no-signal evidence is already preserved in the ADR and current
+tests.
 
-The historical G11 qualification path is superseded. PR #17 is retained as research/salvage material until G11R-B decides whether to refactor or replace it.
+## 1. Governance truth and parallel preparation
 
-## P0 — Recovery-only closeout
+Roadmap v3 and `RM-V0_1-EXECUTION-STATUS.md` are the durable execution truth.
+Repository governance is machine enforced by the active `protect-main`
+ruleset, with no bypass actors and required check `CI Gate`. Full post-merge
+`main` CI remains enabled because the required status policy is intentionally
+not strict/up-to-date.
 
-Purpose: close the terminal historical G11 experiment and return the host to a known-good baseline.
+Source work uses focused branches, exact-head CI, selected risk gates, and
+protected-main merges. PR #17 closes as superseded; PRs #14-#16 remain intact as
+selective-extraction assets for the productization preparation Goal.
 
-This is not a product-development Goal and must not continue qualification after recovery.
+## 2. P0 supervised baseline restore
 
-Acceptance:
+Goal: `RM-V0_1-P0-SUPERVISED-BASELINE-RESTORE-001`.
 
-- original service running;
-- service-backed bound Listener present;
-- bound Worker absent;
-- historical orphan Listener absent;
-- qualification workspace clean;
-- service config/security, registration, runner home, and work root unchanged;
-- unrelated runners untouched.
+This is a recovery-only Owner transaction for one historical incident, not a
+product-development or qualification Goal. It uses:
 
-Human gate: one narrowly scoped recovery authorization/UAC when required.
+1. fresh read-only exact-scope preflight;
+2. Owner presence and explicit authorization;
+3. the minimum exact recovery action;
+4. independent postverification of the known-good baseline;
+5. stop.
 
-## GOV1 — Governance and durable execution state
+It does not continue into H1 and does not introduce another proliferating
+recovery-transaction family. Historical R1/R2/R3 details remain private.
 
-Before long unattended writers are treated as routine:
+## 3. H1 live adapters and readiness
 
-- create and maintain `goals/RM-V0_1-EXECUTION-STATUS.md`;
-- refresh stale public project-status documentation;
-- require future agents to read the roadmap and execution ledger before acting;
-- recommend repository enforcement for PR-only main updates, hosted CI, force-push protection, and branch-deletion protection.
+Autonomous source work completes the reusable live layer behind the accepted
+G11R boundaries without using real credentials or mutating the real runner:
 
-GitHub Organization/repository setting changes remain an Owner action; source/docs work is autonomous.
+- authenticated GitHub REST transport limited to exact-runner label read,
+  add-one, remove-one, and positive readback;
+- opaque credential-reference provider boundary with OS-backed Windows adapter;
+- exact remote runner and local home/image/identity/work-root binding;
+- reserved-selector uniqueness and ownership observation;
+- live readiness evidence collection;
+- trusted workflow identity/contract verification;
+- routing and restore-readiness verification;
+- product integration seams that remain disabled until explicit Owner
+  configuration and a live readiness pass.
 
-## G11R-A — Admission Linearization Architecture
+Source and synthetic proof can validate adapters and the verifier but cannot
+authorize H1. Before the Owner gate, all eleven live readiness fields must be
+positively proved under the accepted schema.
 
-Accepted architecture: one GitHub-native dynamic custom label named
-`runnermesh-admit`, managed only on the exact configured runner, plus explicit
-two-phase withdrawal. See ADR 0004.
+## 4. Parallel productization source preparation
 
-The Owner accepted the trust-boundary expansion and semantic clarification
-after comparing persistent local Listener control, `run.cmd --once`,
-server-side labels/groups, ephemeral/JIT, and clarification alone. The accepted
-contract does not claim the label API response/readback is a globally
-linearizable scheduler barrier. An observed racing assignment remains visible
-and may complete normally.
+Goal: `RM-V0_1-PRODUCTIZATION-SALVAGE-PREP-001`.
 
-Exit:
-
-```text
-G11R_A=ACCEPTED
-ADMISSION_ARCHITECTURE=GITHUB_NATIVE_DYNAMIC_ADMISSION_LABEL
-WITHDRAWAL_PROTOCOL=TWO_PHASE
-RESERVED_ADMISSION_LABEL=runnermesh-admit
-SCHEDULER_LINEARIZABILITY=NOT_CLAIMED_WITHOUT_UPSTREAM_GUARANTEE
-ACTIVE_JOB_POLICY=COMPLETE_NATURALLY
-NORMAL_LOCAL_SIGNAL_POLICY=NONE
-REQUIRED_GITHUB_AUTHORITY=MINIMAL_RESERVED_LABEL_MUTATION_AUTHORITY
-DESIGN_FREEZE_CHANGE=TRUST_BOUNDARY_EXPANSION_PLUS_SEMANTIC_CLARIFICATION
-SEMANTIC_WEAKENING=FALSE
-```
-
-## G11R-B — Lifecycle Implementation
-
-Autonomous source-development train, normally 6-12 hours. No real production runner mutation.
-
-Implement the accepted G11R-A lifecycle architecture, including:
-
-- a typed exact-scope admission-control seam with synthetic and product
-  backends;
-- reserved-label observation, add, and remove only—never replace/delete-all;
-- explicit desired versus observed/achieved admission state;
-- FULL/advertising/listening/busy/withdraw-requested/withdrawing/
-  withdrawal-blocked/drain-pending/drained/re-advertising semantics;
-- exact runner-home/process ownership;
-- active-job preservation;
-- idle withdrawal and racing-assignment behavior from ADR 0004;
-- restart/reconnect/reconstruction;
-- unrelated same-name runner isolation;
-- runner identity, registration, reserved-label ownership, and work-root drift
-  refusal;
-- opaque secret references with no token in normal JSON;
-- bounded API/auth/rate-limit/unavailable failure behavior;
-- one-identity/one-work-root enforcement;
-- source/runtime separation.
-
-PR #17 is salvage-only. Useful evidence includes exact process scoping,
-rejection of Ctrl+C/Ctrl+Break for Busy drain, safe-wait reconstruction, and
-unrelated-runner isolation. `RUN_ONCE_JOB_LEASE` is not an architectural
-requirement, and G11R-B starts from accepted main rather than PR #17.
-
-Exit:
+Selectively extract and correct reusable G12-G15 assets from PRs #14-#16 onto
+current authoritative main. Work remains source/sandbox-only and may produce
+focused draft candidates while the Owner lane is pending.
 
 ```text
-G11R_CODE_READY=true
-SYNTHETIC_LIFECYCLE_TESTS=PASS
-REAL_HOST_MUTATION=false
+G12_G15_SOURCE_PREPARATION_ALLOWED=true
+G12_G15_ACCEPTANCE_REQUIRES_H1_PASS=true
+G12_G15_ACCEPTANCE_REQUIRES_BASELINE_RESTORE_PASS=true
 ```
 
-## G11R-C — Qualification Readiness
+Do not rebase or merge the stale stack wholesale.
 
-Autonomous readiness train. Prepare everything before mutating the real host.
+## 5. H1 qualification and restore
 
-Required readiness surfaces:
+After P0 baseline restoration, protected private evidence storage, approved
+credential/binding/workflow/routing configuration, and all eleven live
+readiness fields pass, one immutable accepted source candidate enters one Owner
+transaction.
 
-- exact trusted private qualification workflow;
-- exact runner identity and reserved-selector binding;
-- configured GitHub authority without exposing credential material;
-- primary/no-admission/reconnect/failure witnesses;
-- source candidate frozen;
-- host prestate verifier;
-- rollback and automatic restore plan;
-- crash/timeout recovery semantics;
-- one-shot transaction generator;
-- privacy-safe durable receipts.
-
-No real host mutation may begin unless all are true:
-
-```text
-SOURCE_READY=true
-HOST_PRESTATE_READY=true
-GITHUB_AUTHORITY_CONFIGURED=true
-EXACT_RUNNER_IDENTITY_READY=true
-RESERVED_SELECTOR_READY=true
-SELECTOR_UNIQUE=true
-ROUTING_READY=true
-TRUSTED_WORKFLOW_READY=true
-ROLLBACK_READY=true
-RECOVERY_READY=true
-OWNER_GATE_READY=true
-```
-
-Principle: **prepare everything first; mutate the real host last.**
-
-## Human Gate H1 — One-shot real qualification
-
-One prepared transaction proves the accepted admission/lifecycle architecture
-on the real trusted runner. It verifies/establishes reserved-label control,
-qualifies advertised capacity, executes the primary trusted job, withdraws,
-witnesses racing/no-new-eligibility behavior, waits for active completion,
-re-advertises, witnesses reconnect, and restores the original baseline.
-
-Owner interaction should be one explicit authorization/UAC wherever feasible.
-The transaction performs bounded qualification and attempts automatic
-restoration for PASS, FAIL, BLOCKED, timeout, or controller loss. No H1 dispatch
-or real label mutation occurs during G11R-C readiness work.
-
-Final receipt always separates:
+H1 proves advertised capacity, trusted routing, active-job preservation,
+selector withdrawal/readback, conservative racing-assignment handling,
+achieved drain, re-advertisement/reconnect, and automatic baseline restoration.
 
 ```text
 QUALIFICATION=<PASS|FAIL|BLOCKED>
 RESTORE=<PASS|FAIL>
 ```
 
-Only `RESTORE=FAIL` should require emergency Owner recovery.
+Productization acceptance requires `QUALIFICATION=PASS` and `RESTORE=PASS`.
 
-Train C2 begins only after H1 qualification PASS and restored baseline PASS.
+## 6. Productization acceptance and G15R
 
-## Train C2 — Productization rewrite/salvage
+After H1 and restoration pass, accept focused corrected G12-G15 milestones:
 
-Existing draft PRs #14-#16 are implementation assets, not mandatory merge candidates. Extract useful code onto the accepted G11R baseline.
+- G12 user-session autostart;
+- G13 immutable versioned installation;
+- G14 staged update and rollback;
+- G15 packaging, provenance, and doctor.
 
-### G12 — User Autostart
+Then build exactly one authoritative-main G15R candidate and prove the complete
+package -> sandbox install -> Agent/Tray/CLI -> policy/probes -> lifecycle ->
+update -> rollback -> uninstall chain. Only this immutable RC may enter H2.
 
-- user-session login start;
-- stable activation entry only;
-- source-tree paths forbidden;
-- duplicate Agent authority prevented;
-- safe enable/disable/remove semantics.
+## 7. H2 cutover and sustained dogfood
 
-### G13 — Versioned Installation
+H2-A is an Owner-authorized cutover of the immutable G15R RC with preserved
+rollback and source/runtime isolation. H2-B is at least 24 hours of ordinary
+workstation dogfood; 48-72 hours is preferred when practical.
 
-- immutable version slots;
-- stable activation indirection;
-- config/state/log separation;
-- ownership-safe install/uninstall;
-- foreign content preserved;
-- doctor aware of installed/active state.
+G17 cannot begin until the minimum dogfood window completes without a
+release-blocking lifecycle fault.
 
-### G14 — Update + Rollback
+## 8. G17 closeout and H3 release
 
-- stage -> verify -> compatibility -> durable READY_TO_ACTIVATE -> safe-point -> activate -> health-check -> commit;
-- rollback/reconciliation after interruption;
-- active CI jobs are not killed by RunnerMesh update.
+G17 freezes the candidate, reconciles the ledger and documentation, binds
+dogfood evidence, and completes hosted CI, privacy/security, package,
+provenance, and checksum checks. It does not publish a stable release.
 
-### G15 — Packaging + Doctor
+H3 is the explicit Owner transaction that tags and publishes `v0.1.0`, verifies
+the public artifacts, and stops without automatically starting v0.2.
 
-- Windows x64 package;
-- provenance and SHA-256;
-- package verification;
-- install/update/rollback sandbox dry runs;
-- hardened doctor;
-- hosted public CI only;
-- public privacy audit.
+## Owner transaction state vocabulary
 
-Old PR #14 should be split conceptually into G12 and G13. PRs #15 and #16 are salvaged after G11R; they are not merged unchanged merely because they are already written.
+Owner availability and cancellation are control flow, not source defects.
 
-## G15R — Pre-H2 integrated RC
+| State | Meaning |
+|---|---|
+| `PREPARING` | source, preflight, rollback, and evidence prerequisites are still being assembled |
+| `PREPARED` | all non-Owner prerequisites are complete and freshly verifiable |
+| `WAITING_FOR_OWNER` | preparation is resumable but fresh authorization/Owner presence is pending |
+| `OWNER_CANCELED` | this authorization attempt ended before completion; it is not an implementation failure |
+| `BLOCKED_PRECONDITION` | a required verified precondition is false or unknown |
+| `BLOCKED_EXTERNAL` | an external trust/service/platform dependency prevents progress |
+| `FAIL_PRE_MUTATION` | an execution defect occurred with no external mutation started |
+| `FAIL_POST_MUTATION` | an execution defect occurred after mutation began; restoration remains mandatory |
+| `PASS` | the bounded result and its required verification passed |
 
-Autonomous integration train. Build exactly one authoritative-main RC and exercise it entirely in sandbox/development roots before H2.
+`WAITING_FOR_OWNER` is nonterminal and resumable. `OWNER_CANCELED` never permits
+reuse of an old nonce, transaction, handoff, preflight, or authorization.
+Qualification and restoration remain independent after mutation.
 
-Prove package -> install -> Agent/Tray/CLI -> policy/probes -> lifecycle integration -> update -> rollback -> uninstall. Recheck the Windows background-process regression:
+## Remaining security debt
 
-```text
-TASKLIST_RUNTIME_CALLS=0
-RUNNERMESH_TASKLIST_CHILD_COUNT=0
-VISIBLE_CONSOLE_FLASH=false
-```
+- Harden the private evidence ACL before storing H1 live artifacts or opening
+  the H1 Owner gate. This is a separately authorized Owner action.
+- Keep active workflow dependencies pinned to reviewed immutable full commit
+  SHAs before release.
+- Add an explicit current-user/logon Named Pipe DACL and denial coverage before
+  v0.1 release.
 
-Exit:
-
-```text
-H2_RC_HEAD=<authoritative-main>
-H2_RC_SHA256=<sha256>
-H2_RC_READY=true
-```
-
-Only this immutable RC may enter H2.
-
-## Human Gate H2 / G16 — Real cutover + sustained dogfood
-
-### H2-A One-shot cutover
-
-Install and activate the immutable authorized RC, preserve rollback, and prove real tray/CLI/Auto Lite/probes/modes/Zen/lifecycle/autostart/restart/source-runtime isolation/update rollback/uninstall-recovery semantics.
-
-### H2-B Sustained dogfood
-
-Minimum release gate: **24 hours** of ordinary workstation use after successful cutover. Prefer 48-72 hours when practical.
-
-Observe and later audit durable evidence for crashes, wrong admission, stale UI, mode transition failures, resource anomalies, console flash, stale listeners, reconnect failures, autostart, suspend/resume, and user interference.
-
-G17 may begin only after the minimum dogfood window passes without a release-blocking lifecycle fault.
-
-## G17 — RC closeout
-
-Autonomous closeout train:
-
-- freeze the exact candidate;
-- reconcile the execution/evidence ledger;
-- refresh README/architecture/install/update/rollback documentation;
-- prepare release notes and known limitations;
-- run hosted exact-head CI, privacy/security review, package/checksum/provenance checks;
-- bind the sustained-dogfood receipt;
-- do not publish stable release.
-
-## Human Gate H3 / G18 — v0.1.0 publication
-
-After explicit Owner authorization:
-
-- tag `v0.1.0`;
-- publish Windows x64 artifact, checksums, release notes;
-- verify public provenance and downloadability;
-- stop after release verification;
-- do not automatically start v0.2.
-
-## Autonomous work model
-
-Use two classes of work:
-
-### Autonomous Train
-
-Normally 6-12 hours, and up to 24 hours when the plan contains enough independent source/design work. It may research, design, implement, test, sandbox, open/update PRs, use hosted CI, self-repair deterministic failures, and merge ordinary admitted source/docs changes.
-
-It must stop before true privilege/trust/production boundaries.
-
-### Owner Transaction
-
-Normally 15-120 minutes. It starts only after readiness is complete and performs a bounded privileged/trust/production mutation with automatic restoration/rollback where practical. Owner transactions do not perform architecture discovery.
-
-Do not combine UAC, real service mutation, GitHub Organization authority expansion, subjective visual approval, and open-ended source design into a nominally unattended train.
+Public repository material must not contain private host identifiers, real
+runner IDs, credential material, private workflow identities, or private
+topology.
 
 ## Goal discipline
 
-Every Goal:
+Every Goal reads this roadmap and the execution ledger first, starts from
+authoritative main or an admitted predecessor, preserves foreign work, declares
+its risk vector and non-goals, uses one writer, validates changed risk once,
+reuses unchanged-risk evidence explicitly, stops at true Owner boundaries,
+verifies remote main after merge, and emits a privacy-safe receipt.
 
-1. reads this roadmap and `RM-V0_1-EXECUTION-STATUS.md` first;
-2. starts from authoritative main or an admitted predecessor;
-3. preserves foreign/local work;
-4. uses one focused writer per branch/worktree;
-5. declares changed-risk vector and non-goals;
-6. reuses accepted unchanged-risk evidence explicitly;
-7. stops at true human gates rather than inventing micro-gates;
-8. verifies remote main after merge;
-9. updates the execution ledger with privacy-safe durable state;
-10. emits a concise receipt.
-
-The historical V3/V4/V4R/V4S qualification variants are evidence, not a template for continued transaction proliferation. One accepted architecture, one readiness gate, and one H1 transaction family is the target.
+Historical V3/V4/V4R/V4S and R1/R2/R3 artifacts are retained private evidence,
+not active execution templates.

@@ -1,6 +1,6 @@
 # GOV1 — Governance and Durable Execution State Reset
 
-Type: **Autonomous docs/governance train + optional Owner repository-settings step**
+Type: **Accepted historical docs/governance train**
 
 ## Mission
 
@@ -10,11 +10,11 @@ Make future 6-24 hour autonomous development rely on durable repository state in
 
 - maintain `goals/RM-V0_1-EXECUTION-STATUS.md` as the first status source;
 - refresh stale README/roadmap status claims;
-- ensure roadmap-v2 Goal references are coherent;
+- ensure the then-current roadmap-v2 Goal references are coherent;
 - add validation that public status docs contain no private host identifiers;
 - document the expected main-branch protection policy.
 
-## Owner repository-settings recommendation
+## Historical Owner repository-settings recommendation
 
 When the Owner chooses to apply it, `main` should require:
 
@@ -24,7 +24,9 @@ When the Owner chooses to apply it, `main` should require:
 - no branch deletion;
 - no ordinary direct push bypass for autonomous writers.
 
-Changing GitHub repository/Organization settings is not authorized by this Goal unless the Owner explicitly grants that separate action.
+This recommendation was later satisfied by the active `protect-main` ruleset.
+Current enforcement state is authoritative only in
+`RM-V0_1-EXECUTION-STATUS.md`.
 
 Only after the Owner verifies all three conditions below may a future Goal
 consider replacing full main-push code CI with a lightweight integrity check:
@@ -47,4 +49,5 @@ MAIN_PROTECTION_RECOMMENDATION_DOCUMENTED=true
 
 ## Exit
 
-Ordinary source development may proceed under roadmap v2 even if the Owner has not yet applied the optional GitHub setting change, but `AUTONOMOUS_12H_READY` must remain qualified until machine-enforced main protection is verified.
+This Goal is complete historical evidence. Roadmap v3 now governs source and
+Owner lanes, and the execution ledger records machine-enforced main protection.

@@ -189,11 +189,11 @@ or a changed trust boundary is safe.
 
 ## Post-merge pipeline
 
-Until machine-enforced main protection is verified, retain full Windows and
-Ubuntu code CI on every `main` push.  After a passing exact-head PR merges,
-verify remote `main` immediately and permit work on the next safe Goal while
-post-merge CI runs asynchronously.  Do not merge the next PR until the prior
-`main` CI is healthy; latch any failure as a blocker.
+Retain full Windows and Ubuntu code CI on every `main` push while the required
+PR status policy does not enforce an up-to-date base. After a passing exact-head
+PR merges, verify remote `main` immediately and permit work on the next safe
+Goal while post-merge CI runs asynchronously. Do not merge the next PR until
+the prior `main` CI is healthy; latch any failure as a blocker.
 
 ```text
 POST_MERGE_CI_ASYNC_PIPELINE=true
@@ -207,6 +207,7 @@ lightweight post-merge integrity check instead of full main-push CI:
 MAIN_PROTECTION=ENFORCED
 REQUIRED_PR_GATE=ENFORCED
 DIRECT_PUSH_BLOCKED=true
+BASE_FRESHNESS_ENFORCED=true
 ```
 
 ## Blocker latch

@@ -34,9 +34,10 @@ RunnerMesh is **pre-v0.1 / active development**. The accepted foundation already
 The remaining v0.1 work is concentrated in live Owner-gated qualification of
 the accepted GitHub-native dynamic admission-label lifecycle, productized
 install/autostart/update/rollback/package flows, real workstation dogfood, and
-release closeout. The historical G11 qualification path has been superseded by
-the roadmap-v2 G11R sequence; the project is not yet an installable stable
-product.
+release closeout. Roadmap v3 preserves the accepted G11R architecture, permits
+safe source preparation while the Owner lane is pending, and keeps H1 plus
+baseline restoration as the productization merge/acceptance gate. The project
+is not yet an installable stable product.
 
 See [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md) for the durable current execution ledger.
 
