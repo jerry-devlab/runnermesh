@@ -56,9 +56,11 @@ runners: write` or repository `Administration: write`, restricted to the
 configured scope. Normal configuration contains an opaque provider/key
 reference only. Credential material is acquired at request time through a
 provider boundary, kept out of serialization and debug output, and zeroed when
-the short-lived lease is dropped. A Windows product adapter must use an
-OS-backed facility such as Credential Manager or a DPAPI-backed equivalent;
-G11R-B does not provision a credential or enable a real transport.
+the short-lived lease is dropped. The Windows source adapter resolves generic
+credentials from Windows Credential Manager and gives the bytes directly to a
+short-lived lease. Configuration and status contain only the opaque provider
+and key reference. This source Goal does not provision or resolve a real Owner
+credential.
 
 Authentication failure, unavailable credentials, API unavailability, timeout,
 and rate limiting remain visible reason-coded states. Transient failures use
@@ -81,6 +83,16 @@ Trusted persistent self-hosted workstations are not the default place to execute
 
 The official runner initiates outbound connectivity; ordinary workstation participation needs no inbound public access. CI source, logs, and artifacts remain on the CI provider's data plane. A future RunnerMesh control plane should transport capacity, policy, and capability metadata only.
 
-The source tree contains a typed GitHub REST request/response boundary and an
-injected synthetic transport seam. It contains no configured credential
-provider, enabled network transport, runner registration flow, or broker.
+The source tree contains both the typed GitHub REST boundary and a production
+WinHTTP adapter. The transport fixes the authority to `api.github.com:443`,
+keeps default TLS certificate verification enabled, refuses redirects, bounds
+timeouts and response sizes, validates selected response headers, and keeps
+the authorization value out of request debug state. Its operations remain the
+existing exact-runner reads plus add-one/remove-one reserved-label requests;
+positive readback is still mandatory in the admission backend.
+
+The live source is deliberately inert without an Owner-supplied opaque
+credential reference and exact binding. Tests inject fake wire and credential
+providers, make no network calls, and use only synthetic identities. This Goal
+does not configure the adapter, contact the GitHub API with Owner authority,
+mutate a label, register a runner, or introduce a broker.

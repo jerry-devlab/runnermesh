@@ -15,6 +15,10 @@ pub const H1_TRANSACTION_FAMILY_ID: &str = "h1-github-native-admission-label-v1"
 
 const H1_WORKFLOW_TEMPLATE: &str = include_str!("../docs/qualification/templates/h1-workflow.yml");
 
+pub fn h1_workflow_template() -> &'static str {
+    H1_WORKFLOW_TEMPLATE
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EvidenceState {
@@ -203,31 +207,103 @@ impl H1WorkflowTemplateAssessment {
 /// Checks only the inert public template's source contract. It does not claim
 /// that a trusted private workflow, repository variable, or route exists.
 pub fn assess_h1_workflow_template() -> H1WorkflowTemplateAssessment {
-    let lowercase = H1_WORKFLOW_TEMPLATE.to_ascii_lowercase();
+    assess_h1_workflow_source(H1_WORKFLOW_TEMPLATE)
+}
+
+/// Deterministically assesses fetched or generated workflow source. Repository,
+/// ref, and blob identity remain separate verification inputs.
+pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
+    let lowercase = source.to_ascii_lowercase();
     let secret_context = ["secrets", "."].concat();
-    let forbidden_triggers = [
-        "\n  push:",
-        "\n  pull_request:",
-        "\n  schedule:",
-        "\n  repository_dispatch:",
-        "\n  workflow_call:",
-    ];
+    let triggers = top_level_child_keys(source, "on", 2);
+    let workflow_inputs = nested_child_keys(source, "workflow_dispatch", "inputs", 6);
+    let selectors = list_values(source, "runs-on");
     H1WorkflowTemplateAssessment {
-        workflow_dispatch_only: lowercase.contains("\n  workflow_dispatch:")
-            && forbidden_triggers
-                .iter()
-                .all(|trigger| !lowercase.contains(trigger)),
-        reserved_selector_exact: H1_WORKFLOW_TEMPLATE.contains(RESERVED_ADMISSION_LABEL)
-            && H1_WORKFLOW_TEMPLATE.contains("self-hosted")
-            && H1_WORKFLOW_TEMPLATE.contains("Windows")
-            && H1_WORKFLOW_TEMPLATE.contains("X64"),
-        runtime_identity_asserted: H1_WORKFLOW_TEMPLATE.contains("runner.name")
-            && H1_WORKFLOW_TEMPLATE.contains("RUNNERMESH_EXPECTED_RUNNER_NAME"),
-        arbitrary_command_input_absent: !lowercase.contains("inputs.command")
+        workflow_dispatch_only: triggers == ["workflow_dispatch"],
+        reserved_selector_exact: selectors
+            == ["self-hosted", "Windows", "X64", RESERVED_ADMISSION_LABEL],
+        runtime_identity_asserted: source.contains("H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}")
+            && source.contains("RUNNERMESH_EXPECTED_RUNNER_NAME")
+            && source.contains("-cne $env:H1_OBSERVED_RUNNER_NAME"),
+        arbitrary_command_input_absent: workflow_inputs
+            == ["witness", "candidate_sha", "transaction_id"]
+            && !lowercase.contains("inputs.command")
             && !lowercase.contains("inputs.script")
+            && !lowercase.contains("run: ${{ inputs.")
             && !lowercase.contains("invoke-expression"),
         secret_context_absent: !lowercase.contains(&secret_context),
     }
+}
+
+fn top_level_child_keys<'a>(source: &'a str, root: &str, child_indent: usize) -> Vec<&'a str> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let Some(root_index) = lines
+        .iter()
+        .position(|line| indentation(line) == 0 && line.trim() == format!("{root}:"))
+    else {
+        return Vec::new();
+    };
+    lines[root_index + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || indentation(line) > 0)
+        .filter_map(|line| yaml_key_at_indent(line, child_indent))
+        .collect()
+}
+
+fn nested_child_keys<'a>(
+    source: &'a str,
+    parent: &str,
+    container: &str,
+    child_indent: usize,
+) -> Vec<&'a str> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let Some(parent_index) = lines
+        .iter()
+        .position(|line| line.trim() == format!("{parent}:"))
+    else {
+        return Vec::new();
+    };
+    let parent_indent = indentation(lines[parent_index]);
+    let Some(container_offset) = lines[parent_index + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || indentation(line) > parent_indent)
+        .position(|line| line.trim() == format!("{container}:"))
+    else {
+        return Vec::new();
+    };
+    let container_index = parent_index + 1 + container_offset;
+    let container_indent = indentation(lines[container_index]);
+    lines[container_index + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || indentation(line) > container_indent)
+        .filter_map(|line| yaml_key_at_indent(line, child_indent))
+        .collect()
+}
+
+fn list_values<'a>(source: &'a str, key: &str) -> Vec<&'a str> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let Some(key_index) = lines
+        .iter()
+        .position(|line| line.trim() == format!("{key}:"))
+    else {
+        return Vec::new();
+    };
+    let key_indent = indentation(lines[key_index]);
+    lines[key_index + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || indentation(line) > key_indent)
+        .filter_map(|line| line.trim().strip_prefix("- ").map(str::trim))
+        .collect()
+}
+
+fn yaml_key_at_indent(line: &str, expected_indent: usize) -> Option<&str> {
+    (indentation(line) == expected_indent)
+        .then(|| line.trim().strip_suffix(':'))
+        .flatten()
+}
+
+fn indentation(line: &str) -> usize {
+    line.len().saturating_sub(line.trim_start().len())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -668,6 +744,25 @@ mod tests {
         assert!(assessment.source_contract_ready());
         assert!(H1_WORKFLOW_TEMPLATE.contains("workflow_dispatch"));
         assert!(!H1_WORKFLOW_TEMPLATE.contains("pull_request"));
+    }
+
+    #[test]
+    fn workflow_assessment_refuses_extra_trigger_selector_or_command_input() {
+        let extra_trigger =
+            H1_WORKFLOW_TEMPLATE.replace("  workflow_dispatch:", "  push:\n  workflow_dispatch:");
+        assert!(!assess_h1_workflow_source(&extra_trigger).workflow_dispatch_only);
+
+        let extra_selector = H1_WORKFLOW_TEMPLATE.replace(
+            "      - runnermesh-admit",
+            "      - runnermesh-admit\n      - unrelated-selector",
+        );
+        assert!(!assess_h1_workflow_source(&extra_selector).reserved_selector_exact);
+
+        let command_input = H1_WORKFLOW_TEMPLATE.replace(
+            "      candidate_sha:",
+            "      command:\n        required: true\n        type: string\n      candidate_sha:",
+        );
+        assert!(!assess_h1_workflow_source(&command_input).arbitrary_command_input_absent);
     }
 
     #[test]

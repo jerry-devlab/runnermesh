@@ -482,6 +482,8 @@ impl<B: AdmissionControlBackend> AgentReconciler for AdmissionAgentReconciler<B>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdmissionBackendError {
     CredentialUnavailable,
+    CredentialResolutionFailed,
+    CredentialMalformed,
     AuthenticationFailed,
     RateLimited { retry_after_seconds: u64 },
     ApiUnavailable,
@@ -534,6 +536,8 @@ impl AdmissionBackendError {
     fn reason_code(&self) -> ReasonCode {
         reason(match self {
             Self::CredentialUnavailable => "admission-credential-unavailable",
+            Self::CredentialResolutionFailed => "admission-credential-resolution-failed",
+            Self::CredentialMalformed => "admission-credential-malformed",
             Self::AuthenticationFailed => "admission-authentication-failed",
             Self::RateLimited { .. } => "admission-rate-limited",
             Self::ApiUnavailable => "admission-api-unavailable",
@@ -616,13 +620,18 @@ pub struct CredentialLease {
 
 impl CredentialLease {
     pub fn from_secret(secret: impl AsRef<[u8]>) -> Result<Self, &'static str> {
-        let secret = secret.as_ref();
-        if secret.is_empty() || secret.contains(&b'\r') || secret.contains(&b'\n') {
-            return Err("credential material is empty or contains a newline");
+        Self::from_owned_secret(secret.as_ref().to_vec())
+    }
+
+    pub(crate) fn from_owned_secret(mut secret: Vec<u8>) -> Result<Self, &'static str> {
+        if secret.is_empty()
+            || secret.len() > 4096
+            || secret.iter().any(|byte| !byte.is_ascii_graphic())
+        {
+            secret.fill(0);
+            return Err("credential material must be bounded printable ASCII without whitespace");
         }
-        Ok(Self {
-            secret: secret.to_vec(),
-        })
+        Ok(Self { secret })
     }
 
     pub fn expose_for_transport(&self) -> &[u8] {
@@ -693,14 +702,14 @@ impl AdmissionBinding {
             credential_ref,
             ownership,
         };
-        if binding.validate() {
+        if binding.is_valid() {
             Ok(binding)
         } else {
             Err(AdmissionBackendError::BindingInvalid)
         }
     }
 
-    fn validate(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.scope.validate()
             && self.runner_id != 0
             && !self.runner_name.trim().is_empty()
@@ -710,7 +719,7 @@ impl AdmissionBinding {
                 .eq_ignore_ascii_case(RESERVED_ADMISSION_LABEL)
     }
 
-    fn ownership_matches(&self) -> bool {
+    pub fn has_valid_ownership(&self) -> bool {
         self.ownership.as_ref().is_some_and(|ownership| {
             ownership.scope == self.scope
                 && ownership.runner_id == self.runner_id
@@ -751,6 +760,7 @@ pub struct GithubHttpResponse {
 pub enum GithubTransportError {
     Unavailable,
     Timeout,
+    InvalidResponse,
 }
 
 pub trait GithubHttpTransport {
@@ -773,7 +783,7 @@ impl<T, C> GithubRestAdmissionBackend<T, C> {
         transport: T,
         credentials: C,
     ) -> Result<Self, AdmissionBackendError> {
-        if !binding.validate() {
+        if !binding.is_valid() {
             return Err(AdmissionBackendError::BindingInvalid);
         }
         Ok(Self {
@@ -825,7 +835,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
             page += 1;
         }
 
-        if expected_total.is_some_and(|total| total as usize > runners.len()) {
+        if expected_total.is_some_and(|total| usize::try_from(total).ok() != Some(runners.len())) {
             return Err(AdmissionBackendError::SelectorObservationUnknown);
         }
 
@@ -859,10 +869,15 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
         if matching_labels.len() > 1 || matching_labels.iter().any(|label| label.kind != "custom") {
             return Err(AdmissionBackendError::ReservedLabelOwnershipDrift);
         }
-        if !matching_labels.is_empty() && !self.binding.ownership_matches() {
+        if !matching_labels.is_empty() && !self.binding.has_valid_ownership() {
             return Err(AdmissionBackendError::ReservedLabelOwnershipDrift);
         }
 
+        let runner_online = match exact.status.as_str() {
+            status if status.eq_ignore_ascii_case("online") => true,
+            status if status.eq_ignore_ascii_case("offline") => false,
+            _ => return Err(AdmissionBackendError::MalformedResponse),
+        };
         Ok(RemoteAdmissionObservation {
             selector: if matching_labels.is_empty() {
                 AdmissionSelectorState::Absent
@@ -870,12 +885,12 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
                 AdmissionSelectorState::Present
             },
             runner_busy: exact.busy,
-            runner_online: exact.status.eq_ignore_ascii_case("online"),
+            runner_online,
         })
     }
 
     fn require_owned_binding(&self) -> Result<(), AdmissionBackendError> {
-        if self.binding.ownership_matches() {
+        if self.binding.has_valid_ownership() {
             Ok(())
         } else {
             Err(AdmissionBackendError::ReservedLabelOwnershipDrift)
@@ -893,6 +908,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
             .map_err(|error| match error {
                 GithubTransportError::Unavailable => AdmissionBackendError::ApiUnavailable,
                 GithubTransportError::Timeout => AdmissionBackendError::Timeout,
+                GithubTransportError::InvalidResponse => AdmissionBackendError::MalformedResponse,
             })?;
         match response.status {
             200..=299 => Ok(response),
@@ -1441,6 +1457,50 @@ mod tests {
             assert_eq!(backend.withdraw_capacity().unwrap_err(), expected);
             assert_eq!(backend.transport().requests.len(), 1);
             assert_eq!(backend.transport().requests[0].method, HttpMethod::Get);
+        }
+    }
+
+    #[test]
+    fn rest_backend_refuses_inconsistent_counts_and_unknown_runner_status() {
+        let inconsistent_count = serde_json::json!({
+            "total_count": 2,
+            "runners": [{
+                "id": 42,
+                "name": "trusted-runner",
+                "status": "online",
+                "busy": false,
+                "labels": []
+            }]
+        });
+        let unknown_status = serde_json::json!({
+            "total_count": 1,
+            "runners": [{
+                "id": 42,
+                "name": "trusted-runner",
+                "status": "unexpected",
+                "busy": false,
+                "labels": []
+            }]
+        });
+        for (body, expected) in [
+            (
+                inconsistent_count,
+                AdmissionBackendError::SelectorObservationUnknown,
+            ),
+            (unknown_status, AdmissionBackendError::MalformedResponse),
+        ] {
+            let transport = FakeTransport {
+                responses: [response(body)].into_iter().collect(),
+                ..FakeTransport::default()
+            };
+            let mut backend = GithubRestAdmissionBackend::new(
+                binding(true),
+                transport,
+                FakeCredentialProvider::default(),
+            )
+            .unwrap();
+            assert_eq!(backend.observe_admission_selector().unwrap_err(), expected);
+            assert_eq!(backend.transport().requests.len(), 1);
         }
     }
 

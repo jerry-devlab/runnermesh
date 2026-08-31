@@ -37,7 +37,7 @@ Last roadmap reset: 2026-08-31 (Roadmap v3).
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
-| Roadmap v3 governance truth | ACCEPTED | Roadmap v3 merge | governance PR | accepted health-audit conclusions; parallel source lane plus H1 merge gate | follow the eight execution blocks |
+| Roadmap v3 governance truth | ACCEPTED | `af0c14e63f070409c7c31f92c986aca5214ac379` | #29 | accepted health-audit conclusions; parallel source lane plus H1 merge gate | follow the eight execution blocks |
 | Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S remain private evidence, not active transaction variants | P0 supervised restore only |
 | PR #17 bounded executor | SUPERSEDED | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 closed | exact-scope/no-signal evidence preserved by ADR 0004 and accepted G11R; run-once path obsolete | none |
 | P0 supervised baseline restore | PREPARING | N/A | N/A | simplified read-only preflight -> Owner present -> minimum exact action -> independent postverification -> stop | fresh exact-scope preflight and Owner window |
@@ -46,7 +46,7 @@ Last roadmap reset: 2026-08-31 (Roadmap v3).
 | G11R-A admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 | ADR 0004 selects exact-runner `runnermesh-admit` and two-phase withdrawal | none |
 | G11R-B lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 | exact-scope REST seam, desired/achieved state, drift refusal, no normal Worker signal | H1 live adapter source |
 | G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
-| H1 live adapters/readiness source | PREPARING | N/A | N/A | transport, credential provider, exact local binding, workflow/routing and readiness collectors remain to be accepted | focused source Goal and exact-head gates |
+| H1 live adapters/readiness source | ACCEPTED_SOURCE | H1 source PR merge | source PR | fixed-authority transport, opaque credential provider, exact bindings, workflow/routing/readiness collectors; synthetic-only tests | Owner configuration and fresh live readiness |
 | H1 one-shot qualification | PREPARING | N/A | N/A | live mutation remains unauthorized; synthetic/source proof cannot authorize H1 | P0 PASS, private ACL, live configuration/readiness, Owner gate |
 | G12 autostart | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
 | G13 versioned install | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
@@ -120,6 +120,7 @@ SEMANTIC_WEAKENING=false
 G11R_B=ACCEPTED
 G11R_C=ACCEPTED_SOURCE
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
+H1_LIVE_ADAPTER_SOURCE_READY=true
 H1_MUTATION_ALLOWED=false
 LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
@@ -132,7 +133,8 @@ binding, rollback, recovery, or Owner evidence fails closed.
 
 ```text
 PRIVATE_EVIDENCE_ACL_HARDENING=REQUIRED_BEFORE_H1_LIVE_ARTIFACTS_OR_OWNER_GATE
-ACTIONS_CHECKOUT_IMMUTABLE_PINNING=REQUIRED_BEFORE_RELEASE
+ACTIONS_CHECKOUT_IMMUTABLE_PINNING=RESOLVED_AT_H1_SOURCE
+ACTIONS_CHECKOUT_PIN=3d3c42e5aac5ba805825da76410c181273ba90b1
 NAMED_PIPE_EXPLICIT_DACL=REQUIRED_BEFORE_RELEASE
 ```
 

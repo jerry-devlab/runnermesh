@@ -1,6 +1,6 @@
 # H1 qualification readiness contract
 
-Status: **G11R-C source contract; live H1 remains Owner-gated**
+Status: **G11R-C plus H1 live-adapter source; live H1 remains Owner-gated**
 
 G11R-C prepares one fail-closed H1 transaction family for the accepted
 GitHub-native `runnermesh-admit` architecture. Source and synthetic fixtures do
@@ -35,8 +35,36 @@ explicit `LIVE` or `SYNTHETIC` provenance:
 - the transaction still requires the explicit `OwnerGateAccepted` event before
   progressing.
 
-The present source suite proves the synthetic verifier. It does not invent the
-missing live evidence.
+The source suite proves the synthetic verifier and provides collectors for the
+future live evidence. It does not invent missing Owner evidence or convert
+source capability into a live PASS.
+
+## Live-adapter source boundary
+
+The prepared source layer consists of:
+
+- an exact `H1LiveBinding` for GitHub scope, runner ID/name, canonical reserved
+  selector, opaque credential and execution-identity references, local runner
+  home, work root, Listener/Worker images, trusted workflow identity, and
+  restore/recovery receipt identities;
+- a fixed-authority GitHub REST transport and Windows WinHTTP client;
+- a Windows Credential Manager provider behind an injectable read-only store
+  boundary;
+- an exact local filesystem/identity collector behind an injectable ownership
+  verifier;
+- GET-only exact-runner, selector-uniqueness, immutable workflow-content, and
+  routing verifiers; and
+- `collect_h1_live_readiness`, which maps the typed observations into the
+  existing eleven-field `H1ReadinessEvidence` contract.
+
+Binding and response drift fail closed. The workflow client can only read the
+configured file at an immutable commit reference; it has no dispatch method.
+That read proves source identity but leaves the private runtime runner-name
+variable `UNKNOWN` until a separate Owner-side verifier proves its exact value.
+The admission client retains only exact-runner observation and add-one/remove-
+one reserved-label operations with positive readback. The source adapters are
+not activated by default and tests inject only synthetic credentials and fake
+HTTP responses.
 
 ## Evidence meanings
 
@@ -168,9 +196,9 @@ The in-memory model proves:
 | unrelated runner observed | unchanged | zero unrelated-runner control actions |
 | ownership ambiguity | `BLOCKED` | refuse unowned correction; recovery required if past gate |
 
-All failure injection uses synthetic state. No network transport, credential
-provider, service adapter, runner-control adapter, or workflow dispatch is
-invoked.
+All failure injection uses synthetic state. No real network request,
+credential-store read, service adapter, runner-control adapter, or workflow
+dispatch is invoked.
 
 ## Public/private evidence split
 
@@ -186,13 +214,14 @@ copied into public code, PRs, logs, or the execution ledger.
 
 ## Current live disposition
 
-G11R-C source acceptance can establish a synthetic proof and a ready source
-transaction family, but the frozen historical P0 incident and absent Owner
-trust configuration keep live H1 fail-closed:
+The accepted source can establish a synthetic proof, ready adapter layer, and
+ready source transaction family, but the frozen historical P0 incident and
+absent Owner trust configuration keep live H1 fail-closed:
 
 ```text
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_TRANSACTION_FAMILY_READY=true
+H1_LIVE_ADAPTER_SOURCE_READY=true
 SOURCE_READY=PASS
 HOST_PRESTATE_READY=UNKNOWN
 GITHUB_AUTHORITY_CONFIGURED=UNKNOWN
@@ -207,6 +236,7 @@ OWNER_GATE_READY=UNKNOWN
 ROLLBACK_SOURCE_MODEL=PASS_SYNTHETIC
 RECOVERY_SOURCE_MODEL=PASS_SYNTHETIC
 H1_MUTATION_ALLOWED=false
+LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
 ```
 
@@ -214,3 +244,8 @@ P0 recovery and H1 preparation remain separate future Owner transactions. This
 Goal does not start/stop a service, invoke a recovery helper, touch the real
 qualification workspace, change a runner label/group/registration, create a
 credential, or dispatch H1.
+
+`WAITING_FOR_OWNER` and `OWNER_CANCELED` remain outer control states, not H1
+implementation failures. A later attempt must collect fresh live evidence and
+use a fresh transaction identity and authorization; this source change does
+not add a generic workflow engine or make an old transaction resumable.
