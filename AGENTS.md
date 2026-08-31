@@ -125,7 +125,10 @@ Never convert `UNPROVEN` into success.
 
 Do not pull v0.2 resource enforcement, v0.3 rich automatic intelligence, v0.4 mesh placement, or later backends into v0.1 without an explicit ADR.
 
-Roadmap v2 intentionally reopens only the admission/lifecycle mechanism. Do not preselect `run.cmd --once`, server-side labels/groups, or JIT/ephemeral registration merely because one already has prototype code. G11R-A chooses the mechanism against the frozen product semantic.
+Roadmap v3 preserves the G11R-A decision: exact-runner GitHub-native admission
+uses the reserved `runnermesh-admit` label and two-phase withdrawal. Do not
+reopen `run.cmd --once`, groups, or JIT/ephemeral registration merely because
+prototype or historical code exists.
 
 ## 8. Frontend and localization boundaries
 
@@ -227,7 +230,10 @@ all readiness fields PASS
 
 Do not stop the real service or launch a special Listener and then discover missing routing/workflow prerequisites.
 
-The historical V3/V4/V4R/V4S transaction variants are retained evidence, not a template. Roadmap v2 targets one accepted admission architecture, one readiness gate, and one H1 transaction family.
+The historical V3/V4/V4R/V4S transaction variants are retained evidence, not a
+template. Roadmap v3 keeps one accepted admission architecture, one readiness
+gate, and one H1 transaction family while allowing safe source preparation to
+proceed behind the H1 merge/acceptance gate.
 
 ## 16. Audit/blocker discipline
 

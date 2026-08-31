@@ -2,97 +2,113 @@
 
 Status: **Authoritative privacy-safe execution ledger**
 
-This file is the first status source for future RunnerMesh v0.1 agents. It records public repository state only. Do not place private host paths, usernames, runner IDs, private workflow IDs, credentials, or private topology here.
+This file is the first status source for future RunnerMesh v0.1 agents. It
+records public repository state only. Do not place private host paths,
+usernames, runner IDs, private workflow IDs, credentials, or private topology
+here.
 
-Last roadmap reset: 2026-08-30.
+Last roadmap reset: 2026-08-31 (Roadmap v3).
 
 ## State vocabulary
 
 - `ACCEPTED` — merged into authoritative `main` with required evidence.
-- `SUPERSEDED` — historical work retained as evidence but no longer the active implementation path.
-- `REDESIGN` — product goal remains; mechanism must be reselected/reworked.
+- `SUPERSEDED` — historical work is retained as evidence but is no longer the
+  active path.
 - `SALVAGE` — useful draft implementation exists but is not accepted as-is.
-- `READY` — prerequisites are satisfied for the next defined gate.
-- `PROTOTYPE` — source-only framework or model exists in a draft, but its
-  prerequisite Goal is not accepted and it is not product/readiness acceptance.
-- `OWNER_ACTION_PENDING` — autonomous source/docs work is accepted, but a separate
-  repository, trust, privilege, or production setting still requires the Owner.
-- `BLOCKED` — an external/trust/precondition boundary prevents progress.
-- `TODO` — not yet implemented/qualified.
+- `PREPARING` — bounded source/preflight/readiness work is in progress.
+- `PREPARED` — all non-Owner prerequisites are complete and freshly verifiable.
+- `WAITING_FOR_OWNER` — a prepared/resumable lane awaits fresh Owner presence or
+  authorization; this is not a defect or terminal blocker.
+- `OWNER_CANCELED` — one Owner authorization attempt ended; this is not an
+  implementation failure and does not authorize reuse of its transaction data.
+- `BLOCKED_PRECONDITION` — a required verified precondition is false or unknown.
+- `BLOCKED_EXTERNAL` — an external trust/service/platform dependency prevents
+  progress.
+- `FAIL_PRE_MUTATION` — execution failed before external mutation began.
+- `FAIL_POST_MUTATION` — execution failed after mutation began; restoration
+  remains an independent mandatory outcome.
+- `PASS` — the bounded result and required verification passed.
+- `TODO` — not yet implemented or qualified.
 
 ## Current ledger
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
-| G01 Domain foundation | ACCEPTED | historical main | #1 | NodeState/UserMode contracts | none |
-| Design freeze / roadmap v1 | ACCEPTED historical | historical main | #2 | product contract remains authoritative except explicit ADR changes | roadmap v2 governs remaining execution |
-| G02 Runtime contracts | ACCEPTED | historical main | #3 | runtime/control vocabulary | none |
-| G03 Agent Core | ACCEPTED | historical main | #4 | Observe/Decide/Reconcile + persistent intent | none |
-| G04 Local IPC | ACCEPTED | historical main | #5 | user-local Named Pipe + single Agent authority | none |
-| G05 CLI | ACCEPTED | historical main | #6 | typed status/control/doctor/version surfaces | none |
-| G06 Tray contracts | ACCEPTED | historical main | #7 | presentation contract | G06R later proved native runtime |
-| G07 Probes + Auto Lite | ACCEPTED | historical main | #8 | User Activity / Steam / Process List + conservative policy | none |
-| G08 Runner observer | ACCEPTED | historical main | #9 | read-only official runner observation | none |
-| G09 Supervisor core | ACCEPTED | historical main | #10 | synthetic lifecycle abstractions | none |
-| G10 Host + recovery model | ACCEPTED | historical main | #11 | host observation + reconstruction model | none |
-| G06R Native tray/runtime | ACCEPTED | historical main | #12 | ordinary-user persistent Agent + native tray | none |
-| G10R Pre-H1 integration | ACCEPTED | `2078c22bc9c8a2c409b651923ccca76ae3b2af45` | #13 | pre-H1 runtime readiness; no real runner control | none |
+| G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
-| Roadmap v2 | ACCEPTED | `2621548d685fde4a9910b675192de39ee791649f` | #19 merged | authoritative remaining v0.1 sequence and historical G11 supersession | GOV1 source/docs closeout |
-| Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S retained as private evidence; do not proliferate variants | P0 recovery-only closeout + G11R-A |
-| PR #17 bounded executor | SALVAGE / REDESIGN | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 draft | Busy drain/no-signal and exact scoping are useful; idle withdrawal remains unproven | G11R-A decision, then G11R-B |
-| P0 Recovery-only closeout | BLOCKED / OWNER GATE | N/A | N/A | historical terminal experiment must return to known-good baseline; no qualification continuation | narrow Owner recovery transaction |
-| GOV1 Governance reset | ACCEPTED / OWNER_ACTION_PENDING | PR #20 candidate | #20 | public ledger/roadmap/status references accepted; main protection recommendation documented | Owner applies machine-enforced main protection; autonomous work self-enforces PR-only flow |
-| Fast Lane v2 CI/audit automation | ACCEPTED / OWNER_ACTION_PENDING | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative docs/code classification, deterministic public audit, one stable `CI Gate`, and exact-head hosted Windows/Ubuntu code coverage; full main-push CI retained | Owner requires `CI Gate` and blocks direct/force pushes and branch deletion on `main` |
-| G11R-A Admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 merged | ADR 0004 selects `runnermesh-admit` plus two-phase withdrawal; hosted Windows and Ubuntu exact-head CI passed; trust expansion accepted without semantic weakening | G11R-B |
-| G11R-B Lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 merged | exact-runner reserved-label REST seam; desired/achieved Agent state; no normal Worker signal; hosted Windows and Ubuntu CI passed | G11R-C |
-| G11R-C Qualification readiness | ACCEPTED / OWNER_ACTION_PENDING | focused label-specific source package | #25 | eleven-gate fail-closed verifier, inert trusted-workflow template, one durable H1 transaction family, and synthetic restore/failure proof; no live trust or host evidence | separate P0 recovery and live H1 preparation Owner transactions |
-| H1 One-shot qualification | TODO | N/A | N/A | one prepared real qualification with automatic restore attempt | G11R-C `OWNER_GATE_READY=true` |
-| G12 Autostart | SALVAGE | draft implementation asset | #14 draft | old PR combines G12+G13; do not merge as-is | H1 PASS; extract clean G12 |
-| G13 Versioned install | SALVAGE | draft implementation asset | #14 draft | immutable-slot/install concepts reusable | H1 PASS; extract clean G13 |
-| G14 Update + rollback | SALVAGE | draft implementation asset | #15 draft | durable update/rollback implementation asset | accepted G13 baseline |
-| G15 Packaging + doctor | SALVAGE | draft implementation asset | #16 draft | package/provenance/doctor implementation asset | accepted G14 baseline |
-| G15R Integrated pre-H2 RC | TODO | N/A | N/A | exactly one authoritative-main sandbox-qualified RC | G12-G15 accepted |
-| H2/G16-A Real cutover | TODO | N/A | N/A | immutable RC only | G15R `H2_RC_READY=true` + Owner gate |
-| H2/G16-B Sustained dogfood | TODO | N/A | N/A | minimum 24h ordinary-use window | successful cutover |
-| G17 RC closeout | TODO | N/A | N/A | exact candidate/evidence/docs/release-note closeout | sustained dogfood PASS |
+| Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
+| Roadmap v3 governance truth | ACCEPTED | Roadmap v3 merge | governance PR | accepted health-audit conclusions; parallel source lane plus H1 merge gate | follow the eight execution blocks |
+| Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S remain private evidence, not active transaction variants | P0 supervised restore only |
+| PR #17 bounded executor | SUPERSEDED | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 closed | exact-scope/no-signal evidence preserved by ADR 0004 and accepted G11R; run-once path obsolete | none |
+| P0 supervised baseline restore | PREPARING | N/A | N/A | simplified read-only preflight -> Owner present -> minimum exact action -> independent postverification -> stop | fresh exact-scope preflight and Owner window |
+| GOV1 governance reset | ACCEPTED | PR #20 accepted | #20 | public ledger and PR-only governance foundation | none |
+| Fast Lane v2 CI/audit automation | ACCEPTED | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative classification, deterministic audit, stable `CI Gate`, hosted Windows/Ubuntu coverage | keep full post-merge main CI |
+| G11R-A admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 | ADR 0004 selects exact-runner `runnermesh-admit` and two-phase withdrawal | none |
+| G11R-B lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 | exact-scope REST seam, desired/achieved state, drift refusal, no normal Worker signal | H1 live adapter source |
+| G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
+| H1 live adapters/readiness source | PREPARING | N/A | N/A | transport, credential provider, exact local binding, workflow/routing and readiness collectors remain to be accepted | focused source Goal and exact-head gates |
+| H1 one-shot qualification | PREPARING | N/A | N/A | live mutation remains unauthorized; synthetic/source proof cannot authorize H1 | P0 PASS, private ACL, live configuration/readiness, Owner gate |
+| G12 autostart | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
+| G13 versioned install | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
+| G14 update + rollback | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #15 draft | selective extraction allowed; acceptance/merge held | accepted G13 after H1 |
+| G15 packaging + doctor | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #16 draft | selective extraction allowed; acceptance/merge held | accepted G14 after H1 |
+| G15R integrated pre-H2 RC | TODO | N/A | N/A | exactly one authoritative-main sandbox-qualified RC | G12-G15 accepted |
+| H2/G16-A real cutover | TODO | N/A | N/A | immutable RC only | G15R `H2_RC_READY=true` + Owner gate |
+| H2/G16-B sustained dogfood | TODO | N/A | N/A | minimum 24h ordinary-use window | successful cutover |
+| G17 RC closeout | TODO | N/A | N/A | exact candidate/evidence/docs/release closeout | sustained dogfood PASS |
 | H3/G18 v0.1.0 release | TODO | N/A | N/A | stable publication requires Owner authorization | G17 PASS |
 
 ## Current public repository baseline
 
-At the roadmap-v2 reset, authoritative `main` was:
+Roadmap v3 began from authoritative `main`:
 
 ```text
-2621548d685fde4a9910b675192de39ee791649f
+490852e219c74a0312e955e3eabeae02737bfc08
 ```
 
-Future agents must refresh remote state rather than assuming this SHA remains current.
+Future agents must refresh remote state rather than assuming this SHA remains
+current.
 
 ## Governance status
 
+Verified against the active repository ruleset on 2026-08-31:
+
 ```text
-ROADMAP_V2=ACCEPTED
-ROADMAP_V2_PR=19
-ROADMAP_V2_PR_STATE=MERGED
-GOV1_DOCS=ACCEPTED
-FAST_LANE_V2=ACCEPTED
-FAST_LANE_REQUIRED_CHECK=CI Gate
-MAIN_PROTECTION=OWNER_ACTION_PENDING
+ROADMAP_V3=ACCEPTED
+MAIN_PROTECTION=ENFORCED
+MAIN_RULESET=protect-main
+REQUIRED_CHECK=CI Gate
+MAIN_BYPASS=NONE
+DIRECT_PUSH_TO_MAIN=BLOCKED_BY_PULL_REQUEST_RULE
+FORCE_PUSH_TO_MAIN=BLOCKED
+MAIN_DELETION=BLOCKED
+STRICT_REQUIRED_STATUS_CHECKS_POLICY=false
+POST_MERGE_MAIN_CI=FULL
 ```
 
-As verified on 2026-08-30, `main` had neither branch protection nor a repository
-ruleset. Until the Owner applies the documented recommendation, autonomous work
-must self-enforce focused branch -> PR -> exact-head hosted CI -> merge and must
-never update `main` directly.
+Full Windows and Ubuntu CI remains enabled on `main` because the required check
+does not require an up-to-date base. Do not merge a next PR until the prior
+post-merge `main` run is healthy.
+
+## Source lane and Owner lane
+
+```text
+EXECUTION_MODEL=PARALLEL_SOURCE_PREP_WITH_H1_MERGE_GATE
+P0_PRODUCT_BLOCKER=false
+P0_H1_BLOCKER=true
+P0_SOURCE_DEVELOPMENT_BLOCKER=false
+H1_SHOULD_BLOCK_SOURCE_PREPARATION=false
+G12_G15_SOURCE_PREPARATION_ALLOWED=true
+G12_G15_ACCEPTANCE_REQUIRES_H1_PASS=true
+G12_G15_ACCEPTANCE_REQUIRES_BASELINE_RESTORE_PASS=true
+```
+
+P0/H1 waiting does not automatically block safe source-only work. G12-G15 may
+be selectively extracted, corrected, tested, and prepared as focused drafts.
+They remain unaccepted and unmergeable as product milestones until H1 and
+baseline restoration both pass.
 
 ## Current admission decision
-
-The Owner accepted GitHub-native dynamic admission through the unique reserved
-label `runnermesh-admit` with two-phase withdrawal. Desired withdrawal starts at
-accepted local policy intent. Achieved `DRAINED` requires selector absence, no
-exact bound Worker, and consistent evidence. Mutation/readback is not described
-as a globally linearizable scheduler barrier; a racing assignment is treated as
-in-flight and may finish naturally.
 
 ```text
 G11R_A=ACCEPTED
@@ -100,23 +116,33 @@ ADMISSION_ARCHITECTURE=GITHUB_NATIVE_DYNAMIC_ADMISSION_LABEL
 RESERVED_ADMISSION_LABEL=runnermesh-admit
 WITHDRAWAL_PROTOCOL=TWO_PHASE
 SCHEDULER_LINEARIZABILITY=NOT_CLAIMED_WITHOUT_UPSTREAM_GUARANTEE
-LOCAL_PERSISTENT_IDLE_WITHDRAWAL=UNPROVEN
-RUN_ONCE_IDLE_WITHDRAWAL=UNPROVEN
-DESIGN_FREEZE_CHANGE=TRUST_BOUNDARY_EXPANSION_PLUS_SEMANTIC_CLARIFICATION
-SEMANTIC_WEAKENING=FALSE
+SEMANTIC_WEAKENING=false
 G11R_B=ACCEPTED
-G11R_B_MAIN=0c76e10f67d563f2dadc4914b5eefaa29a73d858
 G11R_C=ACCEPTED_SOURCE
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
-H1_TRANSACTION_FAMILY_READY=true
 H1_MUTATION_ALLOWED=false
-H1=WAITING_FOR_OWNER_P0_AND_H1_PREPARATION
+LIVE_READINESS_EXECUTED=false
+H1_EXECUTED=false
 ```
 
-PR #21 contains the accepted ADR, formal model, workflow contract, and PR #17
-salvage map. Draft PR #22 remains only a mechanism-neutral readiness/restore
-prototype until G11R-B is accepted. No source-development phase authorizes real
-host, runner, registration, label/group, work-root, or H1 mutation.
+Unknown identity, selector ownership, routing, workflow, credential, local
+binding, rollback, recovery, or Owner evidence fails closed.
+
+## Remaining security debt
+
+```text
+PRIVATE_EVIDENCE_ACL_HARDENING=REQUIRED_BEFORE_H1_LIVE_ARTIFACTS_OR_OWNER_GATE
+ACTIONS_CHECKOUT_IMMUTABLE_PINNING=REQUIRED_BEFORE_RELEASE
+NAMED_PIPE_EXPLICIT_DACL=REQUIRED_BEFORE_RELEASE
+```
+
+The ACL change and real credential/workflow/runner configuration are separate
+Owner actions. Public docs and fixtures contain no private identities.
+
 ## Update rule
 
-After every accepted Goal/PR merge or material blocker change, update only decision-relevant rows. Do not rewrite historical accepted rows merely for formatting. Private evidence may be referenced generically (for example, `private H1 receipt`) but never copied into this public ledger.
+After every accepted Goal/PR merge or material blocker change, update only
+decision-relevant rows. `WAITING_FOR_OWNER` is resumable control state, not a
+failure. Never reuse an old nonce, transaction, handoff, preflight, or Owner
+authorization. After mutation, report qualification and restoration
+independently.

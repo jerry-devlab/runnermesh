@@ -10,7 +10,10 @@ Design validation was completed before this public product repository began. Pri
 
 The stable domain/runtime foundation, Agent Core, IPC, CLI, native tray, probes, conservative Auto Lite, host observation, runner observation, and pre-H1 supervisor/runtime foundation are implemented. Real admission/lifecycle semantics, productization, real cutover, sustained dogfood, and release closeout remain under active development.
 
-The original post-G10R G11 qualification path was superseded after the 2026-08-30 architecture audit. Roadmap v2 separates admission architecture, lifecycle implementation, qualification readiness, one-shot real qualification, productization, pre-H2 RC integration, real cutover, and sustained dogfood.
+The original post-G10R G11 qualification path was superseded after the
+2026-08-30 architecture audit. Roadmap v3 adopts the accepted G11R architecture,
+separates source preparation from Owner-gated live work, and keeps H1 plus
+baseline restoration as the merge/acceptance gate for productization.
 
 v0.1 still targets a single interactive Windows workstation and an official GitHub Actions self-hosted runner. First-usable capabilities include:
 
@@ -35,18 +38,18 @@ v0.1 still targets a single interactive Windows workstation and an official GitH
 
 ### v0.1 execution phases
 
-1. close historical G11 experimental state with recovery-only semantics;
-2. G11R-A admission-linearization architecture;
-3. G11R-B lifecycle implementation;
-4. G11R-C qualification readiness;
-5. H1 one-shot real qualification with automatic restore attempt;
-6. G12-G15 productization rewrite/salvage;
-7. G15R integrated pre-H2 RC;
-8. H2/G16 real cutover + sustained dogfood;
-9. G17 RC closeout;
-10. H3/G18 v0.1.0 publication.
+1. governance truth and parallel source preparation policy;
+2. P0 supervised baseline restoration;
+3. H1 live adapters and readiness;
+4. parallel G12-G15 source preparation, with merge held;
+5. H1 one-shot real qualification and baseline restoration;
+6. G12-G15 acceptance plus one integrated G15R RC;
+7. H2/G16 cutover and sustained dogfood;
+8. G17 closeout and H3/G18 publication.
 
-The exact mechanism for capacity withdrawal is selected by G11R-A. `run.cmd --once`, persistent local lifecycle control, server-side labels/groups, and ephemeral/JIT leases are implementation options to evaluate—not product commitments by themselves.
+G11R-A selected exact-runner GitHub-native admission through the reserved
+`runnermesh-admit` label and two-phase withdrawal. `run.cmd --once`, runner
+groups, and ephemeral/JIT registration are not v0.1 alternatives to reopen.
 
 ## v0.2 — Windows resource policy
 

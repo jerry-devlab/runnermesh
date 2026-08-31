@@ -101,21 +101,21 @@ Ordinary development always assumes `PRODUCTION_MUTATION=false`.
 
 Source branches, local Cargo builds/tests, hosted CI, and PR merges must not stop, overwrite, reconfigure, or replace an installed stable runtime. Arbitrary worktree binaries are never production dogfood; use immutable authorized RC/release artifacts.
 
-## v0.1 roadmap-v2 trains
+## v0.1 roadmap-v3 corridors
 
 - **Accepted foundation:** G01-G10 + G06R + G10R.
-- **P0:** historical G11 recovery-only closeout — Owner transaction; no qualification continuation.
-- **GOV1:** execution ledger/docs plus recommended main protection.
-- **G11R-A:** admission-linearization architecture — autonomous.
-- **G11R-B:** lifecycle implementation — autonomous.
-- **G11R-C:** qualification readiness — autonomous; must stop before H1 mutation.
-- **H1:** one-shot real qualification — Owner transaction with automatic restore attempt.
-- **Train C2:** G12-G15 productization rewrite/salvage — autonomous in sandbox/install fixtures.
-- **G15R:** integrated pre-H2 RC — autonomous, no production activation.
-- **H2/G16-A:** real workstation cutover — Owner transaction.
-- **H2/G16-B:** sustained ordinary-use dogfood — minimum 24 hours before G17.
-- **G17:** RC closeout — autonomous; no stable publication.
-- **H3/G18:** public v0.1.0 publication — Owner transaction.
+- **Governance truth:** accepted roadmap/ledger plus enforced protected-main state.
+- **P0:** supervised historical baseline restore — Owner transaction; no qualification continuation.
+- **H1 adapters/readiness:** autonomous source preparation; no real credential or runner mutation.
+- **Productization preparation:** G12-G15 selective extraction may proceed as source-only draft work; merge remains held.
+- **H1 qualification/restore:** one Owner transaction with independent qualification and restoration results.
+- **Productization acceptance + G15R:** merge corrected G12-G15 only after H1 and restore pass, then build one integrated RC.
+- **H2/G16:** real workstation cutover plus at least 24 hours of dogfood.
+- **G17 + H3/G18:** autonomous closeout followed by Owner-authorized publication.
+
+`WAITING_FOR_OWNER` is resumable control state, not a defect. An
+`OWNER_CANCELED` attempt does not fail the implementation and never permits
+reuse of its authorization or transaction data.
 
 Historical V3/V4/V4R/V4S qualification variants are retained evidence, not the pattern for future work. Aim for one accepted architecture, one readiness gate, and one H1 transaction family.
 

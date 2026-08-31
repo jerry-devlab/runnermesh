@@ -62,8 +62,9 @@ take the depth they require.  These aims never create an automatic PASS.
 
 After merge, verify remote `main` and start the next safe Goal while main CI runs
 asynchronously.  Do not merge the next PR until that prior main run passes; latch
-a failure immediately.  Full main-push CI remains required while main protection
-and the stable required PR gate are not machine-enforced.
+a failure immediately. Full main-push CI remains required while the required PR
+gate does not enforce an up-to-date base, even when main protection itself is
+machine-enforced.
 
 ## Blockers
 
