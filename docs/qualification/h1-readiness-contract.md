@@ -1,6 +1,6 @@
 # H1 qualification readiness contract
 
-Status: **G11R-C source contract; live H1 remains Owner-gated**
+Status: **G11R-C plus H1 live-adapter source; live H1 remains Owner-gated**
 
 G11R-C prepares one fail-closed H1 transaction family for the accepted
 GitHub-native `runnermesh-admit` architecture. Source and synthetic fixtures do
@@ -30,13 +30,73 @@ explicit `LIVE` or `SYNTHETIC` provenance:
 
 - all-pass `SYNTHETIC` evidence returns `PASS_SYNTHETIC` and always sets
   `h1_mutation_allowed=false`;
-- only all-pass `LIVE` evidence returns `READY_FOR_OWNER_GATE` and can prepare
-  the future transaction; and
+- caller-supplied all-pass `LIVE` evidence remains `BLOCKED` with
+  `COLLECTOR_ATTESTATION=UNKNOWN` and cannot prepare the future transaction;
+- only a non-serializable in-process attestation issued by a concrete trusted
+  live collector can return `READY_FOR_OWNER_GATE` and prepare the future
+  transaction; and
 - the transaction still requires the explicit `OwnerGateAccepted` event before
   progressing.
 
-The present source suite proves the synthetic verifier. It does not invent the
-missing live evidence.
+The source suite proves the synthetic verifier and provides collectors for the
+future live evidence. It does not invent missing Owner evidence or convert
+source capability into a live PASS.
+
+## Live-adapter source boundary
+
+The prepared source layer consists of:
+
+- an exact `H1LiveBinding` for GitHub scope, runner ID/name, canonical reserved
+  selector, opaque credential and execution-identity references, local runner
+  home, work root, Listener/Worker images, trusted workflow identity, and
+  restore/recovery receipt identities;
+- a fixed-authority GitHub REST transport and Windows WinHTTP client;
+- a Windows Credential Manager provider behind an injectable read-only store
+  boundary;
+- an exact local filesystem/identity collector behind an injectable ownership
+  verifier;
+- GET-only exact-runner, selector-uniqueness, immutable workflow-content, and
+  routing verifiers, including a GET-only exact-repository-to-runner access
+  client; and
+- `collect_h1_live_readiness`, which maps injected typed observations into the
+  existing eleven-field `H1ReadinessEvidence` contract while always marking
+  that public seam `SYNTHETIC`.
+
+Serializable evidence, receipts, and transaction checkpoints are inert data,
+not an authorization capability. The active transaction model deliberately
+cannot be deserialized. Rehydrating a validated checkpoint requires a separate
+non-serializable attestation bound to that exact checkpoint state after the
+private transaction envelope and recovery authority are reverified.
+`H1TransactionModel::prepare` requires a non-serializable
+`H1LiveReadinessAttestation`; callers cannot obtain one by changing JSON or the
+public provenance enum. This source Goal issues neither live nor resume
+attestations, so `LIVE_READINESS_EXECUTED=false` remains mandatory.
+
+Binding and response drift fail closed. The workflow client can only read the
+configured file at an immutable commit reference; it has no dispatch method.
+Fetched workflow bytes must match the frozen inert template (apart from line
+ending normalization), preventing duplicate-key or equivalent-YAML ambiguity.
+That read proves source identity but leaves the private runtime runner-name
+variable `UNKNOWN` until a separate Owner-side verifier proves its exact value.
+Organization-scoped runner visibility does not prove that the trusted
+repository can route to that runner. `ROUTING_READY` is therefore derived from
+the same exact workflow and admission observations plus an explicit repository
+access observation bound to the complete `H1LiveBinding`, including scope,
+runner ID/name, credential reference, local identity, workflow, and restore
+identities. Unknown access blocks readiness, and a stale positive access
+observation cannot be replayed after any binding drift or mask an absent
+selector or other admission drift.
+The admission client retains only exact-runner observation and add-one/remove-
+one reserved-label operations with positive readback. The source adapters are
+not activated by default and tests inject only synthetic credentials and fake
+HTTP responses. Multi-page runner inventories require stable totals, unique
+runner IDs, and an identical second complete read before they can become
+evidence.
+
+The local filesystem collector rejects a symlink or Windows reparse point at
+the leaf or any ancestor before accepting runner-home, work-root, or image-path
+evidence. Work-root path evidence and independently injected ownership evidence
+must both pass.
 
 ## Evidence meanings
 
@@ -168,9 +228,9 @@ The in-memory model proves:
 | unrelated runner observed | unchanged | zero unrelated-runner control actions |
 | ownership ambiguity | `BLOCKED` | refuse unowned correction; recovery required if past gate |
 
-All failure injection uses synthetic state. No network transport, credential
-provider, service adapter, runner-control adapter, or workflow dispatch is
-invoked.
+All failure injection uses synthetic state. No real network request,
+credential-store read, service adapter, runner-control adapter, or workflow
+dispatch is invoked.
 
 ## Public/private evidence split
 
@@ -186,13 +246,14 @@ copied into public code, PRs, logs, or the execution ledger.
 
 ## Current live disposition
 
-G11R-C source acceptance can establish a synthetic proof and a ready source
-transaction family, but the frozen historical P0 incident and absent Owner
-trust configuration keep live H1 fail-closed:
+The accepted source can establish a synthetic proof, ready adapter layer, and
+ready source transaction family, but the frozen historical P0 incident and
+absent Owner trust configuration keep live H1 fail-closed:
 
 ```text
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_TRANSACTION_FAMILY_READY=true
+H1_LIVE_ADAPTER_SOURCE_READY=true
 SOURCE_READY=PASS
 HOST_PRESTATE_READY=UNKNOWN
 GITHUB_AUTHORITY_CONFIGURED=UNKNOWN
@@ -207,6 +268,7 @@ OWNER_GATE_READY=UNKNOWN
 ROLLBACK_SOURCE_MODEL=PASS_SYNTHETIC
 RECOVERY_SOURCE_MODEL=PASS_SYNTHETIC
 H1_MUTATION_ALLOWED=false
+LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
 ```
 
@@ -214,3 +276,8 @@ P0 recovery and H1 preparation remain separate future Owner transactions. This
 Goal does not start/stop a service, invoke a recovery helper, touch the real
 qualification workspace, change a runner label/group/registration, create a
 credential, or dispatch H1.
+
+`WAITING_FOR_OWNER` and `OWNER_CANCELED` remain outer control states, not H1
+implementation failures. A later attempt must collect fresh live evidence and
+use a fresh transaction identity and authorization; this source change does
+not add a generic workflow engine or make an old transaction resumable.

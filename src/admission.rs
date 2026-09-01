@@ -1,4 +1,8 @@
-use std::fmt;
+use std::{
+    collections::HashSet,
+    fmt,
+    sync::atomic::{compiler_fence, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -482,6 +486,8 @@ impl<B: AdmissionControlBackend> AgentReconciler for AdmissionAgentReconciler<B>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdmissionBackendError {
     CredentialUnavailable,
+    CredentialResolutionFailed,
+    CredentialMalformed,
     AuthenticationFailed,
     RateLimited { retry_after_seconds: u64 },
     ApiUnavailable,
@@ -534,6 +540,8 @@ impl AdmissionBackendError {
     fn reason_code(&self) -> ReasonCode {
         reason(match self {
             Self::CredentialUnavailable => "admission-credential-unavailable",
+            Self::CredentialResolutionFailed => "admission-credential-resolution-failed",
+            Self::CredentialMalformed => "admission-credential-malformed",
             Self::AuthenticationFailed => "admission-authentication-failed",
             Self::RateLimited { .. } => "admission-rate-limited",
             Self::ApiUnavailable => "admission-api-unavailable",
@@ -608,6 +616,10 @@ impl CredentialReference {
             Err("credential reference components must be non-secret printable tokens")
         }
     }
+
+    pub fn is_valid(&self) -> bool {
+        valid_reference_component(&self.provider) && valid_reference_component(&self.key)
+    }
 }
 
 pub struct CredentialLease {
@@ -616,13 +628,18 @@ pub struct CredentialLease {
 
 impl CredentialLease {
     pub fn from_secret(secret: impl AsRef<[u8]>) -> Result<Self, &'static str> {
-        let secret = secret.as_ref();
-        if secret.is_empty() || secret.contains(&b'\r') || secret.contains(&b'\n') {
-            return Err("credential material is empty or contains a newline");
+        Self::from_owned_secret(secret.as_ref().to_vec())
+    }
+
+    pub(crate) fn from_owned_secret(mut secret: Vec<u8>) -> Result<Self, &'static str> {
+        if secret.is_empty()
+            || secret.len() > 4096
+            || secret.iter().any(|byte| !byte.is_ascii_graphic())
+        {
+            secure_zero_bytes(&mut secret);
+            return Err("credential material must be bounded printable ASCII without whitespace");
         }
-        Ok(Self {
-            secret: secret.to_vec(),
-        })
+        Ok(Self { secret })
     }
 
     pub fn expose_for_transport(&self) -> &[u8] {
@@ -638,8 +655,20 @@ impl fmt::Debug for CredentialLease {
 
 impl Drop for CredentialLease {
     fn drop(&mut self) {
-        self.secret.fill(0);
+        secure_zero_bytes(&mut self.secret);
     }
+}
+
+/// Volatile writes plus a compiler fence prevent dead-store elimination of
+/// credential clearing. Callers must also avoid reallocating a buffer after it
+/// contains secret material, because an allocator can retain an old copy.
+#[inline(never)]
+pub(crate) fn secure_zero_bytes(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is a unique, live pointer within the supplied slice.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
 }
 
 pub trait CredentialProvider {
@@ -693,24 +722,25 @@ impl AdmissionBinding {
             credential_ref,
             ownership,
         };
-        if binding.validate() {
+        if binding.is_valid() {
             Ok(binding)
         } else {
             Err(AdmissionBackendError::BindingInvalid)
         }
     }
 
-    fn validate(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.scope.validate()
             && self.runner_id != 0
             && !self.runner_name.trim().is_empty()
             && !self.runner_name.contains(['\r', '\n'])
+            && self.credential_ref.is_valid()
             && self
                 .reserved_label
                 .eq_ignore_ascii_case(RESERVED_ADMISSION_LABEL)
     }
 
-    fn ownership_matches(&self) -> bool {
+    pub fn has_valid_ownership(&self) -> bool {
         self.ownership.as_ref().is_some_and(|ownership| {
             ownership.scope == self.scope
                 && ownership.runner_id == self.runner_id
@@ -751,6 +781,7 @@ pub struct GithubHttpResponse {
 pub enum GithubTransportError {
     Unavailable,
     Timeout,
+    InvalidResponse,
 }
 
 pub trait GithubHttpTransport {
@@ -773,7 +804,7 @@ impl<T, C> GithubRestAdmissionBackend<T, C> {
         transport: T,
         credentials: C,
     ) -> Result<Self, AdmissionBackendError> {
-        if !binding.validate() {
+        if !binding.is_valid() {
             return Err(AdmissionBackendError::BindingInvalid);
         }
         Ok(Self {
@@ -800,9 +831,28 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
     fn observe_exact_runner(
         &mut self,
     ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        let (runners, multi_page) = self.collect_runner_scope_snapshot()?;
+        let runners = if multi_page {
+            let (confirmed, confirmed_multi_page) = self.collect_runner_scope_snapshot()?;
+            if !confirmed_multi_page || confirmed != runners {
+                return Err(AdmissionBackendError::SelectorObservationUnknown);
+            }
+            confirmed
+        } else {
+            runners
+        };
+
+        self.classify_exact_runner(runners)
+    }
+
+    fn collect_runner_scope_snapshot(
+        &mut self,
+    ) -> Result<(Vec<GithubRunner>, bool), AdmissionBackendError> {
         let mut page = 1_u16;
         let mut runners = Vec::new();
         let mut expected_total = None;
+        let mut runner_ids = HashSet::new();
+        let mut multi_page = false;
         loop {
             if page > 100 {
                 return Err(AdmissionBackendError::SelectorObservationUnknown);
@@ -817,18 +867,38 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
             })?;
             let parsed: GithubRunnerList = serde_json::from_slice(&response.body)
                 .map_err(|_| AdmissionBackendError::MalformedResponse)?;
-            expected_total.get_or_insert(parsed.total_count);
-            runners.extend(parsed.runners);
+            match expected_total {
+                Some(total) if total != parsed.total_count => {
+                    return Err(AdmissionBackendError::SelectorObservationUnknown);
+                }
+                None => expected_total = Some(parsed.total_count),
+                Some(_) => {}
+            }
+            for runner in parsed.runners {
+                if !runner_ids.insert(runner.id) {
+                    return Err(AdmissionBackendError::SelectorObservationUnknown);
+                }
+                runners.push(runner);
+            }
             if !response.has_next_page {
                 break;
             }
+            multi_page = true;
             page += 1;
         }
 
-        if expected_total.is_some_and(|total| total as usize > runners.len()) {
+        if expected_total.is_some_and(|total| usize::try_from(total).ok() != Some(runners.len())) {
             return Err(AdmissionBackendError::SelectorObservationUnknown);
         }
 
+        normalize_runner_snapshot(&mut runners);
+        Ok((runners, multi_page))
+    }
+
+    fn classify_exact_runner(
+        &self,
+        runners: Vec<GithubRunner>,
+    ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
         let selector_collision = runners.iter().any(|runner| {
             runner.id != self.binding.runner_id
                 && runner
@@ -859,10 +929,15 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
         if matching_labels.len() > 1 || matching_labels.iter().any(|label| label.kind != "custom") {
             return Err(AdmissionBackendError::ReservedLabelOwnershipDrift);
         }
-        if !matching_labels.is_empty() && !self.binding.ownership_matches() {
+        if !matching_labels.is_empty() && !self.binding.has_valid_ownership() {
             return Err(AdmissionBackendError::ReservedLabelOwnershipDrift);
         }
 
+        let runner_online = match exact.status.as_str() {
+            status if status.eq_ignore_ascii_case("online") => true,
+            status if status.eq_ignore_ascii_case("offline") => false,
+            _ => return Err(AdmissionBackendError::MalformedResponse),
+        };
         Ok(RemoteAdmissionObservation {
             selector: if matching_labels.is_empty() {
                 AdmissionSelectorState::Absent
@@ -870,12 +945,12 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
                 AdmissionSelectorState::Present
             },
             runner_busy: exact.busy,
-            runner_online: exact.status.eq_ignore_ascii_case("online"),
+            runner_online,
         })
     }
 
     fn require_owned_binding(&self) -> Result<(), AdmissionBackendError> {
-        if self.binding.ownership_matches() {
+        if self.binding.has_valid_ownership() {
             Ok(())
         } else {
             Err(AdmissionBackendError::ReservedLabelOwnershipDrift)
@@ -893,6 +968,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
             .map_err(|error| match error {
                 GithubTransportError::Unavailable => AdmissionBackendError::ApiUnavailable,
                 GithubTransportError::Timeout => AdmissionBackendError::Timeout,
+                GithubTransportError::InvalidResponse => AdmissionBackendError::MalformedResponse,
             })?;
         match response.status {
             200..=299 => Ok(response),
@@ -970,7 +1046,7 @@ struct GithubRunnerList {
     runners: Vec<GithubRunner>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 struct GithubRunner {
     id: u64,
     name: String,
@@ -979,11 +1055,23 @@ struct GithubRunner {
     labels: Vec<GithubLabel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 struct GithubLabel {
     name: String,
     #[serde(rename = "type")]
     kind: String,
+}
+
+fn normalize_runner_snapshot(runners: &mut [GithubRunner]) {
+    for runner in runners.iter_mut() {
+        runner.labels.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+    }
+    runners.sort_by_key(|runner| runner.id);
 }
 
 fn valid_path_component(value: &str) -> bool {
@@ -1323,11 +1411,31 @@ mod tests {
     }
 
     fn response(body: serde_json::Value) -> Result<GithubHttpResponse, GithubTransportError> {
+        paged_response(body, false)
+    }
+
+    fn paged_response(
+        body: serde_json::Value,
+        has_next_page: bool,
+    ) -> Result<GithubHttpResponse, GithubTransportError> {
         Ok(GithubHttpResponse {
             status: 200,
             body: serde_json::to_vec(&body).unwrap(),
             retry_after_seconds: None,
-            has_next_page: false,
+            has_next_page,
+        })
+    }
+
+    fn runner_entry(id: u64, name: &str, labels: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "status": "online",
+            "busy": false,
+            "labels": labels.iter().map(|label| serde_json::json!({
+                "name": label,
+                "type": "custom",
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -1445,6 +1553,162 @@ mod tests {
     }
 
     #[test]
+    fn rest_backend_refuses_inconsistent_counts_and_unknown_runner_status() {
+        let inconsistent_count = serde_json::json!({
+            "total_count": 2,
+            "runners": [{
+                "id": 42,
+                "name": "trusted-runner",
+                "status": "online",
+                "busy": false,
+                "labels": []
+            }]
+        });
+        let unknown_status = serde_json::json!({
+            "total_count": 1,
+            "runners": [{
+                "id": 42,
+                "name": "trusted-runner",
+                "status": "unexpected",
+                "busy": false,
+                "labels": []
+            }]
+        });
+        for (body, expected) in [
+            (
+                inconsistent_count,
+                AdmissionBackendError::SelectorObservationUnknown,
+            ),
+            (unknown_status, AdmissionBackendError::MalformedResponse),
+        ] {
+            let transport = FakeTransport {
+                responses: [response(body)].into_iter().collect(),
+                ..FakeTransport::default()
+            };
+            let mut backend = GithubRestAdmissionBackend::new(
+                binding(true),
+                transport,
+                FakeCredentialProvider::default(),
+            )
+            .unwrap();
+            assert_eq!(backend.observe_admission_selector().unwrap_err(), expected);
+            assert_eq!(backend.transport().requests.len(), 1);
+        }
+    }
+
+    #[test]
+    fn multi_page_runner_inventory_requires_stable_totals_unique_ids_and_repeat_readback() {
+        let first_page = serde_json::json!({
+            "total_count": 2,
+            "runners": [runner_entry(42, "trusted-runner", &[])],
+        });
+        let second_page = serde_json::json!({
+            "total_count": 2,
+            "runners": [runner_entry(99, "unrelated-runner", &[])],
+        });
+        let stable_transport = FakeTransport {
+            responses: [
+                paged_response(first_page.clone(), true),
+                paged_response(second_page.clone(), false),
+                paged_response(first_page.clone(), true),
+                paged_response(second_page.clone(), false),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut stable = GithubRestAdmissionBackend::new(
+            binding(true),
+            stable_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            stable.observe_admission_selector().unwrap().selector,
+            AdmissionSelectorState::Absent
+        );
+        assert_eq!(stable.transport().requests.len(), 4);
+
+        let changed_second_page = serde_json::json!({
+            "total_count": 2,
+            "runners": [runner_entry(100, "replacement-runner", &[])],
+        });
+        let moving_transport = FakeTransport {
+            responses: [
+                paged_response(first_page.clone(), true),
+                paged_response(second_page.clone(), false),
+                paged_response(first_page.clone(), true),
+                paged_response(changed_second_page, false),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut moving = GithubRestAdmissionBackend::new(
+            binding(true),
+            moving_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            moving.observe_admission_selector().unwrap_err(),
+            AdmissionBackendError::SelectorObservationUnknown
+        );
+
+        let total_drift_transport = FakeTransport {
+            responses: [
+                paged_response(first_page.clone(), true),
+                paged_response(
+                    serde_json::json!({
+                        "total_count": 3,
+                        "runners": [runner_entry(99, "unrelated-runner", &[])],
+                    }),
+                    false,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut total_drift = GithubRestAdmissionBackend::new(
+            binding(true),
+            total_drift_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            total_drift.observe_admission_selector().unwrap_err(),
+            AdmissionBackendError::SelectorObservationUnknown
+        );
+
+        let duplicate_transport = FakeTransport {
+            responses: [
+                paged_response(first_page, true),
+                paged_response(
+                    serde_json::json!({
+                        "total_count": 2,
+                        "runners": [runner_entry(42, "trusted-runner", &[])],
+                    }),
+                    false,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut duplicate = GithubRestAdmissionBackend::new(
+            binding(true),
+            duplicate_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            duplicate.observe_admission_selector().unwrap_err(),
+            AdmissionBackendError::SelectorObservationUnknown
+        );
+    }
+
+    #[test]
     fn existing_reserved_label_without_ownership_receipt_refuses_removal() {
         let transport = FakeTransport {
             responses: [response(runner(&[RESERVED_ADMISSION_LABEL]))]
@@ -1489,6 +1753,33 @@ mod tests {
             AdmissionBackendError::CredentialUnavailable
         );
         assert!(backend.transport().requests.is_empty());
+    }
+
+    #[test]
+    fn deserialized_invalid_credential_reference_is_refused_at_backend_boundary() {
+        let mut candidate = binding(true);
+        candidate.credential_ref = serde_json::from_str(
+            r#"{"provider":"windows-credential-manager","key":"truncated\u0000target"}"#,
+        )
+        .unwrap();
+
+        assert!(!candidate.credential_ref.is_valid());
+        assert!(!candidate.is_valid());
+        assert!(matches!(
+            GithubRestAdmissionBackend::new(
+                candidate,
+                FakeTransport::default(),
+                FakeCredentialProvider::default(),
+            ),
+            Err(AdmissionBackendError::BindingInvalid)
+        ));
+    }
+
+    #[test]
+    fn secure_clear_uses_the_credential_scrubbing_primitive() {
+        let mut bytes = b"synthetic-secret-shape".to_vec();
+        secure_zero_bytes(&mut bytes);
+        assert!(bytes.iter().all(|byte| *byte == 0));
     }
 
     #[test]

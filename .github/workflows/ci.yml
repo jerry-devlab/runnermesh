@@ -23,7 +23,7 @@ jobs:
       head_sha: ${{ steps.changes.outputs.head_sha }}
       diff_mode: ${{ steps.changes.outputs.diff_mode }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -50,7 +50,7 @@ jobs:
     needs: classify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.classify.outputs.head_sha }}
@@ -69,7 +69,7 @@ jobs:
     if: needs.classify.result == 'success' && (github.event_name != 'pull_request' || needs.classify.outputs.change_class != 'DOCS_ONLY')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.classify.outputs.head_sha }}
       - run: cargo fmt --all -- --check
@@ -84,7 +84,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.classify.outputs.head_sha }}
       - name: Resolve compiler identity
