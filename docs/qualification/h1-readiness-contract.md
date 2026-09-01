@@ -62,11 +62,15 @@ The prepared source layer consists of:
   existing eleven-field `H1ReadinessEvidence` contract while always marking
   that public seam `SYNTHETIC`.
 
-Serializable evidence and receipts are data, not an authorization capability.
+Serializable evidence, receipts, and transaction checkpoints are inert data,
+not an authorization capability. The active transaction model deliberately
+cannot be deserialized. Rehydrating a validated checkpoint requires a separate
+non-serializable attestation bound to that exact checkpoint state after the
+private transaction envelope and recovery authority are reverified.
 `H1TransactionModel::prepare` requires a non-serializable
 `H1LiveReadinessAttestation`; callers cannot obtain one by changing JSON or the
-public provenance enum. This source Goal does not issue such an attestation, so
-`LIVE_READINESS_EXECUTED=false` remains mandatory.
+public provenance enum. This source Goal issues neither live nor resume
+attestations, so `LIVE_READINESS_EXECUTED=false` remains mandatory.
 
 Binding and response drift fail closed. The workflow client can only read the
 configured file at an immutable commit reference; it has no dispatch method.

@@ -452,6 +452,7 @@ pub enum H1TransactionEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H1TransactionError {
     ReadinessNotLiveAndComplete,
+    CheckpointNotAuthorized,
     InvalidTransition,
 }
 
@@ -468,12 +469,12 @@ pub struct H1TransactionReceipt {
     pub unrelated_runner_control_actions: u32,
 }
 
-/// Durable, provider-neutral state for exactly one future H1 transaction
-/// family. Exact runner/repository/workflow identifiers remain in the private
-/// transaction envelope rather than this public state.
+/// Inert durable state for exactly one future H1 transaction family. It can be
+/// inspected and serialized, but it has no transition methods and cannot
+/// become active without a separately authenticated resume capability.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct H1TransactionModel {
+pub struct H1TransactionCheckpoint {
     schema_version: u32,
     transaction_family: String,
     phase: H1TransactionPhase,
@@ -483,6 +484,104 @@ pub struct H1TransactionModel {
     external_mutation_started: bool,
     automatic_restore_attempted: bool,
     unrelated_runner_control_actions: u32,
+}
+
+impl H1TransactionCheckpoint {
+    pub fn phase(&self) -> H1TransactionPhase {
+        self.phase
+    }
+
+    fn is_valid(&self) -> bool {
+        use H1TransactionPhase as Phase;
+
+        if self.schema_version != H1_TRANSACTION_SCHEMA_VERSION
+            || self.transaction_family != H1_TRANSACTION_FAMILY_ID
+            || self.unrelated_runner_control_actions != 0
+        {
+            return false;
+        }
+
+        match self.phase {
+            Phase::Prepared => {
+                self.qualification.is_none()
+                    && self.restore.is_none()
+                    && !self.external_mutation_started
+                    && !self.automatic_restore_attempted
+            }
+            Phase::OwnerAuthorized => {
+                self.qualification.is_none()
+                    && self.restore.is_none()
+                    && !self.external_mutation_started
+                    && !self.automatic_restore_attempted
+            }
+            Phase::AdmissionControlEstablished
+            | Phase::Advertised
+            | Phase::PrimaryJobRunning
+            | Phase::PrimaryJobCompleted => {
+                self.qualification.is_none()
+                    && self.restore.is_none()
+                    && !self.automatic_restore_attempted
+            }
+            Phase::Withdrawing
+            | Phase::SelectorAbsent
+            | Phase::DrainPending
+            | Phase::NoNewAdmissionWitnessed
+            | Phase::Drained
+            | Phase::ReAdvertising
+            | Phase::ReAdvertised => {
+                self.qualification.is_none()
+                    && self.restore.is_none()
+                    && self.external_mutation_started
+                    && !self.automatic_restore_attempted
+            }
+            Phase::RestorePending => {
+                self.qualification.is_some()
+                    && self.restore.is_none()
+                    && !self.automatic_restore_attempted
+            }
+            Phase::Restoring => {
+                self.qualification.is_some()
+                    && self.restore.is_none()
+                    && self.automatic_restore_attempted
+            }
+            Phase::Complete => {
+                self.qualification.is_some() && self.restore == Some(RestoreDisposition::Pass)
+            }
+            Phase::RecoveryRequired => {
+                self.qualification.is_some() && self.restore == Some(RestoreDisposition::Fail)
+            }
+        }
+    }
+}
+
+/// Non-serializable capability bound to one validated checkpoint after the
+/// private exact transaction envelope and recovery authority are reverified.
+pub struct H1TransactionResumeAttestation {
+    checkpoint: H1TransactionCheckpoint,
+}
+
+#[allow(
+    dead_code,
+    reason = "the private Owner-side exact-envelope resume verifier is intentionally not activated in this source-only Goal"
+)]
+pub(crate) fn attest_h1_transaction_resume(
+    checkpoint: &H1TransactionCheckpoint,
+    exact_private_envelope_verified: bool,
+) -> Result<H1TransactionResumeAttestation, H1TransactionError> {
+    if !exact_private_envelope_verified || !checkpoint.is_valid() {
+        return Err(H1TransactionError::CheckpointNotAuthorized);
+    }
+    Ok(H1TransactionResumeAttestation {
+        checkpoint: checkpoint.clone(),
+    })
+}
+
+/// Active in-process state. This type is serializable as an inert checkpoint
+/// but deliberately is not deserializable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct H1TransactionModel {
+    checkpoint: H1TransactionCheckpoint,
 }
 
 impl H1TransactionModel {
@@ -497,20 +596,36 @@ impl H1TransactionModel {
             return Err(H1TransactionError::ReadinessNotLiveAndComplete);
         }
         Ok(Self {
-            schema_version: H1_TRANSACTION_SCHEMA_VERSION,
-            transaction_family: H1_TRANSACTION_FAMILY_ID.to_owned(),
-            phase: H1TransactionPhase::Prepared,
-            qualification: None,
-            restore: None,
-            baseline,
-            external_mutation_started: false,
-            automatic_restore_attempted: false,
-            unrelated_runner_control_actions: 0,
+            checkpoint: H1TransactionCheckpoint {
+                schema_version: H1_TRANSACTION_SCHEMA_VERSION,
+                transaction_family: H1_TRANSACTION_FAMILY_ID.to_owned(),
+                phase: H1TransactionPhase::Prepared,
+                qualification: None,
+                restore: None,
+                baseline,
+                external_mutation_started: false,
+                automatic_restore_attempted: false,
+                unrelated_runner_control_actions: 0,
+            },
         })
     }
 
+    pub fn resume(
+        checkpoint: H1TransactionCheckpoint,
+        attestation: &H1TransactionResumeAttestation,
+    ) -> Result<Self, H1TransactionError> {
+        if !checkpoint.is_valid() || attestation.checkpoint != checkpoint {
+            return Err(H1TransactionError::CheckpointNotAuthorized);
+        }
+        Ok(Self { checkpoint })
+    }
+
     pub fn phase(&self) -> H1TransactionPhase {
-        self.phase
+        self.checkpoint.phase
+    }
+
+    pub fn checkpoint(&self) -> H1TransactionCheckpoint {
+        self.checkpoint.clone()
     }
 
     pub fn apply(&mut self, event: H1TransactionEvent) -> Result<(), H1TransactionError> {
@@ -518,66 +633,71 @@ impl H1TransactionModel {
         use H1TransactionPhase as Phase;
 
         match event {
-            Event::PreOwnerGateBlocked if self.phase == Phase::Prepared => {
+            Event::PreOwnerGateBlocked if self.checkpoint.phase == Phase::Prepared => {
                 self.complete_without_transaction(QualificationDisposition::Blocked);
             }
-            Event::OwnerGateAccepted if self.phase == Phase::Prepared => {
-                self.phase = Phase::OwnerAuthorized;
+            Event::OwnerGateAccepted if self.checkpoint.phase == Phase::Prepared => {
+                self.checkpoint.phase = Phase::OwnerAuthorized;
             }
             Event::AdmissionControlEstablished { mutation_performed }
-                if self.phase == Phase::OwnerAuthorized =>
+                if self.checkpoint.phase == Phase::OwnerAuthorized =>
             {
-                self.external_mutation_started |= mutation_performed;
-                self.phase = Phase::AdmissionControlEstablished;
+                self.checkpoint.external_mutation_started |= mutation_performed;
+                self.checkpoint.phase = Phase::AdmissionControlEstablished;
             }
             Event::AdvertisedCapacityQualified
-                if self.phase == Phase::AdmissionControlEstablished =>
+                if self.checkpoint.phase == Phase::AdmissionControlEstablished =>
             {
-                self.phase = Phase::Advertised;
+                self.checkpoint.phase = Phase::Advertised;
             }
-            Event::PrimaryTrustedJobStarted if self.phase == Phase::Advertised => {
-                self.phase = Phase::PrimaryJobRunning;
+            Event::PrimaryTrustedJobStarted if self.checkpoint.phase == Phase::Advertised => {
+                self.checkpoint.phase = Phase::PrimaryJobRunning;
             }
-            Event::PrimaryTrustedJobPassed if self.phase == Phase::PrimaryJobRunning => {
-                self.phase = Phase::PrimaryJobCompleted;
+            Event::PrimaryTrustedJobPassed if self.checkpoint.phase == Phase::PrimaryJobRunning => {
+                self.checkpoint.phase = Phase::PrimaryJobCompleted;
             }
-            Event::WithdrawalRequested if self.phase == Phase::PrimaryJobCompleted => {
-                self.external_mutation_started = true;
-                self.phase = Phase::Withdrawing;
+            Event::WithdrawalRequested if self.checkpoint.phase == Phase::PrimaryJobCompleted => {
+                self.checkpoint.external_mutation_started = true;
+                self.checkpoint.phase = Phase::Withdrawing;
             }
-            Event::SelectorAbsenceObserved if self.phase == Phase::Withdrawing => {
-                self.phase = Phase::SelectorAbsent;
+            Event::SelectorAbsenceObserved if self.checkpoint.phase == Phase::Withdrawing => {
+                self.checkpoint.phase = Phase::SelectorAbsent;
             }
             Event::NoNewAdmissionWitnessed {
                 racing_assignment_observed,
-            } if self.phase == Phase::SelectorAbsent => {
-                self.phase = if racing_assignment_observed {
+            } if self.checkpoint.phase == Phase::SelectorAbsent => {
+                self.checkpoint.phase = if racing_assignment_observed {
                     Phase::DrainPending
                 } else {
                     Phase::NoNewAdmissionWitnessed
                 };
             }
-            Event::ActiveWorkerCompleted if self.phase == Phase::DrainPending => {
-                self.phase = Phase::NoNewAdmissionWitnessed;
+            Event::ActiveWorkerCompleted if self.checkpoint.phase == Phase::DrainPending => {
+                self.checkpoint.phase = Phase::NoNewAdmissionWitnessed;
             }
-            Event::AchievedDrainedObserved if self.phase == Phase::NoNewAdmissionWitnessed => {
-                self.phase = Phase::Drained;
+            Event::AchievedDrainedObserved
+                if self.checkpoint.phase == Phase::NoNewAdmissionWitnessed =>
+            {
+                self.checkpoint.phase = Phase::Drained;
             }
-            Event::ReadvertiseRequested if self.phase == Phase::Drained => {
-                self.external_mutation_started = true;
-                self.phase = Phase::ReAdvertising;
+            Event::ReadvertiseRequested if self.checkpoint.phase == Phase::Drained => {
+                self.checkpoint.external_mutation_started = true;
+                self.checkpoint.phase = Phase::ReAdvertising;
             }
-            Event::SelectorPresenceObserved if self.phase == Phase::ReAdvertising => {
-                self.phase = Phase::ReAdvertised;
+            Event::SelectorPresenceObserved if self.checkpoint.phase == Phase::ReAdvertising => {
+                self.checkpoint.phase = Phase::ReAdvertised;
             }
-            Event::ReconnectWitnessPassed if self.phase == Phase::ReAdvertised => {
+            Event::ReconnectWitnessPassed if self.checkpoint.phase == Phase::ReAdvertised => {
                 self.request_restore(QualificationDisposition::Pass);
             }
-            Event::PrimaryTrustedJobFailed if self.phase == Phase::PrimaryJobRunning => {
+            Event::PrimaryTrustedJobFailed if self.checkpoint.phase == Phase::PrimaryJobRunning => {
                 self.request_restore(QualificationDisposition::Fail);
             }
             Event::NoNewAdmissionWitnessFailed
-                if matches!(self.phase, Phase::SelectorAbsent | Phase::DrainPending) =>
+                if matches!(
+                    self.checkpoint.phase,
+                    Phase::SelectorAbsent | Phase::DrainPending
+                ) =>
             {
                 self.request_restore(QualificationDisposition::Fail);
             }
@@ -585,40 +705,45 @@ impl H1TransactionModel {
             | Event::ActiveJobTimedOut
             | Event::SelectorObservationUnknown
             | Event::AgentLost
-                if !self.is_terminal() && self.phase != Phase::Prepared =>
+                if !self.is_terminal() && self.checkpoint.phase != Phase::Prepared =>
             {
                 self.request_restore(QualificationDisposition::Blocked);
             }
-            Event::ControllerLost if self.phase == Phase::Restoring => {
-                self.restore = Some(RestoreDisposition::Fail);
-                self.phase = Phase::RecoveryRequired;
+            Event::ControllerLost if self.checkpoint.phase == Phase::Restoring => {
+                self.checkpoint.restore = Some(RestoreDisposition::Fail);
+                self.checkpoint.phase = Phase::RecoveryRequired;
             }
-            Event::ControllerLost if !self.is_terminal() && self.phase != Phase::Prepared => {
+            Event::ControllerLost
+                if !self.is_terminal() && self.checkpoint.phase != Phase::Prepared =>
+            {
                 self.request_restore(QualificationDisposition::Blocked);
             }
-            Event::BeginAutomaticRestore if self.phase == Phase::RestorePending => {
-                self.automatic_restore_attempted = true;
-                self.phase = Phase::Restoring;
+            Event::BeginAutomaticRestore if self.checkpoint.phase == Phase::RestorePending => {
+                self.checkpoint.automatic_restore_attempted = true;
+                self.checkpoint.phase = Phase::Restoring;
             }
-            Event::RestorePassed if self.phase == Phase::Restoring => {
-                self.restore = Some(RestoreDisposition::Pass);
-                self.phase = Phase::Complete;
+            Event::RestorePassed if self.checkpoint.phase == Phase::Restoring => {
+                self.checkpoint.restore = Some(RestoreDisposition::Pass);
+                self.checkpoint.phase = Phase::Complete;
             }
-            Event::RestoreFailed | Event::RestoreInterrupted if self.phase == Phase::Restoring => {
-                self.restore = Some(RestoreDisposition::Fail);
-                self.phase = Phase::RecoveryRequired;
+            Event::RestoreFailed | Event::RestoreInterrupted
+                if self.checkpoint.phase == Phase::Restoring =>
+            {
+                self.checkpoint.restore = Some(RestoreDisposition::Fail);
+                self.checkpoint.phase = Phase::RecoveryRequired;
             }
             Event::UnrelatedRunnerObserved if !self.is_terminal() => {
                 // Observation grants no authority and creates no control action.
             }
-            Event::OwnershipBecameAmbiguous if self.phase == Phase::Prepared => {
+            Event::OwnershipBecameAmbiguous if self.checkpoint.phase == Phase::Prepared => {
                 self.complete_without_transaction(QualificationDisposition::Blocked);
             }
             Event::OwnershipBecameAmbiguous if !self.is_terminal() => {
-                self.qualification
+                self.checkpoint
+                    .qualification
                     .get_or_insert(QualificationDisposition::Blocked);
-                self.restore = Some(RestoreDisposition::Fail);
-                self.phase = Phase::RecoveryRequired;
+                self.checkpoint.restore = Some(RestoreDisposition::Fail);
+                self.checkpoint.phase = Phase::RecoveryRequired;
             }
             _ => return Err(H1TransactionError::InvalidTransition),
         }
@@ -631,31 +756,32 @@ impl H1TransactionModel {
         }
         Some(H1TransactionReceipt {
             schema_version: H1_TRANSACTION_SCHEMA_VERSION,
-            transaction_family: self.transaction_family.clone(),
-            qualification: self.qualification?,
-            restore: self.restore?,
-            baseline: self.baseline,
-            external_mutation_started: self.external_mutation_started,
-            automatic_restore_attempted: self.automatic_restore_attempted,
-            emergency_owner_recovery_required: self.phase == H1TransactionPhase::RecoveryRequired,
-            unrelated_runner_control_actions: self.unrelated_runner_control_actions,
+            transaction_family: self.checkpoint.transaction_family.clone(),
+            qualification: self.checkpoint.qualification?,
+            restore: self.checkpoint.restore?,
+            baseline: self.checkpoint.baseline,
+            external_mutation_started: self.checkpoint.external_mutation_started,
+            automatic_restore_attempted: self.checkpoint.automatic_restore_attempted,
+            emergency_owner_recovery_required: self.checkpoint.phase
+                == H1TransactionPhase::RecoveryRequired,
+            unrelated_runner_control_actions: self.checkpoint.unrelated_runner_control_actions,
         })
     }
 
     fn request_restore(&mut self, qualification: QualificationDisposition) {
-        self.qualification.get_or_insert(qualification);
-        self.phase = H1TransactionPhase::RestorePending;
+        self.checkpoint.qualification.get_or_insert(qualification);
+        self.checkpoint.phase = H1TransactionPhase::RestorePending;
     }
 
     fn complete_without_transaction(&mut self, qualification: QualificationDisposition) {
-        self.qualification = Some(qualification);
-        self.restore = Some(RestoreDisposition::Pass);
-        self.phase = H1TransactionPhase::Complete;
+        self.checkpoint.qualification = Some(qualification);
+        self.checkpoint.restore = Some(RestoreDisposition::Pass);
+        self.checkpoint.phase = H1TransactionPhase::Complete;
     }
 
     fn is_terminal(&self) -> bool {
         matches!(
-            self.phase,
+            self.checkpoint.phase,
             H1TransactionPhase::Complete | H1TransactionPhase::RecoveryRequired
         )
     }
@@ -1013,13 +1139,41 @@ mod tests {
     }
 
     #[test]
-    fn durable_state_round_trips_without_private_identity_fields() {
+    fn durable_checkpoint_is_inert_and_resume_requires_exact_attestation() {
         let model = primary_running();
         let json = serde_json::to_string(&model).unwrap();
         assert!(json.contains(H1_TRANSACTION_FAMILY_ID));
         assert!(!json.contains("runner_name"));
         assert!(!json.contains("repository"));
-        let round_trip: H1TransactionModel = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_trip, model);
+        let checkpoint: H1TransactionCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(checkpoint, model.checkpoint());
+        assert_eq!(checkpoint.phase(), H1TransactionPhase::PrimaryJobRunning);
+        assert!(matches!(
+            attest_h1_transaction_resume(&checkpoint, false),
+            Err(H1TransactionError::CheckpointNotAuthorized)
+        ));
+
+        let attestation = attest_h1_transaction_resume(&checkpoint, true).unwrap();
+        let resumed = H1TransactionModel::resume(checkpoint.clone(), &attestation).unwrap();
+        assert_eq!(resumed, model);
+
+        let other = prepared().checkpoint();
+        assert_eq!(
+            H1TransactionModel::resume(other, &attestation).unwrap_err(),
+            H1TransactionError::CheckpointNotAuthorized
+        );
+    }
+
+    #[test]
+    fn structurally_forged_checkpoint_cannot_receive_resume_attestation() {
+        let mut json = serde_json::to_value(prepared().checkpoint()).unwrap();
+        json["phase"] = serde_json::json!("OWNER_AUTHORIZED");
+        json["external_mutation_started"] = serde_json::json!(true);
+        let forged: H1TransactionCheckpoint = serde_json::from_value(json).unwrap();
+
+        assert!(matches!(
+            attest_h1_transaction_resume(&forged, true),
+            Err(H1TransactionError::CheckpointNotAuthorized)
+        ));
     }
 }
