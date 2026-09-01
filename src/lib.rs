@@ -56,11 +56,12 @@ pub use github_transport::{
 };
 pub use h1_live::{
     collect_h1_live_readiness, observe_github_admission_readiness, verify_h1_routing,
-    verify_trusted_workflow, ExactLocalBindingObservation, ExactLocalBindingSource,
-    ExactLocalRunnerBinding, FilesystemExactLocalBindingSource, GithubAdmissionReadiness,
-    GithubWorkflowClient, H1LiveBinding, H1LiveReadinessCollection, H1LiveReadinessInputs,
-    LocalIdentityOwnershipVerifier, OpaqueIdentityReference, RestoreReadinessBinding, RouteState,
-    TrustedWorkflowBinding, TrustedWorkflowObservation, WorkflowPresence,
+    verify_repository_runner_access, verify_trusted_workflow, ExactLocalBindingObservation,
+    ExactLocalBindingSource, ExactLocalRunnerBinding, FilesystemExactLocalBindingSource,
+    GithubAdmissionReadiness, GithubRepositoryAccessClient, GithubWorkflowClient, H1LiveBinding,
+    H1LiveReadinessCollection, H1LiveReadinessInputs, LocalIdentityOwnershipVerifier,
+    OpaqueIdentityReference, RepositoryRunnerAccessObservation, RestoreReadinessBinding,
+    RouteState, TrustedWorkflowBinding, TrustedWorkflowObservation, WorkflowPresence,
 };
 pub use host::{
     AdoptionRefusal, ExistingListenerAdoption, HostEvidence, HostHealth, HostSnapshot, HostSource,
@@ -108,8 +109,9 @@ pub use tray::{
 };
 #[cfg(windows)]
 pub use windows_github::{
-    windows_github_admission_backend, windows_github_workflow_client,
-    WindowsGithubAdmissionBackend, WindowsGithubWorkflowClient, WindowsWinHttpClient,
+    windows_github_admission_backend, windows_github_repository_access_client,
+    windows_github_workflow_client, WindowsGithubAdmissionBackend,
+    WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient, WindowsWinHttpClient,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{

@@ -53,7 +53,8 @@ The prepared source layer consists of:
 - an exact local filesystem/identity collector behind an injectable ownership
   verifier;
 - GET-only exact-runner, selector-uniqueness, immutable workflow-content, and
-  routing verifiers; and
+  routing verifiers, including a GET-only exact-repository-to-runner access
+  client; and
 - `collect_h1_live_readiness`, which maps the typed observations into the
   existing eleven-field `H1ReadinessEvidence` contract.
 
@@ -63,6 +64,12 @@ Fetched workflow bytes must match the frozen inert template (apart from line
 ending normalization), preventing duplicate-key or equivalent-YAML ambiguity.
 That read proves source identity but leaves the private runtime runner-name
 variable `UNKNOWN` until a separate Owner-side verifier proves its exact value.
+Organization-scoped runner visibility does not prove that the trusted
+repository can route to that runner. `ROUTING_READY` is therefore derived from
+the same exact workflow and admission observations plus an explicit repository
+access observation bound to the configured repository and runner ID. Unknown
+access blocks readiness, and a stale positive access observation cannot mask an
+absent selector or other admission drift.
 The admission client retains only exact-runner observation and add-one/remove-
 one reserved-label operations with positive readback. The source adapters are
 not activated by default and tests inject only synthetic credentials and fake

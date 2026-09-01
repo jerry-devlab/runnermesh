@@ -15,8 +15,8 @@ use windows_sys::Win32::{
 use crate::admission::secure_zero_bytes;
 use crate::{
     AdmissionBackendError, AdmissionBinding, CredentialLease, CredentialReference,
-    GithubApiTransport, GithubRestAdmissionBackend, GithubWireClient, GithubWireError,
-    GithubWireRequest, GithubWireResponse, GithubWorkflowClient, HttpMethod,
+    GithubApiTransport, GithubRepositoryAccessClient, GithubRestAdmissionBackend, GithubWireClient,
+    GithubWireError, GithubWireRequest, GithubWireResponse, GithubWorkflowClient, HttpMethod,
     WindowsCredentialManagerProvider, GITHUB_API_HOST, GITHUB_API_USER_AGENT,
 };
 
@@ -29,6 +29,11 @@ pub type WindowsGithubAdmissionBackend = GithubRestAdmissionBackend<
 >;
 
 pub type WindowsGithubWorkflowClient = GithubWorkflowClient<
+    GithubApiTransport<WindowsWinHttpClient>,
+    WindowsCredentialManagerProvider,
+>;
+
+pub type WindowsGithubRepositoryAccessClient = GithubRepositoryAccessClient<
     GithubApiTransport<WindowsWinHttpClient>,
     WindowsCredentialManagerProvider,
 >;
@@ -47,6 +52,16 @@ pub fn windows_github_workflow_client(
     credential_ref: CredentialReference,
 ) -> WindowsGithubWorkflowClient {
     GithubWorkflowClient::new(
+        GithubApiTransport::new(WindowsWinHttpClient),
+        WindowsCredentialManagerProvider::new(),
+        credential_ref,
+    )
+}
+
+pub fn windows_github_repository_access_client(
+    credential_ref: CredentialReference,
+) -> WindowsGithubRepositoryAccessClient {
+    GithubRepositoryAccessClient::new(
         GithubApiTransport::new(WindowsWinHttpClient),
         WindowsCredentialManagerProvider::new(),
         credential_ref,

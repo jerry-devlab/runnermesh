@@ -13,7 +13,8 @@ use crate::{
     AdmissionControlBackend, AdmissionSelectorState, CredentialProvider, CredentialReference,
     EvidenceProvenance, EvidenceState, GithubHttpRequest, GithubHttpTransport, H1ReadinessEvidence,
     H1ReadinessReceipt, H1RestoreBaseline, H1WorkflowTemplateAssessment, HttpMethod,
-    H1_READINESS_SCHEMA_VERSION, H1_TRANSACTION_FAMILY_ID, RESERVED_ADMISSION_LABEL,
+    RegistrationScope, H1_READINESS_SCHEMA_VERSION, H1_TRANSACTION_FAMILY_ID,
+    RESERVED_ADMISSION_LABEL,
 };
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -155,7 +156,20 @@ impl H1LiveBinding {
             && self.local.is_valid()
             && self.workflow.is_valid()
             && self.workflow.expected_runner_name == self.admission.runner_name
+            && self.workflow_is_in_registration_scope()
             && self.restore.is_valid()
+    }
+
+    fn workflow_is_in_registration_scope(&self) -> bool {
+        match &self.admission.scope {
+            RegistrationScope::Organization { organization } => {
+                self.workflow.owner.eq_ignore_ascii_case(organization)
+            }
+            RegistrationScope::Repository { owner, repository } => {
+                self.workflow.owner.eq_ignore_ascii_case(owner)
+                    && self.workflow.repository.eq_ignore_ascii_case(repository)
+            }
+        }
     }
 }
 
@@ -351,6 +365,9 @@ pub fn verify_trusted_workflow(
     binding: &TrustedWorkflowBinding,
     observation: &TrustedWorkflowObservation,
 ) -> EvidenceState {
+    if !binding.is_valid() {
+        return EvidenceState::Fail;
+    }
     match observation.presence {
         WorkflowPresence::Unknown => EvidenceState::Unknown,
         WorkflowPresence::Absent => EvidenceState::Fail,
@@ -468,12 +485,155 @@ struct GithubWorkflowContent {
     content: String,
 }
 
+/// GET-only GitHub adapter that proves the exact runner is visible from the
+/// exact trusted repository. It cannot mutate runner groups, repository access,
+/// labels, registration, workflows, or dispatches.
+pub struct GithubRepositoryAccessClient<T, C> {
+    transport: T,
+    credentials: C,
+    credential_ref: CredentialReference,
+}
+
+impl<T, C> GithubRepositoryAccessClient<T, C> {
+    pub fn new(transport: T, credentials: C, credential_ref: CredentialReference) -> Self {
+        Self {
+            transport,
+            credentials,
+            credential_ref,
+        }
+    }
+
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+}
+
+impl<T: GithubHttpTransport, C: CredentialProvider> GithubRepositoryAccessClient<T, C> {
+    pub fn observe(
+        &mut self,
+        binding: &H1LiveBinding,
+    ) -> Result<RepositoryRunnerAccessObservation, AdmissionBackendError> {
+        if !binding.is_valid() || self.credential_ref != binding.admission.credential_ref {
+            return Err(AdmissionBackendError::BindingInvalid);
+        }
+        let credential = self.credentials.resolve(&self.credential_ref)?;
+        let response = self
+            .transport
+            .send(
+                &GithubHttpRequest {
+                    method: HttpMethod::Get,
+                    path: repository_runner_path(binding),
+                    body: None,
+                },
+                &credential,
+            )
+            .map_err(|error| match error {
+                crate::GithubTransportError::Unavailable => AdmissionBackendError::ApiUnavailable,
+                crate::GithubTransportError::Timeout => AdmissionBackendError::Timeout,
+                crate::GithubTransportError::InvalidResponse => {
+                    AdmissionBackendError::MalformedResponse
+                }
+            })?;
+        match response.status {
+            200 => {}
+            401 | 403 if response.retry_after_seconds.is_none() => {
+                return Err(AdmissionBackendError::AuthenticationFailed);
+            }
+            403 | 429 => {
+                return Err(AdmissionBackendError::RateLimited {
+                    retry_after_seconds: response.retry_after_seconds.unwrap_or(1),
+                });
+            }
+            404 => {
+                return Ok(RepositoryRunnerAccessObservation::exact(
+                    binding,
+                    EvidenceState::Fail,
+                ));
+            }
+            500..=599 => return Err(AdmissionBackendError::ApiUnavailable),
+            _ => return Err(AdmissionBackendError::MalformedResponse),
+        }
+        if response.has_next_page {
+            return Err(AdmissionBackendError::MalformedResponse);
+        }
+        let runner: GithubRepositoryRunner = serde_json::from_slice(&response.body)
+            .map_err(|_| AdmissionBackendError::MalformedResponse)?;
+        if runner.id != binding.admission.runner_id || runner.name != binding.admission.runner_name
+        {
+            return Err(AdmissionBackendError::RunnerIdentityDrift);
+        }
+        Ok(RepositoryRunnerAccessObservation::exact(
+            binding,
+            EvidenceState::Pass,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+struct GithubRepositoryRunner {
+    id: u64,
+    name: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RouteState {
     Present,
     Absent,
     Unknown,
+}
+
+/// Read-only proof that the exact bound runner is selectable by the exact
+/// trusted workflow repository. Organization-scoped runners require this
+/// separate repository-access proof because runner visibility alone does not
+/// establish runner-group or selected-repository access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryRunnerAccessObservation {
+    pub repository_full_name: Option<String>,
+    pub runner_id: Option<u64>,
+    pub access: EvidenceState,
+}
+
+impl RepositoryRunnerAccessObservation {
+    pub fn unknown() -> Self {
+        Self {
+            repository_full_name: None,
+            runner_id: None,
+            access: EvidenceState::Unknown,
+        }
+    }
+
+    pub fn exact(binding: &H1LiveBinding, access: EvidenceState) -> Self {
+        Self {
+            repository_full_name: Some(binding.workflow.repository_full_name()),
+            runner_id: Some(binding.admission.runner_id),
+            access,
+        }
+    }
+}
+
+pub fn verify_repository_runner_access(
+    binding: &H1LiveBinding,
+    observation: &RepositoryRunnerAccessObservation,
+) -> EvidenceState {
+    if !binding.is_valid() {
+        return EvidenceState::Fail;
+    }
+    if observation.repository_full_name.as_deref()
+        != Some(binding.workflow.repository_full_name().as_str())
+        || observation.runner_id != Some(binding.admission.runner_id)
+    {
+        return match observation.access {
+            EvidenceState::Unknown
+                if observation.repository_full_name.is_none()
+                    && observation.runner_id.is_none() =>
+            {
+                EvidenceState::Unknown
+            }
+            _ => EvidenceState::Fail,
+        };
+    }
+    observation.access
 }
 
 impl RouteState {
@@ -487,18 +647,28 @@ impl RouteState {
 }
 
 pub fn verify_h1_routing(
-    workflow: EvidenceState,
+    binding: &H1LiveBinding,
+    workflow: &TrustedWorkflowObservation,
     admission: GithubAdmissionReadiness,
+    repository_access: &RepositoryRunnerAccessObservation,
 ) -> RouteState {
+    let workflow = verify_trusted_workflow(&binding.workflow, workflow);
+    let repository_access = verify_repository_runner_access(binding, repository_access);
     if workflow == EvidenceState::Fail
+        || repository_access == EvidenceState::Fail
+        || admission.authority_configured == EvidenceState::Fail
         || admission.exact_runner_identity == EvidenceState::Fail
+        || admission.reserved_selector == EvidenceState::Fail
         || admission.selector_unique == EvidenceState::Fail
         || admission.selector == AdmissionSelectorState::Absent
         || admission.runner_online == Some(false)
     {
         RouteState::Absent
     } else if workflow == EvidenceState::Pass
+        && repository_access == EvidenceState::Pass
+        && admission.authority_configured == EvidenceState::Pass
         && admission.exact_runner_identity == EvidenceState::Pass
+        && admission.reserved_selector == EvidenceState::Pass
         && admission.selector_unique == EvidenceState::Pass
         && admission.selector == AdmissionSelectorState::Present
         && admission.runner_online == Some(true)
@@ -509,15 +679,16 @@ pub fn verify_h1_routing(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct H1LiveReadinessInputs {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct H1LiveReadinessInputs<'a> {
+    pub binding: &'a H1LiveBinding,
     pub provenance: EvidenceProvenance,
     pub source_ready: EvidenceState,
     pub host_prestate_ready: EvidenceState,
     pub github: GithubAdmissionReadiness,
     pub local: ExactLocalBindingObservation,
-    pub trusted_workflow: EvidenceState,
-    pub routing: RouteState,
+    pub workflow: &'a TrustedWorkflowObservation,
+    pub repository_access: &'a RepositoryRunnerAccessObservation,
     pub rollback_ready: EvidenceState,
     pub recovery_ready: EvidenceState,
     pub owner_gate_ready: EvidenceState,
@@ -531,6 +702,13 @@ pub struct H1LiveReadinessCollection {
 }
 
 pub fn collect_h1_live_readiness(inputs: H1LiveReadinessInputs) -> H1LiveReadinessCollection {
+    let trusted_workflow = verify_trusted_workflow(&inputs.binding.workflow, inputs.workflow);
+    let routing = verify_h1_routing(
+        inputs.binding,
+        inputs.workflow,
+        inputs.github,
+        inputs.repository_access,
+    );
     let evidence = H1ReadinessEvidence {
         schema_version: H1_READINESS_SCHEMA_VERSION,
         provenance: inputs.provenance,
@@ -543,8 +721,8 @@ pub fn collect_h1_live_readiness(inputs: H1LiveReadinessInputs) -> H1LiveReadine
         ]),
         reserved_selector_ready: inputs.github.reserved_selector,
         selector_unique: inputs.github.selector_unique,
-        trusted_workflow_ready: inputs.trusted_workflow,
-        routing_ready: inputs.routing.evidence(),
+        trusted_workflow_ready: trusted_workflow,
+        routing_ready: routing.evidence(),
         rollback_ready: inputs.rollback_ready,
         recovery_ready: inputs.recovery_ready,
         owner_gate_ready: inputs.owner_gate_ready,
@@ -570,6 +748,15 @@ fn workflow_contents_path(binding: &TrustedWorkflowBinding) -> String {
         percent_encode_component(&binding.repository),
         path,
         percent_encode_component(&binding.immutable_ref)
+    )
+}
+
+fn repository_runner_path(binding: &H1LiveBinding) -> String {
+    format!(
+        "/repos/{}/{}/actions/runners/{}",
+        percent_encode_component(&binding.workflow.owner),
+        percent_encode_component(&binding.workflow.repository),
+        binding.admission.runner_id,
     )
 }
 
@@ -773,12 +960,28 @@ mod tests {
 
     fn workflow_binding() -> TrustedWorkflowBinding {
         TrustedWorkflowBinding {
-            owner: "example-owner".to_owned(),
+            owner: "example-org".to_owned(),
             repository: "trusted-qualification".to_owned(),
             workflow_path: ".github/workflows/h1.yml".to_owned(),
             immutable_ref: COMMIT.to_owned(),
             expected_blob_sha: BLOB.to_owned(),
             expected_runner_name: "synthetic-runner".to_owned(),
+        }
+    }
+
+    fn live_binding() -> H1LiveBinding {
+        H1LiveBinding {
+            admission: admission_binding(),
+            local: local_binding(),
+            workflow: workflow_binding(),
+            restore: RestoreReadinessBinding {
+                transaction_family: H1_TRANSACTION_FAMILY_ID.to_owned(),
+                baseline: H1RestoreBaseline {
+                    admission: BaselineAdmissionState::Advertised,
+                    local_runner_expected_online: true,
+                },
+                recovery_plan_ref: "synthetic-recovery-plan".to_owned(),
+            },
         }
     }
 
@@ -793,19 +996,7 @@ mod tests {
 
     #[test]
     fn exact_binding_is_typed_and_normal_json_contains_no_secret_material() {
-        let binding = H1LiveBinding {
-            admission: admission_binding(),
-            local: local_binding(),
-            workflow: workflow_binding(),
-            restore: RestoreReadinessBinding {
-                transaction_family: H1_TRANSACTION_FAMILY_ID.to_owned(),
-                baseline: H1RestoreBaseline {
-                    admission: BaselineAdmissionState::Advertised,
-                    local_runner_expected_online: true,
-                },
-                recovery_plan_ref: "synthetic-recovery-plan".to_owned(),
-            },
-        };
+        let binding = live_binding();
         assert!(binding.is_valid());
         let json = serde_json::to_string(&binding).unwrap();
         assert!(json.contains(RESERVED_ADMISSION_LABEL));
@@ -857,6 +1048,17 @@ mod tests {
                 },
                 recovery_plan_ref: "synthetic-recovery-plan".to_owned(),
             },
+        };
+        assert!(!binding.is_valid());
+
+        let mut binding = live_binding();
+        binding.workflow.owner = "unrelated-org".to_owned();
+        assert!(!binding.is_valid());
+
+        let mut binding = live_binding();
+        binding.admission.scope = RegistrationScope::Repository {
+            owner: "example-org".to_owned(),
+            repository: "different-repository".to_owned(),
         };
         assert!(!binding.is_valid());
     }
@@ -1007,7 +1209,8 @@ mod tests {
 
     #[test]
     fn workflow_and_routing_verifiers_distinguish_present_absent_and_unknown() {
-        let binding = workflow_binding();
+        let live_binding = live_binding();
+        let binding = &live_binding.workflow;
         let assessment = assess_h1_workflow_source(crate::h1_workflow_template());
         let present = TrustedWorkflowObservation {
             presence: WorkflowPresence::Present,
@@ -1019,15 +1222,15 @@ mod tests {
             runtime_runner_binding: EvidenceState::Pass,
         };
         assert_eq!(
-            verify_trusted_workflow(&binding, &present),
+            verify_trusted_workflow(binding, &present),
             EvidenceState::Pass
         );
         assert_eq!(
-            verify_trusted_workflow(&binding, &TrustedWorkflowObservation::absent(&binding)),
+            verify_trusted_workflow(binding, &TrustedWorkflowObservation::absent(binding)),
             EvidenceState::Fail
         );
         assert_eq!(
-            verify_trusted_workflow(&binding, &TrustedWorkflowObservation::unknown()),
+            verify_trusted_workflow(binding, &TrustedWorkflowObservation::unknown()),
             EvidenceState::Unknown
         );
 
@@ -1039,35 +1242,122 @@ mod tests {
             selector: AdmissionSelectorState::Present,
             runner_online: Some(true),
         };
+        let access = RepositoryRunnerAccessObservation::exact(&live_binding, EvidenceState::Pass);
         assert_eq!(
-            verify_h1_routing(EvidenceState::Pass, admission),
+            verify_h1_routing(&live_binding, &present, admission, &access),
             RouteState::Present
         );
         assert_eq!(
             verify_h1_routing(
-                EvidenceState::Pass,
+                &live_binding,
+                &present,
                 GithubAdmissionReadiness {
                     selector: AdmissionSelectorState::Absent,
                     ..admission
                 },
+                &access,
             ),
             RouteState::Absent
         );
         assert_eq!(
             verify_h1_routing(
-                EvidenceState::Pass,
+                &live_binding,
+                &present,
                 GithubAdmissionReadiness {
                     selector: AdmissionSelectorState::Unknown,
                     ..admission
                 },
+                &access,
+            ),
+            RouteState::Unknown
+        );
+
+        let wrong_repository = RepositoryRunnerAccessObservation {
+            repository_full_name: Some("example-org/unrelated".to_owned()),
+            runner_id: Some(live_binding.admission.runner_id),
+            access: EvidenceState::Pass,
+        };
+        assert_eq!(
+            verify_repository_runner_access(&live_binding, &wrong_repository),
+            EvidenceState::Fail
+        );
+        assert_eq!(
+            verify_h1_routing(&live_binding, &present, admission, &wrong_repository),
+            RouteState::Absent
+        );
+        let wrong_runner = RepositoryRunnerAccessObservation {
+            repository_full_name: Some(live_binding.workflow.repository_full_name()),
+            runner_id: Some(live_binding.admission.runner_id + 1),
+            access: EvidenceState::Pass,
+        };
+        assert_eq!(
+            verify_repository_runner_access(&live_binding, &wrong_runner),
+            EvidenceState::Fail
+        );
+        assert_eq!(
+            verify_h1_routing(
+                &live_binding,
+                &present,
+                admission,
+                &RepositoryRunnerAccessObservation::unknown(),
             ),
             RouteState::Unknown
         );
     }
 
+    #[test]
+    fn readiness_derives_routing_and_does_not_accept_stale_positive_access() {
+        let binding = live_binding();
+        let workflow = TrustedWorkflowObservation {
+            presence: WorkflowPresence::Present,
+            repository_full_name: Some(binding.workflow.repository_full_name()),
+            workflow_path: Some(binding.workflow.workflow_path.clone()),
+            immutable_ref: Some(binding.workflow.immutable_ref.clone()),
+            blob_sha: Some(binding.workflow.expected_blob_sha.clone()),
+            source_assessment: Some(assess_h1_workflow_source(crate::h1_workflow_template())),
+            runtime_runner_binding: EvidenceState::Pass,
+        };
+        let repository_access =
+            RepositoryRunnerAccessObservation::exact(&binding, EvidenceState::Pass);
+        let github = GithubAdmissionReadiness {
+            authority_configured: EvidenceState::Pass,
+            exact_runner_identity: EvidenceState::Pass,
+            reserved_selector: EvidenceState::Pass,
+            selector_unique: EvidenceState::Pass,
+            selector: AdmissionSelectorState::Absent,
+            runner_online: Some(true),
+        };
+        let local = ExactLocalBindingObservation {
+            runner_home: EvidenceState::Pass,
+            listener_image: EvidenceState::Pass,
+            worker_image: EvidenceState::Pass,
+            execution_identity: EvidenceState::Pass,
+            work_root_ownership: EvidenceState::Pass,
+            active_bound_worker: Some(false),
+        };
+
+        let collected = collect_h1_live_readiness(H1LiveReadinessInputs {
+            binding: &binding,
+            provenance: EvidenceProvenance::Synthetic,
+            source_ready: EvidenceState::Pass,
+            host_prestate_ready: EvidenceState::Pass,
+            github,
+            local,
+            workflow: &workflow,
+            repository_access: &repository_access,
+            rollback_ready: EvidenceState::Pass,
+            recovery_ready: EvidenceState::Pass,
+            owner_gate_ready: EvidenceState::Pass,
+        });
+
+        assert_eq!(collected.evidence.routing_ready, EvidenceState::Fail);
+        assert!(!collected.receipt.h1_mutation_allowed);
+    }
+
     #[derive(Default)]
     struct FakeTransport {
         responses: VecDeque<Result<GithubHttpResponse, GithubTransportError>>,
+        methods: Vec<HttpMethod>,
         paths: Vec<String>,
     }
 
@@ -1077,6 +1367,7 @@ mod tests {
             request: &GithubHttpRequest,
             _credential: &CredentialLease,
         ) -> Result<GithubHttpResponse, GithubTransportError> {
+            self.methods.push(request.method);
             self.paths.push(request.path.clone());
             self.responses.pop_front().unwrap()
         }
@@ -1136,7 +1427,106 @@ mod tests {
     }
 
     #[test]
+    fn repository_access_client_proves_only_exact_repository_runner_visibility() {
+        let binding = live_binding();
+        let body = serde_json::json!({
+            "id": binding.admission.runner_id,
+            "name": binding.admission.runner_name,
+        });
+        let transport = FakeTransport {
+            responses: [Ok(GithubHttpResponse {
+                status: 200,
+                body: serde_json::to_vec(&body).unwrap(),
+                retry_after_seconds: None,
+                has_next_page: false,
+            })]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut client = GithubRepositoryAccessClient::new(
+            transport,
+            FakeProvider,
+            CredentialReference::new("windows-credential-manager", "synthetic-h1").unwrap(),
+        );
+
+        let observation = client.observe(&binding).unwrap();
+
+        assert_eq!(
+            verify_repository_runner_access(&binding, &observation),
+            EvidenceState::Pass
+        );
+        assert_eq!(client.transport().methods, [HttpMethod::Get]);
+        assert_eq!(
+            client.transport().paths,
+            ["/repos/example-org/trusted-qualification/actions/runners/42"]
+        );
+    }
+
+    #[test]
+    fn repository_access_client_fails_closed_for_absence_and_identity_drift() {
+        let binding = live_binding();
+        let absent_transport = FakeTransport {
+            responses: [Ok(GithubHttpResponse {
+                status: 404,
+                body: Vec::new(),
+                retry_after_seconds: None,
+                has_next_page: false,
+            })]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut absent_client = GithubRepositoryAccessClient::new(
+            absent_transport,
+            FakeProvider,
+            CredentialReference::new("windows-credential-manager", "synthetic-h1").unwrap(),
+        );
+        assert_eq!(
+            absent_client.observe(&binding).unwrap().access,
+            EvidenceState::Fail
+        );
+
+        let drift_body = serde_json::json!({
+            "id": binding.admission.runner_id,
+            "name": "unrelated-runner",
+        });
+        let drift_transport = FakeTransport {
+            responses: [Ok(GithubHttpResponse {
+                status: 200,
+                body: serde_json::to_vec(&drift_body).unwrap(),
+                retry_after_seconds: None,
+                has_next_page: false,
+            })]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut drift_client = GithubRepositoryAccessClient::new(
+            drift_transport,
+            FakeProvider,
+            CredentialReference::new("windows-credential-manager", "synthetic-h1").unwrap(),
+        );
+        assert_eq!(
+            drift_client.observe(&binding),
+            Err(AdmissionBackendError::RunnerIdentityDrift)
+        );
+    }
+
+    #[test]
     fn synthetic_readiness_can_prove_adapters_but_never_authorize_h1() {
+        let binding = live_binding();
+        let workflow = TrustedWorkflowObservation {
+            presence: WorkflowPresence::Present,
+            repository_full_name: Some(binding.workflow.repository_full_name()),
+            workflow_path: Some(binding.workflow.workflow_path.clone()),
+            immutable_ref: Some(binding.workflow.immutable_ref.clone()),
+            blob_sha: Some(binding.workflow.expected_blob_sha.clone()),
+            source_assessment: Some(assess_h1_workflow_source(crate::h1_workflow_template())),
+            runtime_runner_binding: EvidenceState::Pass,
+        };
+        let repository_access =
+            RepositoryRunnerAccessObservation::exact(&binding, EvidenceState::Pass);
         let pass_local = ExactLocalBindingObservation {
             runner_home: EvidenceState::Pass,
             listener_image: EvidenceState::Pass,
@@ -1154,13 +1544,14 @@ mod tests {
             runner_online: Some(true),
         };
         let collection = collect_h1_live_readiness(H1LiveReadinessInputs {
+            binding: &binding,
             provenance: EvidenceProvenance::Synthetic,
             source_ready: EvidenceState::Pass,
             host_prestate_ready: EvidenceState::Pass,
             github: pass_github,
             local: pass_local,
-            trusted_workflow: EvidenceState::Pass,
-            routing: RouteState::Present,
+            workflow: &workflow,
+            repository_access: &repository_access,
             rollback_ready: EvidenceState::Pass,
             recovery_ready: EvidenceState::Pass,
             owner_gate_ready: EvidenceState::Pass,
@@ -1183,7 +1574,11 @@ mod tests {
             combine_states([EvidenceState::Unknown, EvidenceState::Fail]),
             EvidenceState::Fail
         );
+        let binding = live_binding();
+        let workflow = TrustedWorkflowObservation::unknown();
+        let repository_access = RepositoryRunnerAccessObservation::unknown();
         let evidence = collect_h1_live_readiness(H1LiveReadinessInputs {
+            binding: &binding,
             provenance: EvidenceProvenance::Live,
             source_ready: EvidenceState::Pass,
             host_prestate_ready: EvidenceState::Unknown,
@@ -1203,8 +1598,8 @@ mod tests {
                 work_root_ownership: EvidenceState::Unknown,
                 active_bound_worker: None,
             },
-            trusted_workflow: EvidenceState::Unknown,
-            routing: RouteState::Unknown,
+            workflow: &workflow,
+            repository_access: &repository_access,
             rollback_ready: EvidenceState::Unknown,
             recovery_ready: EvidenceState::Fail,
             owner_gate_ready: EvidenceState::Unknown,
