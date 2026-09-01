@@ -6,6 +6,7 @@ mod agent;
 pub mod agent_runtime;
 mod cli;
 mod credential;
+#[cfg(any(windows, test))]
 mod github_transport;
 mod h1_live;
 mod host;
@@ -48,6 +49,7 @@ pub use credential::{
     CredentialProviderAdapter, CredentialStore, CredentialStoreError,
     WINDOWS_CREDENTIAL_MANAGER_PROVIDER,
 };
+#[cfg(windows)]
 pub(crate) use github_transport::{
     GithubApiTransport, GithubWireClient, GithubWireError, GithubWireRequest, GithubWireResponse,
     GITHUB_API_HOST, GITHUB_API_USER_AGENT,
@@ -61,6 +63,7 @@ pub use h1_live::{
     RestoreReadinessBinding, RouteState, TrustedWorkflowBinding, TrustedWorkflowObservation,
     WorkflowPresence,
 };
+#[cfg(windows)]
 pub(crate) use h1_live::{GithubRepositoryAccessClient, GithubWorkflowClient};
 pub use host::{
     AdoptionRefusal, ExistingListenerAdoption, HostEvidence, HostHealth, HostSnapshot, HostSource,

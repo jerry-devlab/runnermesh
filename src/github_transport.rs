@@ -8,6 +8,7 @@ use crate::{
 pub const GITHUB_API_HOST: &str = "api.github.com";
 pub const GITHUB_API_VERSION: &str = "2026-03-10";
 pub const GITHUB_API_PORT: u16 = 443;
+#[cfg(windows)]
 pub const GITHUB_API_USER_AGENT: &str = "RunnerMesh/0.1";
 pub const DEFAULT_GITHUB_TIMEOUT_MILLISECONDS: u32 = 30_000;
 pub const DEFAULT_GITHUB_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -266,7 +267,7 @@ mod tests {
             results: [Ok(response(200))].into_iter().collect(),
             ..FakeWire::default()
         };
-        let mut transport = GithubApiTransport::with_clock(wire, FixedClock(1_000));
+        let mut transport = GithubApiTransport::new(wire);
         let credential = CredentialLease::from_secret("synthetic-token-shape").unwrap();
         transport
             .send(
@@ -363,6 +364,26 @@ mod tests {
             timeout.send(&request, &credential).unwrap_err(),
             GithubTransportError::Timeout
         );
+
+        for (wire_error, expected) in [
+            (
+                GithubWireError::Unavailable,
+                GithubTransportError::Unavailable,
+            ),
+            (
+                GithubWireError::InvalidResponse,
+                GithubTransportError::InvalidResponse,
+            ),
+        ] {
+            let mut transport = GithubApiTransport::with_clock(
+                FakeWire {
+                    results: [Err(wire_error)].into_iter().collect(),
+                    ..FakeWire::default()
+                },
+                FixedClock(0),
+            );
+            assert_eq!(transport.send(&request, &credential).unwrap_err(), expected);
+        }
 
         let mut invalid = GithubApiTransport::with_clock(FakeWire::default(), FixedClock(0));
         let mut invalid_request = request.clone();

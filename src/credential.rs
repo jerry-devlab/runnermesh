@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use crate::admission::secure_zero_bytes;
 use crate::{AdmissionBackendError, CredentialLease, CredentialProvider, CredentialReference};
 

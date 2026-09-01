@@ -8,13 +8,16 @@ use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(windows, test))]
 use crate::{
-    assess_h1_workflow_source, verify_h1_readiness, AdmissionBackendError, AdmissionBinding,
-    AdmissionControlBackend, AdmissionSelectorState, CredentialProvider, CredentialReference,
-    EvidenceProvenance, EvidenceState, GithubHttpRequest, GithubHttpTransport, H1ReadinessEvidence,
-    H1ReadinessReceipt, H1RestoreBaseline, H1WorkflowTemplateAssessment, HttpMethod,
-    RegistrationScope, H1_READINESS_SCHEMA_VERSION, H1_TRANSACTION_FAMILY_ID,
-    RESERVED_ADMISSION_LABEL,
+    assess_h1_workflow_source, CredentialProvider, CredentialReference, GithubHttpRequest,
+    GithubHttpTransport, HttpMethod,
+};
+use crate::{
+    verify_h1_readiness, AdmissionBackendError, AdmissionBinding, AdmissionControlBackend,
+    AdmissionSelectorState, EvidenceProvenance, EvidenceState, H1ReadinessEvidence,
+    H1ReadinessReceipt, H1RestoreBaseline, H1WorkflowTemplateAssessment, RegistrationScope,
+    H1_READINESS_SCHEMA_VERSION, H1_TRANSACTION_FAMILY_ID, RESERVED_ADMISSION_LABEL,
 };
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -393,12 +396,14 @@ pub fn verify_trusted_workflow(
     }
 }
 
+#[cfg(any(windows, test))]
 pub struct GithubWorkflowClient<T, C> {
     transport: T,
     credentials: C,
     credential_ref: CredentialReference,
 }
 
+#[cfg(any(windows, test))]
 impl<T, C> GithubWorkflowClient<T, C> {
     pub fn new(transport: T, credentials: C, credential_ref: CredentialReference) -> Self {
         Self {
@@ -414,6 +419,7 @@ impl<T, C> GithubWorkflowClient<T, C> {
     }
 }
 
+#[cfg(any(windows, test))]
 impl<T: GithubHttpTransport, C: CredentialProvider> GithubWorkflowClient<T, C> {
     pub fn observe(
         &mut self,
@@ -480,6 +486,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubWorkflowClient<T, C> {
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 struct GithubWorkflowContent {
     #[serde(rename = "type")]
@@ -493,12 +500,14 @@ struct GithubWorkflowContent {
 /// GET-only GitHub adapter that proves the exact runner is visible from the
 /// exact trusted repository. It cannot mutate runner groups, repository access,
 /// labels, registration, workflows, or dispatches.
+#[cfg(any(windows, test))]
 pub struct GithubRepositoryAccessClient<T, C> {
     transport: T,
     credentials: C,
     credential_ref: CredentialReference,
 }
 
+#[cfg(any(windows, test))]
 impl<T, C> GithubRepositoryAccessClient<T, C> {
     pub fn new(transport: T, credentials: C, credential_ref: CredentialReference) -> Self {
         Self {
@@ -514,6 +523,7 @@ impl<T, C> GithubRepositoryAccessClient<T, C> {
     }
 }
 
+#[cfg(any(windows, test))]
 impl<T: GithubHttpTransport, C: CredentialProvider> GithubRepositoryAccessClient<T, C> {
     pub fn observe(
         &mut self,
@@ -575,6 +585,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRepositoryAccessClient
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Deserialize)]
 struct GithubRepositoryRunner {
     id: u64,
@@ -617,6 +628,7 @@ impl RepositoryRunnerAccessObservation {
         }
     }
 
+    #[cfg(any(windows, test))]
     fn from_bound_client(binding: &H1LiveBinding, access: EvidenceState) -> Self {
         Self {
             binding: Some(binding.clone()),
@@ -746,6 +758,7 @@ pub fn collect_h1_live_readiness(inputs: H1LiveReadinessInputs) -> H1LiveReadine
     }
 }
 
+#[cfg(any(windows, test))]
 fn workflow_contents_path(binding: &TrustedWorkflowBinding) -> String {
     let path = binding
         .workflow_path
@@ -762,6 +775,7 @@ fn workflow_contents_path(binding: &TrustedWorkflowBinding) -> String {
     )
 }
 
+#[cfg(any(windows, test))]
 fn repository_runner_path(binding: &H1LiveBinding) -> String {
     format!(
         "/repos/{}/{}/actions/runners/{}",
@@ -807,6 +821,7 @@ fn windows_file_attributes_are_reparse(attributes: u32) -> bool {
     attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
+#[cfg(any(windows, test))]
 fn percent_encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
@@ -821,6 +836,7 @@ fn percent_encode_component(value: &str) -> String {
     encoded
 }
 
+#[cfg(any(windows, test))]
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
     let compact = value
         .bytes()
@@ -863,6 +879,7 @@ fn decode_base64(value: &str) -> Option<Vec<u8>> {
     Some(decoded)
 }
 
+#[cfg(any(windows, test))]
 fn base64_value(byte: u8) -> Option<u8> {
     match byte {
         b'A'..=b'Z' => Some(byte - b'A'),
