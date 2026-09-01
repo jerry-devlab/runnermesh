@@ -93,15 +93,13 @@ impl<W, C> GithubApiTransport<W, C> {
         }
     }
 
-    pub fn wire(&self) -> &W {
+    #[cfg(test)]
+    fn wire(&self) -> &W {
         &self.wire
     }
 
-    pub fn wire_mut(&mut self) -> &mut W {
-        &mut self.wire
-    }
-
-    pub fn with_limits(mut self, timeout_milliseconds: u32, max_response_bytes: usize) -> Self {
+    #[cfg(test)]
+    fn with_limits(mut self, timeout_milliseconds: u32, max_response_bytes: usize) -> Self {
         self.timeout_milliseconds = timeout_milliseconds.max(1);
         self.max_response_bytes = max_response_bytes.max(1);
         self

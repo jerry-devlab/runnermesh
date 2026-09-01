@@ -42,27 +42,26 @@ pub use agent::{
     ConfigStore, ConfigStoreError, FileConfigStore, MemoryConfigStore, CONFIG_SCHEMA_VERSION,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
+#[cfg(windows)]
+pub(crate) use credential::WindowsCredentialManagerProvider;
 pub use credential::{
     CredentialProviderAdapter, CredentialStore, CredentialStoreError,
     WINDOWS_CREDENTIAL_MANAGER_PROVIDER,
 };
-#[cfg(windows)]
-pub use credential::{WindowsCredentialManagerProvider, WindowsCredentialManagerStore};
-pub use github_transport::{
-    GithubApiTransport, GithubClock, GithubWireClient, GithubWireError, GithubWireRequest,
-    GithubWireResponse, SystemGithubClock, DEFAULT_GITHUB_MAX_RESPONSE_BYTES,
-    DEFAULT_GITHUB_TIMEOUT_MILLISECONDS, GITHUB_API_HOST, GITHUB_API_PORT, GITHUB_API_USER_AGENT,
-    GITHUB_API_VERSION,
+pub(crate) use github_transport::{
+    GithubApiTransport, GithubWireClient, GithubWireError, GithubWireRequest, GithubWireResponse,
+    GITHUB_API_HOST, GITHUB_API_USER_AGENT,
 };
 pub use h1_live::{
     collect_h1_live_readiness, observe_github_admission_readiness, verify_h1_routing,
     verify_repository_runner_access, verify_trusted_workflow, ExactLocalBindingObservation,
     ExactLocalBindingSource, ExactLocalRunnerBinding, FilesystemExactLocalBindingSource,
-    GithubAdmissionReadiness, GithubRepositoryAccessClient, GithubWorkflowClient, H1LiveBinding,
-    H1LiveReadinessCollection, H1LiveReadinessInputs, LocalIdentityOwnershipVerifier,
-    OpaqueIdentityReference, RepositoryRunnerAccessObservation, RestoreReadinessBinding,
-    RouteState, TrustedWorkflowBinding, TrustedWorkflowObservation, WorkflowPresence,
+    GithubAdmissionReadiness, H1LiveBinding, H1LiveReadinessCollection, H1LiveReadinessInputs,
+    LocalIdentityOwnershipVerifier, OpaqueIdentityReference, RepositoryRunnerAccessObservation,
+    RestoreReadinessBinding, RouteState, TrustedWorkflowBinding, TrustedWorkflowObservation,
+    WorkflowPresence,
 };
+pub(crate) use h1_live::{GithubRepositoryAccessClient, GithubWorkflowClient};
 pub use host::{
     AdoptionRefusal, ExistingListenerAdoption, HostEvidence, HostHealth, HostSnapshot, HostSource,
     RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
@@ -111,7 +110,7 @@ pub use tray::{
 pub use windows_github::{
     windows_github_admission_backend, windows_github_repository_access_client,
     windows_github_workflow_client, WindowsGithubAdmissionBackend,
-    WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient, WindowsWinHttpClient,
+    WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{

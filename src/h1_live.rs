@@ -408,7 +408,8 @@ impl<T, C> GithubWorkflowClient<T, C> {
         }
     }
 
-    pub fn transport(&self) -> &T {
+    #[cfg(test)]
+    fn transport(&self) -> &T {
         &self.transport
     }
 }
@@ -507,7 +508,8 @@ impl<T, C> GithubRepositoryAccessClient<T, C> {
         }
     }
 
-    pub fn transport(&self) -> &T {
+    #[cfg(test)]
+    fn transport(&self) -> &T {
         &self.transport
     }
 }

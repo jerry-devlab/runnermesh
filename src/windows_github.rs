@@ -14,58 +14,125 @@ use windows_sys::Win32::{
 
 use crate::admission::secure_zero_bytes;
 use crate::{
-    AdmissionBackendError, AdmissionBinding, CredentialLease, CredentialReference,
-    GithubApiTransport, GithubRepositoryAccessClient, GithubRestAdmissionBackend, GithubWireClient,
-    GithubWireError, GithubWireRequest, GithubWireResponse, GithubWorkflowClient, HttpMethod,
-    WindowsCredentialManagerProvider, GITHUB_API_HOST, GITHUB_API_USER_AGENT,
+    AdmissionBackendError, AdmissionBinding, AdmissionControlBackend, CredentialLease,
+    CredentialReference, GithubApiTransport, GithubRepositoryAccessClient,
+    GithubRestAdmissionBackend, GithubWireClient, GithubWireError, GithubWireRequest,
+    GithubWireResponse, GithubWorkflowClient, H1LiveBinding, HttpMethod,
+    RemoteAdmissionObservation, RepositoryRunnerAccessObservation, TrustedWorkflowBinding,
+    TrustedWorkflowObservation, WindowsCredentialManagerProvider, GITHUB_API_HOST,
+    GITHUB_API_USER_AGENT,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct WindowsWinHttpClient;
+struct WindowsWinHttpClient;
 
-pub type WindowsGithubAdmissionBackend = GithubRestAdmissionBackend<
+type WindowsGithubAdmissionInner = GithubRestAdmissionBackend<
     GithubApiTransport<WindowsWinHttpClient>,
     WindowsCredentialManagerProvider,
 >;
 
-pub type WindowsGithubWorkflowClient = GithubWorkflowClient<
+type WindowsGithubWorkflowInner = GithubWorkflowClient<
     GithubApiTransport<WindowsWinHttpClient>,
     WindowsCredentialManagerProvider,
 >;
 
-pub type WindowsGithubRepositoryAccessClient = GithubRepositoryAccessClient<
+type WindowsGithubRepositoryAccessInner = GithubRepositoryAccessClient<
     GithubApiTransport<WindowsWinHttpClient>,
     WindowsCredentialManagerProvider,
 >;
+
+/// Typed production admission client. The live WinHTTP transport and resolved
+/// credential never escape this wrapper, so callers cannot synthesize an
+/// unrelated GitHub request through the production wire implementation.
+pub struct WindowsGithubAdmissionBackend {
+    inner: WindowsGithubAdmissionInner,
+}
+
+impl WindowsGithubAdmissionBackend {
+    pub fn binding(&self) -> &AdmissionBinding {
+        self.inner.binding()
+    }
+}
+
+impl AdmissionControlBackend for WindowsGithubAdmissionBackend {
+    fn observe_admission_selector(
+        &mut self,
+    ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        self.inner.observe_admission_selector()
+    }
+
+    fn advertise_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        self.inner.advertise_capacity()
+    }
+
+    fn withdraw_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        self.inner.withdraw_capacity()
+    }
+}
+
+/// Typed production workflow observer. It exposes GET-only workflow
+/// verification without exposing the live wire or credential provider.
+pub struct WindowsGithubWorkflowClient {
+    inner: WindowsGithubWorkflowInner,
+}
+
+impl WindowsGithubWorkflowClient {
+    pub fn observe(
+        &mut self,
+        binding: &TrustedWorkflowBinding,
+    ) -> Result<TrustedWorkflowObservation, AdmissionBackendError> {
+        self.inner.observe(binding)
+    }
+}
+
+/// Typed production repository-to-runner access observer. It exposes only the
+/// exact bound GET operation required by H1 routing readiness.
+pub struct WindowsGithubRepositoryAccessClient {
+    inner: WindowsGithubRepositoryAccessInner,
+}
+
+impl WindowsGithubRepositoryAccessClient {
+    pub fn observe(
+        &mut self,
+        binding: &H1LiveBinding,
+    ) -> Result<RepositoryRunnerAccessObservation, AdmissionBackendError> {
+        self.inner.observe(binding)
+    }
+}
 
 pub fn windows_github_admission_backend(
     binding: AdmissionBinding,
 ) -> Result<WindowsGithubAdmissionBackend, AdmissionBackendError> {
-    GithubRestAdmissionBackend::new(
+    let inner = GithubRestAdmissionBackend::new(
         binding,
         GithubApiTransport::new(WindowsWinHttpClient),
         WindowsCredentialManagerProvider::new(),
-    )
+    )?;
+    Ok(WindowsGithubAdmissionBackend { inner })
 }
 
 pub fn windows_github_workflow_client(
     credential_ref: CredentialReference,
 ) -> WindowsGithubWorkflowClient {
-    GithubWorkflowClient::new(
-        GithubApiTransport::new(WindowsWinHttpClient),
-        WindowsCredentialManagerProvider::new(),
-        credential_ref,
-    )
+    WindowsGithubWorkflowClient {
+        inner: GithubWorkflowClient::new(
+            GithubApiTransport::new(WindowsWinHttpClient),
+            WindowsCredentialManagerProvider::new(),
+            credential_ref,
+        ),
+    }
 }
 
 pub fn windows_github_repository_access_client(
     credential_ref: CredentialReference,
 ) -> WindowsGithubRepositoryAccessClient {
-    GithubRepositoryAccessClient::new(
-        GithubApiTransport::new(WindowsWinHttpClient),
-        WindowsCredentialManagerProvider::new(),
-        credential_ref,
-    )
+    WindowsGithubRepositoryAccessClient {
+        inner: GithubRepositoryAccessClient::new(
+            GithubApiTransport::new(WindowsWinHttpClient),
+            WindowsCredentialManagerProvider::new(),
+            credential_ref,
+        ),
+    }
 }
 
 impl GithubWireClient for WindowsWinHttpClient {

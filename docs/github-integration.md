@@ -97,4 +97,8 @@ The live source is deliberately inert without an Owner-supplied opaque
 credential reference and exact binding. Tests inject fake wire and credential
 providers, make no network calls, and use only synthetic identities. This Goal
 does not configure the adapter, contact the GitHub API with Owner authority,
-mutate a label, register a runner, or introduce a broker.
+mutate a label, register a runner, or introduce a broker. The production
+WinHTTP wire and OS-backed credential provider remain private implementation
+details; public production constructors return only the typed admission,
+workflow-observation, and repository-access clients, with no raw transport
+escape hatch.
