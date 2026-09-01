@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::RESERVED_ADMISSION_LABEL;
 
-pub const H1_READINESS_SCHEMA_VERSION: u32 = 2;
+pub const H1_READINESS_SCHEMA_VERSION: u32 = 3;
 pub const H1_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 pub const H1_TRANSACTION_FAMILY_ID: &str = "h1-github-native-admission-label-v1";
 
@@ -44,6 +44,7 @@ pub enum EvidenceProvenance {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReadinessCheck {
     SchemaVersion,
+    CollectorAttestation,
     SourceReady,
     HostPrestateReady,
     GithubAuthorityConfigured,
@@ -146,10 +147,16 @@ pub struct H1ReadinessReceipt {
     pub h1_mutation_allowed: bool,
 }
 
-/// Pure readiness entrypoint. Synthetic evidence can prove the verifier but
-/// can never authorize H1. Live evidence permits the future Owner transaction
-/// only when every required field is positively proved under this schema.
+/// Pure readiness entrypoint. Caller-provided evidence can prove the verifier,
+/// but it can never authorize H1 merely by setting `provenance=LIVE`.
 pub fn verify_h1_readiness(evidence: H1ReadinessEvidence) -> H1ReadinessReceipt {
+    verify_h1_readiness_internal(evidence, false)
+}
+
+fn verify_h1_readiness_internal(
+    evidence: H1ReadinessEvidence,
+    collector_attested_live: bool,
+) -> H1ReadinessReceipt {
     let mut blockers = Vec::new();
 
     if evidence.schema_version != H1_READINESS_SCHEMA_VERSION {
@@ -166,8 +173,20 @@ pub fn verify_h1_readiness(evidence: H1ReadinessEvidence) -> H1ReadinessReceipt 
             .map(|(check, state)| ReadinessBlocker { check, state }),
     );
 
+    if blockers.is_empty()
+        && evidence.provenance == EvidenceProvenance::Live
+        && !collector_attested_live
+    {
+        blockers.push(ReadinessBlocker {
+            check: ReadinessCheck::CollectorAttestation,
+            state: EvidenceState::Unknown,
+        });
+    }
+
     let all_checks_pass = blockers.is_empty();
-    let h1_mutation_allowed = all_checks_pass && evidence.provenance == EvidenceProvenance::Live;
+    let h1_mutation_allowed = all_checks_pass
+        && collector_attested_live
+        && evidence.provenance == EvidenceProvenance::Live;
     let disposition = if !all_checks_pass {
         ReadinessDisposition::Blocked
     } else if evidence.provenance == EvidenceProvenance::Synthetic {
@@ -183,6 +202,38 @@ pub fn verify_h1_readiness(evidence: H1ReadinessEvidence) -> H1ReadinessReceipt 
         blockers,
         h1_mutation_allowed,
     }
+}
+
+/// Non-serializable capability issued only inside the crate after a concrete
+/// live collector has produced every bound observation. A JSON receipt, a
+/// synthetic seam, or caller-selected `LIVE` provenance cannot construct it.
+pub struct H1LiveReadinessAttestation {
+    receipt: H1ReadinessReceipt,
+}
+
+impl H1LiveReadinessAttestation {
+    pub fn receipt(&self) -> &H1ReadinessReceipt {
+        &self.receipt
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the concrete Owner-side live collector is intentionally not activated in this source-only Goal"
+)]
+pub(crate) fn attest_collected_live_readiness(
+    evidence: H1ReadinessEvidence,
+) -> Result<H1LiveReadinessAttestation, H1TransactionError> {
+    if evidence.provenance != EvidenceProvenance::Live {
+        return Err(H1TransactionError::ReadinessNotLiveAndComplete);
+    }
+    let receipt = verify_h1_readiness_internal(evidence, true);
+    if receipt.disposition != ReadinessDisposition::ReadyForOwnerGate
+        || !receipt.h1_mutation_allowed
+    {
+        return Err(H1TransactionError::ReadinessNotLiveAndComplete);
+    }
+    Ok(H1LiveReadinessAttestation { receipt })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -436,9 +487,10 @@ pub struct H1TransactionModel {
 
 impl H1TransactionModel {
     pub fn prepare(
-        readiness: &H1ReadinessReceipt,
+        readiness: &H1LiveReadinessAttestation,
         baseline: H1RestoreBaseline,
     ) -> Result<Self, H1TransactionError> {
+        let readiness = readiness.receipt();
         if readiness.disposition != ReadinessDisposition::ReadyForOwnerGate
             || !readiness.h1_mutation_allowed
         {
@@ -631,8 +683,8 @@ mod tests {
         }
     }
 
-    fn live_ready() -> H1ReadinessReceipt {
-        verify_h1_readiness(all_pass(EvidenceProvenance::Live))
+    fn live_ready() -> H1LiveReadinessAttestation {
+        attest_collected_live_readiness(all_pass(EvidenceProvenance::Live)).unwrap()
     }
 
     fn baseline() -> H1RestoreBaseline {
@@ -687,10 +739,27 @@ mod tests {
         assert_eq!(receipt.disposition, ReadinessDisposition::PassSynthetic);
         assert!(receipt.blockers.is_empty());
         assert!(!receipt.h1_mutation_allowed);
+        assert!(matches!(
+            attest_collected_live_readiness(all_pass(EvidenceProvenance::Synthetic)),
+            Err(H1TransactionError::ReadinessNotLiveAndComplete)
+        ));
+    }
+
+    #[test]
+    fn caller_asserted_live_provenance_cannot_prepare_h1() {
+        let receipt = verify_h1_readiness(all_pass(EvidenceProvenance::Live));
+        assert_eq!(receipt.disposition, ReadinessDisposition::Blocked);
+        assert_eq!(receipt.blockers.len(), 1);
         assert_eq!(
-            H1TransactionModel::prepare(&receipt, baseline()).unwrap_err(),
-            H1TransactionError::ReadinessNotLiveAndComplete
+            receipt.blockers[0].check,
+            ReadinessCheck::CollectorAttestation
         );
+        assert!(!receipt.h1_mutation_allowed);
+
+        let json = serde_json::to_vec(&receipt).unwrap();
+        let round_trip: H1ReadinessReceipt = serde_json::from_slice(&json).unwrap();
+        assert_eq!(round_trip, receipt);
+        assert!(!round_trip.h1_mutation_allowed);
     }
 
     #[test]

@@ -176,6 +176,7 @@ impl H1LiveBinding {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExactLocalBindingObservation {
     pub runner_home: EvidenceState,
+    pub work_root: EvidenceState,
     pub listener_image: EvidenceState,
     pub worker_image: EvidenceState,
     pub execution_identity: EvidenceState,
@@ -187,6 +188,7 @@ impl ExactLocalBindingObservation {
     pub fn exact_identity_ready(self) -> EvidenceState {
         combine_states([
             self.runner_home,
+            self.work_root,
             self.listener_image,
             self.worker_image,
             self.execution_identity,
@@ -228,6 +230,7 @@ impl<V: LocalIdentityOwnershipVerifier> ExactLocalBindingSource
         if !binding.is_valid() {
             return ExactLocalBindingObservation {
                 runner_home: EvidenceState::Fail,
+                work_root: EvidenceState::Fail,
                 listener_image: EvidenceState::Fail,
                 worker_image: EvidenceState::Fail,
                 execution_identity: EvidenceState::Fail,
@@ -237,6 +240,7 @@ impl<V: LocalIdentityOwnershipVerifier> ExactLocalBindingSource
         }
         ExactLocalBindingObservation {
             runner_home: path_kind_state(&binding.runner_home, true),
+            work_root: path_kind_state(&binding.work_root, true),
             listener_image: path_kind_state(&binding.listener_image, false),
             worker_image: path_kind_state(&binding.worker_image, false),
             execution_identity: self.verifier.execution_identity(binding),
@@ -545,7 +549,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRepositoryAccessClient
                 });
             }
             404 => {
-                return Ok(RepositoryRunnerAccessObservation::exact(
+                return Ok(RepositoryRunnerAccessObservation::from_bound_client(
                     binding,
                     EvidenceState::Fail,
                 ));
@@ -562,7 +566,7 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRepositoryAccessClient
         {
             return Err(AdmissionBackendError::RunnerIdentityDrift);
         }
-        Ok(RepositoryRunnerAccessObservation::exact(
+        Ok(RepositoryRunnerAccessObservation::from_bound_client(
             binding,
             EvidenceState::Pass,
         ))
@@ -587,28 +591,39 @@ pub enum RouteState {
 /// trusted workflow repository. Organization-scoped runners require this
 /// separate repository-access proof because runner visibility alone does not
 /// establish runner-group or selected-repository access.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RepositoryRunnerAccessObservation {
-    pub repository_full_name: Option<String>,
-    pub runner_id: Option<u64>,
-    pub access: EvidenceState,
+    binding: Option<H1LiveBinding>,
+    access: EvidenceState,
+}
+
+impl std::fmt::Debug for RepositoryRunnerAccessObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryRunnerAccessObservation")
+            .field("binding", &self.binding.as_ref().map(|_| "[BOUND]"))
+            .field("access", &self.access)
+            .finish()
+    }
 }
 
 impl RepositoryRunnerAccessObservation {
     pub fn unknown() -> Self {
         Self {
-            repository_full_name: None,
-            runner_id: None,
+            binding: None,
             access: EvidenceState::Unknown,
         }
     }
 
-    pub fn exact(binding: &H1LiveBinding, access: EvidenceState) -> Self {
+    fn from_bound_client(binding: &H1LiveBinding, access: EvidenceState) -> Self {
         Self {
-            repository_full_name: Some(binding.workflow.repository_full_name()),
-            runner_id: Some(binding.admission.runner_id),
+            binding: Some(binding.clone()),
             access,
         }
+    }
+
+    pub fn state(&self) -> EvidenceState {
+        self.access
     }
 }
 
@@ -619,17 +634,9 @@ pub fn verify_repository_runner_access(
     if !binding.is_valid() {
         return EvidenceState::Fail;
     }
-    if observation.repository_full_name.as_deref()
-        != Some(binding.workflow.repository_full_name().as_str())
-        || observation.runner_id != Some(binding.admission.runner_id)
-    {
+    if observation.binding.as_ref() != Some(binding) {
         return match observation.access {
-            EvidenceState::Unknown
-                if observation.repository_full_name.is_none()
-                    && observation.runner_id.is_none() =>
-            {
-                EvidenceState::Unknown
-            }
+            EvidenceState::Unknown if observation.binding.is_none() => EvidenceState::Unknown,
             _ => EvidenceState::Fail,
         };
     }
@@ -682,7 +689,6 @@ pub fn verify_h1_routing(
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct H1LiveReadinessInputs<'a> {
     pub binding: &'a H1LiveBinding,
-    pub provenance: EvidenceProvenance,
     pub source_ready: EvidenceState,
     pub host_prestate_ready: EvidenceState,
     pub github: GithubAdmissionReadiness,
@@ -711,7 +717,10 @@ pub fn collect_h1_live_readiness(inputs: H1LiveReadinessInputs) -> H1LiveReadine
     );
     let evidence = H1ReadinessEvidence {
         schema_version: H1_READINESS_SCHEMA_VERSION,
-        provenance: inputs.provenance,
+        // This public composition seam accepts injected observations and is
+        // therefore always synthetic. A future concrete live collector must
+        // issue the crate-private attestation before H1 can be prepared.
+        provenance: EvidenceProvenance::Synthetic,
         source_ready: inputs.source_ready,
         host_prestate_ready: inputs.host_prestate_ready,
         github_authority_configured: inputs.github.authority_configured,
@@ -731,7 +740,7 @@ pub fn collect_h1_live_readiness(inputs: H1LiveReadinessInputs) -> H1LiveReadine
     H1LiveReadinessCollection {
         evidence,
         receipt,
-        live_readiness_executed: inputs.provenance == EvidenceProvenance::Live,
+        live_readiness_executed: false,
     }
 }
 
@@ -1090,6 +1099,7 @@ mod tests {
             FilesystemExactLocalBindingSource::new(PassingLocalVerifier).observe(&binding);
 
         assert_eq!(observed.runner_home, EvidenceState::Fail);
+        assert_eq!(observed.work_root, EvidenceState::Fail);
         assert_eq!(observed.listener_image, EvidenceState::Fail);
         assert_eq!(observed.worker_image, EvidenceState::Fail);
         assert_eq!(observed.execution_identity, EvidenceState::Fail);
@@ -1108,10 +1118,23 @@ mod tests {
         let observed =
             FilesystemExactLocalBindingSource::new(PassingLocalVerifier).observe(&binding);
         assert_eq!(observed.exact_identity_ready(), EvidenceState::Pass);
+        assert_eq!(observed.work_root, EvidenceState::Pass);
         assert_eq!(observed.active_bound_worker, Some(false));
 
         std::fs::remove_dir_all(&binding.runner_home).unwrap();
         std::fs::remove_dir_all(&binding.work_root).unwrap();
+    }
+
+    #[test]
+    fn filesystem_binding_source_requires_the_exact_work_root_path() {
+        let mut binding = local_binding();
+        binding.work_root = binding.work_root.join("missing-bound-work-root");
+
+        let observed =
+            FilesystemExactLocalBindingSource::new(PassingLocalVerifier).observe(&binding);
+
+        assert_eq!(observed.work_root, EvidenceState::Fail);
+        assert_eq!(observed.exact_identity_ready(), EvidenceState::Fail);
     }
 
     #[cfg(unix)]
@@ -1242,7 +1265,10 @@ mod tests {
             selector: AdmissionSelectorState::Present,
             runner_online: Some(true),
         };
-        let access = RepositoryRunnerAccessObservation::exact(&live_binding, EvidenceState::Pass);
+        let access = RepositoryRunnerAccessObservation::from_bound_client(
+            &live_binding,
+            EvidenceState::Pass,
+        );
         assert_eq!(
             verify_h1_routing(&live_binding, &present, admission, &access),
             RouteState::Present
@@ -1272,11 +1298,13 @@ mod tests {
             RouteState::Unknown
         );
 
-        let wrong_repository = RepositoryRunnerAccessObservation {
-            repository_full_name: Some("example-org/unrelated".to_owned()),
-            runner_id: Some(live_binding.admission.runner_id),
-            access: EvidenceState::Pass,
-        };
+        let mut wrong_repository_binding = live_binding.clone();
+        wrong_repository_binding.workflow.repository = "unrelated".to_owned();
+        assert!(wrong_repository_binding.is_valid());
+        let wrong_repository = RepositoryRunnerAccessObservation::from_bound_client(
+            &wrong_repository_binding,
+            EvidenceState::Pass,
+        );
         assert_eq!(
             verify_repository_runner_access(&live_binding, &wrong_repository),
             EvidenceState::Fail
@@ -1285,13 +1313,36 @@ mod tests {
             verify_h1_routing(&live_binding, &present, admission, &wrong_repository),
             RouteState::Absent
         );
-        let wrong_runner = RepositoryRunnerAccessObservation {
-            repository_full_name: Some(live_binding.workflow.repository_full_name()),
-            runner_id: Some(live_binding.admission.runner_id + 1),
-            access: EvidenceState::Pass,
-        };
+        let mut wrong_runner_binding = live_binding.clone();
+        wrong_runner_binding.admission.runner_id += 1;
+        wrong_runner_binding.admission.ownership = Some(ReservedLabelOwnership::for_runner(
+            wrong_runner_binding.admission.scope.clone(),
+            wrong_runner_binding.admission.runner_id,
+        ));
+        assert!(wrong_runner_binding.is_valid());
+        let wrong_runner = RepositoryRunnerAccessObservation::from_bound_client(
+            &wrong_runner_binding,
+            EvidenceState::Pass,
+        );
         assert_eq!(
             verify_repository_runner_access(&live_binding, &wrong_runner),
+            EvidenceState::Fail
+        );
+        let replayed_access = access.clone();
+        let mut renamed_binding = live_binding.clone();
+        renamed_binding.admission.runner_name = "renamed-runner".to_owned();
+        renamed_binding.workflow.expected_runner_name = "renamed-runner".to_owned();
+        assert!(renamed_binding.is_valid());
+        assert_eq!(
+            verify_repository_runner_access(&renamed_binding, &replayed_access),
+            EvidenceState::Fail
+        );
+        let mut rekeyed_binding = live_binding.clone();
+        rekeyed_binding.admission.credential_ref =
+            CredentialReference::new("windows-credential-manager", "rotated-reference").unwrap();
+        assert!(rekeyed_binding.is_valid());
+        assert_eq!(
+            verify_repository_runner_access(&rekeyed_binding, &replayed_access),
             EvidenceState::Fail
         );
         assert_eq!(
@@ -1318,7 +1369,7 @@ mod tests {
             runtime_runner_binding: EvidenceState::Pass,
         };
         let repository_access =
-            RepositoryRunnerAccessObservation::exact(&binding, EvidenceState::Pass);
+            RepositoryRunnerAccessObservation::from_bound_client(&binding, EvidenceState::Pass);
         let github = GithubAdmissionReadiness {
             authority_configured: EvidenceState::Pass,
             exact_runner_identity: EvidenceState::Pass,
@@ -1329,6 +1380,7 @@ mod tests {
         };
         let local = ExactLocalBindingObservation {
             runner_home: EvidenceState::Pass,
+            work_root: EvidenceState::Pass,
             listener_image: EvidenceState::Pass,
             worker_image: EvidenceState::Pass,
             execution_identity: EvidenceState::Pass,
@@ -1338,7 +1390,6 @@ mod tests {
 
         let collected = collect_h1_live_readiness(H1LiveReadinessInputs {
             binding: &binding,
-            provenance: EvidenceProvenance::Synthetic,
             source_ready: EvidenceState::Pass,
             host_prestate_ready: EvidenceState::Pass,
             github,
@@ -1483,7 +1534,7 @@ mod tests {
             CredentialReference::new("windows-credential-manager", "synthetic-h1").unwrap(),
         );
         assert_eq!(
-            absent_client.observe(&binding).unwrap().access,
+            absent_client.observe(&binding).unwrap().state(),
             EvidenceState::Fail
         );
 
@@ -1526,9 +1577,10 @@ mod tests {
             runtime_runner_binding: EvidenceState::Pass,
         };
         let repository_access =
-            RepositoryRunnerAccessObservation::exact(&binding, EvidenceState::Pass);
+            RepositoryRunnerAccessObservation::from_bound_client(&binding, EvidenceState::Pass);
         let pass_local = ExactLocalBindingObservation {
             runner_home: EvidenceState::Pass,
+            work_root: EvidenceState::Pass,
             listener_image: EvidenceState::Pass,
             worker_image: EvidenceState::Pass,
             execution_identity: EvidenceState::Pass,
@@ -1545,7 +1597,6 @@ mod tests {
         };
         let collection = collect_h1_live_readiness(H1LiveReadinessInputs {
             binding: &binding,
-            provenance: EvidenceProvenance::Synthetic,
             source_ready: EvidenceState::Pass,
             host_prestate_ready: EvidenceState::Pass,
             github: pass_github,
@@ -1565,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn fail_dominates_unknown_and_provenance_is_preserved() {
+    fn fail_dominates_unknown_and_injected_collection_stays_synthetic() {
         assert_eq!(
             combine_states([EvidenceState::Pass, EvidenceState::Unknown]),
             EvidenceState::Unknown
@@ -1579,7 +1630,6 @@ mod tests {
         let repository_access = RepositoryRunnerAccessObservation::unknown();
         let evidence = collect_h1_live_readiness(H1LiveReadinessInputs {
             binding: &binding,
-            provenance: EvidenceProvenance::Live,
             source_ready: EvidenceState::Pass,
             host_prestate_ready: EvidenceState::Unknown,
             github: GithubAdmissionReadiness {
@@ -1592,6 +1642,7 @@ mod tests {
             },
             local: ExactLocalBindingObservation {
                 runner_home: EvidenceState::Pass,
+                work_root: EvidenceState::Pass,
                 listener_image: EvidenceState::Pass,
                 worker_image: EvidenceState::Pass,
                 execution_identity: EvidenceState::Unknown,
@@ -1604,9 +1655,9 @@ mod tests {
             recovery_ready: EvidenceState::Fail,
             owner_gate_ready: EvidenceState::Unknown,
         });
-        assert_eq!(evidence.evidence.provenance, EvidenceProvenance::Live);
+        assert_eq!(evidence.evidence.provenance, EvidenceProvenance::Synthetic);
         assert_eq!(evidence.receipt.disposition, ReadinessDisposition::Blocked);
-        assert!(evidence.live_readiness_executed);
+        assert!(!evidence.live_readiness_executed);
         assert!(!evidence.receipt.h1_mutation_allowed);
     }
 

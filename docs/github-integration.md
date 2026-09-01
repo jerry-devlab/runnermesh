@@ -49,7 +49,9 @@ Every mutation is followed by observation/readback. RunnerMesh refuses
 ambiguous runner identity, a same-name selector on another runner, and reserved
 label ownership drift. It never replaces or deletes all labels, touches an
 unrelated custom label or runner, changes runner groups, or changes runner
-registration through this boundary.
+registration through this boundary. Multi-page runner inventories must report
+stable totals, contain unique runner IDs, and match a second complete snapshot;
+otherwise observation remains unknown and no mutation proceeds.
 
 The least documented fine-grained authority is organization `Self-hosted
 runners: write` or repository `Administration: write`, restricted to the

@@ -82,10 +82,10 @@ pub use probe::{
 pub use qualification::{
     assess_h1_workflow_source, assess_h1_workflow_template, h1_workflow_template,
     verify_h1_readiness, BaselineAdmissionState, EvidenceProvenance, EvidenceState,
-    H1ReadinessEvidence, H1ReadinessReceipt, H1RestoreBaseline, H1TransactionError,
-    H1TransactionEvent, H1TransactionModel, H1TransactionPhase, H1TransactionReceipt,
-    H1WorkflowTemplateAssessment, QualificationDisposition, ReadinessBlocker, ReadinessCheck,
-    ReadinessDisposition, RestoreDisposition, H1_READINESS_SCHEMA_VERSION,
+    H1LiveReadinessAttestation, H1ReadinessEvidence, H1ReadinessReceipt, H1RestoreBaseline,
+    H1TransactionError, H1TransactionEvent, H1TransactionModel, H1TransactionPhase,
+    H1TransactionReceipt, H1WorkflowTemplateAssessment, QualificationDisposition, ReadinessBlocker,
+    ReadinessCheck, ReadinessDisposition, RestoreDisposition, H1_READINESS_SCHEMA_VERSION,
     H1_TRANSACTION_FAMILY_ID, H1_TRANSACTION_SCHEMA_VERSION,
 };
 pub use runner_observer::{

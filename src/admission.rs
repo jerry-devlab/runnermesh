@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fmt,
     sync::atomic::{compiler_fence, Ordering},
 };
@@ -830,9 +831,28 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
     fn observe_exact_runner(
         &mut self,
     ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        let (runners, multi_page) = self.collect_runner_scope_snapshot()?;
+        let runners = if multi_page {
+            let (confirmed, confirmed_multi_page) = self.collect_runner_scope_snapshot()?;
+            if !confirmed_multi_page || confirmed != runners {
+                return Err(AdmissionBackendError::SelectorObservationUnknown);
+            }
+            confirmed
+        } else {
+            runners
+        };
+
+        self.classify_exact_runner(runners)
+    }
+
+    fn collect_runner_scope_snapshot(
+        &mut self,
+    ) -> Result<(Vec<GithubRunner>, bool), AdmissionBackendError> {
         let mut page = 1_u16;
         let mut runners = Vec::new();
         let mut expected_total = None;
+        let mut runner_ids = HashSet::new();
+        let mut multi_page = false;
         loop {
             if page > 100 {
                 return Err(AdmissionBackendError::SelectorObservationUnknown);
@@ -847,11 +867,23 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
             })?;
             let parsed: GithubRunnerList = serde_json::from_slice(&response.body)
                 .map_err(|_| AdmissionBackendError::MalformedResponse)?;
-            expected_total.get_or_insert(parsed.total_count);
-            runners.extend(parsed.runners);
+            match expected_total {
+                Some(total) if total != parsed.total_count => {
+                    return Err(AdmissionBackendError::SelectorObservationUnknown);
+                }
+                None => expected_total = Some(parsed.total_count),
+                Some(_) => {}
+            }
+            for runner in parsed.runners {
+                if !runner_ids.insert(runner.id) {
+                    return Err(AdmissionBackendError::SelectorObservationUnknown);
+                }
+                runners.push(runner);
+            }
             if !response.has_next_page {
                 break;
             }
+            multi_page = true;
             page += 1;
         }
 
@@ -859,6 +891,14 @@ impl<T: GithubHttpTransport, C: CredentialProvider> GithubRestAdmissionBackend<T
             return Err(AdmissionBackendError::SelectorObservationUnknown);
         }
 
+        normalize_runner_snapshot(&mut runners);
+        Ok((runners, multi_page))
+    }
+
+    fn classify_exact_runner(
+        &self,
+        runners: Vec<GithubRunner>,
+    ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
         let selector_collision = runners.iter().any(|runner| {
             runner.id != self.binding.runner_id
                 && runner
@@ -1006,7 +1046,7 @@ struct GithubRunnerList {
     runners: Vec<GithubRunner>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 struct GithubRunner {
     id: u64,
     name: String,
@@ -1015,11 +1055,23 @@ struct GithubRunner {
     labels: Vec<GithubLabel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 struct GithubLabel {
     name: String,
     #[serde(rename = "type")]
     kind: String,
+}
+
+fn normalize_runner_snapshot(runners: &mut [GithubRunner]) {
+    for runner in runners.iter_mut() {
+        runner.labels.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+    }
+    runners.sort_by_key(|runner| runner.id);
 }
 
 fn valid_path_component(value: &str) -> bool {
@@ -1359,11 +1411,31 @@ mod tests {
     }
 
     fn response(body: serde_json::Value) -> Result<GithubHttpResponse, GithubTransportError> {
+        paged_response(body, false)
+    }
+
+    fn paged_response(
+        body: serde_json::Value,
+        has_next_page: bool,
+    ) -> Result<GithubHttpResponse, GithubTransportError> {
         Ok(GithubHttpResponse {
             status: 200,
             body: serde_json::to_vec(&body).unwrap(),
             retry_after_seconds: None,
-            has_next_page: false,
+            has_next_page,
+        })
+    }
+
+    fn runner_entry(id: u64, name: &str, labels: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "status": "online",
+            "busy": false,
+            "labels": labels.iter().map(|label| serde_json::json!({
+                "name": label,
+                "type": "custom",
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -1522,6 +1594,118 @@ mod tests {
             assert_eq!(backend.observe_admission_selector().unwrap_err(), expected);
             assert_eq!(backend.transport().requests.len(), 1);
         }
+    }
+
+    #[test]
+    fn multi_page_runner_inventory_requires_stable_totals_unique_ids_and_repeat_readback() {
+        let first_page = serde_json::json!({
+            "total_count": 2,
+            "runners": [runner_entry(42, "trusted-runner", &[])],
+        });
+        let second_page = serde_json::json!({
+            "total_count": 2,
+            "runners": [runner_entry(99, "unrelated-runner", &[])],
+        });
+        let stable_transport = FakeTransport {
+            responses: [
+                paged_response(first_page.clone(), true),
+                paged_response(second_page.clone(), false),
+                paged_response(first_page.clone(), true),
+                paged_response(second_page.clone(), false),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut stable = GithubRestAdmissionBackend::new(
+            binding(true),
+            stable_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            stable.observe_admission_selector().unwrap().selector,
+            AdmissionSelectorState::Absent
+        );
+        assert_eq!(stable.transport().requests.len(), 4);
+
+        let changed_second_page = serde_json::json!({
+            "total_count": 2,
+            "runners": [runner_entry(100, "replacement-runner", &[])],
+        });
+        let moving_transport = FakeTransport {
+            responses: [
+                paged_response(first_page.clone(), true),
+                paged_response(second_page.clone(), false),
+                paged_response(first_page.clone(), true),
+                paged_response(changed_second_page, false),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut moving = GithubRestAdmissionBackend::new(
+            binding(true),
+            moving_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            moving.observe_admission_selector().unwrap_err(),
+            AdmissionBackendError::SelectorObservationUnknown
+        );
+
+        let total_drift_transport = FakeTransport {
+            responses: [
+                paged_response(first_page.clone(), true),
+                paged_response(
+                    serde_json::json!({
+                        "total_count": 3,
+                        "runners": [runner_entry(99, "unrelated-runner", &[])],
+                    }),
+                    false,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut total_drift = GithubRestAdmissionBackend::new(
+            binding(true),
+            total_drift_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            total_drift.observe_admission_selector().unwrap_err(),
+            AdmissionBackendError::SelectorObservationUnknown
+        );
+
+        let duplicate_transport = FakeTransport {
+            responses: [
+                paged_response(first_page, true),
+                paged_response(
+                    serde_json::json!({
+                        "total_count": 2,
+                        "runners": [runner_entry(42, "trusted-runner", &[])],
+                    }),
+                    false,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeTransport::default()
+        };
+        let mut duplicate = GithubRestAdmissionBackend::new(
+            binding(true),
+            duplicate_transport,
+            FakeCredentialProvider::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            duplicate.observe_admission_selector().unwrap_err(),
+            AdmissionBackendError::SelectorObservationUnknown
+        );
     }
 
     #[test]

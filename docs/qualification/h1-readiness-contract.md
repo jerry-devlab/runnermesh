@@ -30,8 +30,11 @@ explicit `LIVE` or `SYNTHETIC` provenance:
 
 - all-pass `SYNTHETIC` evidence returns `PASS_SYNTHETIC` and always sets
   `h1_mutation_allowed=false`;
-- only all-pass `LIVE` evidence returns `READY_FOR_OWNER_GATE` and can prepare
-  the future transaction; and
+- caller-supplied all-pass `LIVE` evidence remains `BLOCKED` with
+  `COLLECTOR_ATTESTATION=UNKNOWN` and cannot prepare the future transaction;
+- only a non-serializable in-process attestation issued by a concrete trusted
+  live collector can return `READY_FOR_OWNER_GATE` and prepare the future
+  transaction; and
 - the transaction still requires the explicit `OwnerGateAccepted` event before
   progressing.
 
@@ -55,8 +58,15 @@ The prepared source layer consists of:
 - GET-only exact-runner, selector-uniqueness, immutable workflow-content, and
   routing verifiers, including a GET-only exact-repository-to-runner access
   client; and
-- `collect_h1_live_readiness`, which maps the typed observations into the
-  existing eleven-field `H1ReadinessEvidence` contract.
+- `collect_h1_live_readiness`, which maps injected typed observations into the
+  existing eleven-field `H1ReadinessEvidence` contract while always marking
+  that public seam `SYNTHETIC`.
+
+Serializable evidence and receipts are data, not an authorization capability.
+`H1TransactionModel::prepare` requires a non-serializable
+`H1LiveReadinessAttestation`; callers cannot obtain one by changing JSON or the
+public provenance enum. This source Goal does not issue such an attestation, so
+`LIVE_READINESS_EXECUTED=false` remains mandatory.
 
 Binding and response drift fail closed. The workflow client can only read the
 configured file at an immutable commit reference; it has no dispatch method.
@@ -67,16 +77,22 @@ variable `UNKNOWN` until a separate Owner-side verifier proves its exact value.
 Organization-scoped runner visibility does not prove that the trusted
 repository can route to that runner. `ROUTING_READY` is therefore derived from
 the same exact workflow and admission observations plus an explicit repository
-access observation bound to the configured repository and runner ID. Unknown
-access blocks readiness, and a stale positive access observation cannot mask an
-absent selector or other admission drift.
+access observation bound to the complete `H1LiveBinding`, including scope,
+runner ID/name, credential reference, local identity, workflow, and restore
+identities. Unknown access blocks readiness, and a stale positive access
+observation cannot be replayed after any binding drift or mask an absent
+selector or other admission drift.
 The admission client retains only exact-runner observation and add-one/remove-
 one reserved-label operations with positive readback. The source adapters are
 not activated by default and tests inject only synthetic credentials and fake
-HTTP responses.
+HTTP responses. Multi-page runner inventories require stable totals, unique
+runner IDs, and an identical second complete read before they can become
+evidence.
 
 The local filesystem collector rejects a symlink or Windows reparse point at
-the leaf or any ancestor before accepting runner-home or image-path evidence.
+the leaf or any ancestor before accepting runner-home, work-root, or image-path
+evidence. Work-root path evidence and independently injected ownership evidence
+must both pass.
 
 ## Evidence meanings
 
