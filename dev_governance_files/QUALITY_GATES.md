@@ -175,6 +175,13 @@ Add `--full` for candidate-level all-target tests and Clippy.  The entrypoint
 classifies the delta, runs the deterministic public audit and tooling tests, and
 prints additional Goal-declared risk-gate responsibility.
 
+The developer-train candidate command composes that same gate without
+duplicating its test families:
+
+```text
+python tools/dev/train.py candidate --base <accepted-main> --portability auto
+```
+
 Empty path hints may support the normal evidence receipt only after semantic
 review confirms the relevant risk diff is empty:
 
@@ -189,19 +196,23 @@ or a changed trust boundary is safe.
 
 ## Post-merge pipeline
 
-Retain full Windows and Ubuntu code CI on every `main` push while the required
-PR status policy does not enforce an up-to-date base. After a passing exact-head
-PR merges, verify remote `main` immediately and permit work on the next safe
-Goal while post-merge CI runs asynchronously. Do not merge the next PR until
-the prior `main` CI is healthy; latch any failure as a blocker.
+Retain full Windows and Ubuntu code CI for every Rust/runtime `main` push while
+the required PR status policy does not enforce an up-to-date base. A docs-only
+`main` push uses classification, Fast Gate, and the stable `CI Gate` while
+skipping Format and Cargo. After a passing exact-head PR merges, verify remote
+`main` immediately and permit work on the next safe Goal while post-merge CI
+runs asynchronously. Do not merge the next PR until the prior risk-appropriate
+`main` CI is healthy; latch any failure as a blocker.
 
 ```text
 POST_MERGE_CI_ASYNC_PIPELINE=true
 NEXT_PR_MERGE_REQUIRES_PRIOR_MAIN_HEALTH=true
+POST_MERGE_MAIN_CODE_CI=FULL_WINDOWS_UBUNTU
+POST_MERGE_MAIN_DOCS_CI=LIGHTWEIGHT
 ```
 
 Only a future Owner-verified state with all of the following may consider a
-lightweight post-merge integrity check instead of full main-push CI:
+lightweight post-merge integrity check instead of full code main-push CI:
 
 ```text
 MAIN_PROTECTION=ENFORCED
@@ -209,6 +220,19 @@ REQUIRED_PR_GATE=ENFORCED
 DIRECT_PUSH_BLOCKED=true
 BASE_FRESHNESS_ENFORCED=true
 ```
+
+## Ledger and ordinary receipt economy
+
+Prefer one milestone implementation PR containing its own decision-relevant
+ledger delta. A multi-PR train may batch one reconciliation when useful.
+Separate ledger-only PRs are mainly for external/Owner state changes, material
+blocker changes, or closeout that could not safely bind earlier.
+
+Normal source receipts should contain no more than 15 decision-relevant fields:
+identity and SHAs, PR, active risk vector, local/portability/CI gates, any
+actually relevant security review, production mutation, Owner action, and next
+Goal. H1/H2/release and changed high-risk surfaces retain the additional
+evidence their risk requires.
 
 ## Blocker latch
 

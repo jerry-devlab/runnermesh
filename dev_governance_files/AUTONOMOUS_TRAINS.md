@@ -21,11 +21,17 @@ sync authoritative main
 -> hosted CI / ordinary self-repair
 -> merge
 -> verify remote main
--> durable ledger/receipt update
+-> decision-relevant ledger delta in the implementation PR or bounded train reconciliation
+-> concise receipt
 -> next Goal
 ```
 
 Remote Git `main`, PR state, hosted CI, and the public execution ledger are durable checkpoints. Do not invent a parallel custom lock/slot system for normal source development.
+
+Do not create a second ledger-only PR after every ordinary implementation PR.
+Prefer one milestone/one PR, or batch one useful reconciliation across several
+source PRs. Keep separate ledger-only work for external/Owner state changes,
+material blocker changes, or closeout that could not safely bind earlier.
 
 After a passing exact-head PR merges, verify remote `main` immediately.  Work on
 the next safe Goal may overlap the post-merge main CI run, but the next PR must

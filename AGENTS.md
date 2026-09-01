@@ -43,7 +43,8 @@ Preferred flow:
 8. reuse accepted evidence when the relevant risk diff is empty;
 9. merge intentionally after required gates pass;
 10. verify remote `main` after merge;
-11. update the public execution ledger when decision-relevant state changed;
+11. update the public execution ledger when decision-relevant state changed,
+    preferably in the implementation PR or one bounded train reconciliation;
 12. emit a concise receipt.
 
 Do not manufacture extra commits solely for governance checkpoints.
@@ -264,33 +265,35 @@ a blocker and stops that pipeline.
 
 The ledger records Goal state, accepted head/candidate, PR, privacy-safe evidence summary, blocker, and next prerequisite. It never contains private host identifiers.
 
+Ordinary source milestones should include their decision-relevant ledger delta
+in the implementation PR when practical. A train with several source PRs may
+batch one ledger reconciliation. Reserve a separate ledger-only PR primarily
+for external/Owner state changes without a source PR, material blocker changes,
+or a bounded closeout that could not safely be bound earlier. Do not require a
+code PR followed by a ledger-only PR as the default pattern.
+
 If chat context and ledger conflict, inspect current Git/PR/evidence state and correct the ledger; never silently follow stale chat history.
 
 ## 18. Completion receipts
 
-Receipts contain only active decision-relevant gates. Typical fields:
+Ordinary source receipts contain only active decision-relevant gates and should
+normally stay at or below 15 fields. Typical fields:
 
 ```text
 DISPOSITION=<PASS|FAIL|BLOCKED|UNPROVEN>
 GOAL_ID=<id>
 START_MAIN=<sha>
-CANDIDATE_HEAD=<sha>
-PR=<number-or-url>
-PR_MERGED=<true|false>
 FINAL_MAIN=<sha-or-N/A>
+PR=<number-or-url>
+CANDIDATE_HEAD=<sha>
 RISK_VECTOR=<active dimensions>
-CODE_CI=<PASS|REUSED|N/A>
-TRAY_PRESENTATION=<PASS|REUSED|N/A>
-PROBE_POLICY=<PASS|REUSED|N/A>
-RUNNER_CONTROL=<PASS|REUSED|N/A>
-PERSISTENT_CONFIG_SAFETY=<PASS|REUSED|N/A>
-INSTALL_ACTIVATION_SAFETY=<PASS|REUSED|N/A>
-SECURITY_PRIVACY=<PASS|REUSED|N/A>
-RELEASE_GATE=<PASS|REUSED|N/A>
+LOCAL_GATE=<PASS|REUSED|N/A>
+PORTABILITY_GATE=<PASS|REUSED|UNAVAILABLE|N/A>
+CI_GATE=<PASS|REUSED|N/A>
+SECURITY_REVIEW=<PASS|REUSED|N/A>
 PRODUCTION_MUTATION=<true|false>
-BLOCKER_LATCHED=<true|false>
 OWNER_ACTION=<none-or-specific>
-NEXT_RECOMMENDED_GOAL=<id-or-none>
+NEXT_GOAL=<id-or-none>
 ```
 
 For privileged one-shot transactions also separate the product/qualification result from restoration:

@@ -28,6 +28,7 @@ RUNTIME_PREFIXES = (
     "scripts/",
     "src/",
     "tests/",
+    "tools/dev/",
     "tools/quality/",
 )
 RUNTIME_BASENAMES = {"cargo.lock", "cargo.toml", "build.rs"}
@@ -72,6 +73,8 @@ RISK_PATH_MARKERS = {
         ".github/",
         "security.md",
         "threat-model",
+        "tools/dev/invoke-runnermeshtrain.ps1",
+        "tools/dev/train.py",
         "tools/quality/public_audit.py",
     ),
     "RELEASE_GATE": (
@@ -157,6 +160,7 @@ def git_changed_paths(
     output = _run_git(
         [
             "diff",
+            "--no-renames",
             "--name-only",
             "--diff-filter=ACDMRTUXB",
             diff_spec(base, head, diff_mode),
@@ -167,7 +171,11 @@ def git_changed_paths(
 
 
 def result_fields(
-    paths: Iterable[str], base: str, head: str, diff_mode: str
+    paths: Iterable[str],
+    base: str,
+    head: str,
+    diff_mode: str,
+    event_name: str | None = None,
 ) -> dict[str, str]:
     path_list = sorted({normalize_path(path) for path in paths if path.strip()})
     fields = {
@@ -178,6 +186,14 @@ def result_fields(
         "diff_mode": diff_mode,
         "path_hints_are_semantic_proof": "false",
     }
+    if event_name is not None:
+        try:
+            from .ci_policy import decide_ci_jobs
+        except ImportError:  # Direct script execution.
+            from ci_policy import decide_ci_jobs
+
+        decision = decide_ci_jobs(event_name, classify_paths(path_list))
+        fields["code_ci_required"] = str(decision.code_ci_required).lower()
     fields.update({key.lower(): value for key, value in risk_path_hints(path_list).items()})
     return fields
 
@@ -196,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--diff-mode", choices=("merge-base", "direct"), default="merge-base"
     )
     parser.add_argument(
+        "--event-name",
+        choices=("pull_request", "push", "workflow_dispatch"),
+        help="emit the event-aware code_ci_required workflow decision",
+    )
+    parser.add_argument(
         "--path",
         action="append",
         dest="paths",
@@ -212,7 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     head = resolve_head(args.head, repo_root)
     base = resolve_base(args.base, head, repo_root)
     paths = args.paths or git_changed_paths(base, head, args.diff_mode, repo_root)
-    fields = result_fields(paths, base, head, args.diff_mode)
+    fields = result_fields(paths, base, head, args.diff_mode, args.event_name)
 
     if args.github_output:
         _write_github_output(args.github_output, fields)

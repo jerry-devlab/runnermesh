@@ -28,6 +28,18 @@ Use `--full` when candidate-level all-target tests and Clippy are required.
 classifier's path hints are assistance only; the Goal still declares semantic
 risk and any additional gate.
 
+For the same full gate plus optional existing-WSL portability proof, use:
+
+```text
+python tools/dev/train.py candidate --base <accepted-main> --portability auto
+```
+
+Use `health`, `wait-pr`, `merge`, and `wait-main` subcommands to replace manual
+GitHub polling while retaining exact-head, protected-main, and prior-main-health
+checks. An unavailable `gh`, changed SHA, merge queue, or protection without
+atomic base-freshness enforcement fails closed for GitHub mutations. The helper
+does not change repository protection policy.
+
 ## Quick classes
 
 - **D docs/governance**: diff/link/privacy sanity; product gates `N/A`.
@@ -61,10 +73,15 @@ take the depth they require.  These aims never create an automatic PASS.
 ## Post-merge overlap
 
 After merge, verify remote `main` and start the next safe Goal while main CI runs
-asynchronously.  Do not merge the next PR until that prior main run passes; latch
-a failure immediately. Full main-push CI remains required while the required PR
-gate does not enforce an up-to-date base, even when main protection itself is
-machine-enforced.
+asynchronously. Do not merge the next PR until that prior main run passes; latch
+a failure immediately. Full Windows and Ubuntu CI remains required for code
+main pushes while the required PR gate does not enforce an up-to-date base.
+Docs-only main pushes retain Fast Gate and stable `CI Gate` but skip Cargo.
+
+Ordinary milestones should include their ledger delta in the implementation PR
+or a bounded train reconciliation, avoiding an automatic second ledger-only PR.
+Normal source receipts stay at or below 15 decision-relevant fields unless an
+active high-risk surface requires more evidence.
 
 ## Blockers
 

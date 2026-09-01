@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   classify:
@@ -22,6 +22,7 @@ jobs:
       base_sha: ${{ steps.changes.outputs.base_sha }}
       head_sha: ${{ steps.changes.outputs.head_sha }}
       diff_mode: ${{ steps.changes.outputs.diff_mode }}
+      code_ci_required: ${{ steps.changes.outputs.code_ci_required }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,6 +44,7 @@ jobs:
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
             --diff-mode "$mode" \
+            --event-name "$EVENT_NAME" \
             --github-output "$GITHUB_OUTPUT"
 
   fast-gate:
@@ -56,6 +58,8 @@ jobs:
           ref: ${{ needs.classify.outputs.head_sha }}
       - name: Test repository quality tools
         run: python -m unittest discover -s tools/quality/tests -v
+      - name: Test developer tooling
+        run: python -m unittest discover -s tools/dev/tests -v
       - name: Audit public delta
         run: >-
           python tools/quality/public_audit.py
@@ -66,7 +70,7 @@ jobs:
   format:
     name: Format
     needs: classify
-    if: needs.classify.result == 'success' && (github.event_name != 'pull_request' || needs.classify.outputs.change_class != 'DOCS_ONLY')
+    if: needs.classify.result == 'success' && needs.classify.outputs.code_ci_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,10 +81,10 @@ jobs:
   cargo:
     name: Cargo tests + Clippy (${{ matrix.os }})
     needs: classify
-    if: needs.classify.result == 'success' && (github.event_name != 'pull_request' || needs.classify.outputs.change_class != 'DOCS_ONLY')
+    if: needs.classify.result == 'success' && needs.classify.outputs.code_ci_required == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
@@ -118,8 +122,8 @@ jobs:
       - name: Require the risk-appropriate jobs
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           CHANGE_CLASS: ${{ needs.classify.outputs.change_class }}
+          CODE_CI_REQUIRED: ${{ needs.classify.outputs.code_ci_required }}
           CLASSIFY_RESULT: ${{ needs.classify.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           FORMAT_RESULT: ${{ needs.format.result }}
@@ -127,10 +131,12 @@ jobs:
         run: |
           [[ "$CLASSIFY_RESULT" == "success" ]]
           [[ "$FAST_GATE_RESULT" == "success" ]]
-          if [[ "$EVENT_NAME" == "pull_request" && "$CHANGE_CLASS" == "DOCS_ONLY" ]]; then
+          if [[ "$CODE_CI_REQUIRED" == "false" ]]; then
+            [[ "$CHANGE_CLASS" == "DOCS_ONLY" ]]
             [[ "$FORMAT_RESULT" == "skipped" ]]
             [[ "$CARGO_RESULT" == "skipped" ]]
           else
+            [[ "$CODE_CI_REQUIRED" == "true" ]]
             [[ "$FORMAT_RESULT" == "success" ]]
             [[ "$CARGO_RESULT" == "success" ]]
           fi

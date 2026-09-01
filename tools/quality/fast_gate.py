@@ -86,6 +86,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         ],
         repo_root,
     )
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/dev/tests",
+            "-v",
+        ],
+        repo_root,
+    )
 
     if change_class is ChangeClass.DOCS_ONLY:
         print("LOCAL_CARGO_STARTED=false")
