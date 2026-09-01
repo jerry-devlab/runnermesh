@@ -1,3 +1,4 @@
+use crate::admission::secure_zero_bytes;
 use crate::{AdmissionBackendError, CredentialLease, CredentialProvider, CredentialReference};
 
 pub const WINDOWS_CREDENTIAL_MANAGER_PROVIDER: &str = "windows-credential-manager";
@@ -44,7 +45,7 @@ impl<S: CredentialStore> CredentialProvider for CredentialProviderAdapter<S> {
         &mut self,
         reference: &CredentialReference,
     ) -> Result<CredentialLease, AdmissionBackendError> {
-        if reference.provider != self.provider_name {
+        if !reference.is_valid() || reference.provider != self.provider_name {
             return Err(AdmissionBackendError::CredentialResolutionFailed);
         }
         let secret = self
@@ -87,6 +88,9 @@ impl CredentialStore for WindowsCredentialManagerStore {
             }
         }
 
+        if CredentialReference::new(WINDOWS_CREDENTIAL_MANAGER_PROVIDER, key).is_err() {
+            return Err(CredentialStoreError::Unavailable);
+        }
         let target = wide_nul(key);
         let mut raw = ptr::null_mut::<CREDENTIALW>();
         // SAFETY: target is NUL terminated and raw is a valid out pointer.
@@ -113,7 +117,7 @@ impl CredentialStore for WindowsCredentialManagerStore {
         // CredReadW allocation. Copy first, then clear the transient OS buffer.
         let blob = unsafe { slice::from_raw_parts_mut(credential.CredentialBlob, size) };
         let secret = blob.to_vec();
-        blob.fill(0);
+        secure_zero_bytes(blob);
         drop(buffer);
         Ok(secret)
     }
@@ -222,6 +226,24 @@ mod tests {
         let other = CredentialReference::new("other-provider", "synthetic-h1").unwrap();
         assert_eq!(
             provider.resolve(&other).unwrap_err(),
+            AdmissionBackendError::CredentialResolutionFailed
+        );
+    }
+
+    #[test]
+    fn invalid_deserialized_reference_fails_before_store_resolution() {
+        let invalid: CredentialReference = serde_json::from_str(
+            r#"{"provider":"windows-credential-manager","key":"truncated\u0000target"}"#,
+        )
+        .unwrap();
+        let mut provider = CredentialProviderAdapter::new(
+            WINDOWS_CREDENTIAL_MANAGER_PROVIDER,
+            FakeStore(Ok(b"synthetic-token-shape".to_vec())),
+        );
+
+        assert!(!invalid.is_valid());
+        assert_eq!(
+            provider.resolve(&invalid).unwrap_err(),
             AdmissionBackendError::CredentialResolutionFailed
         );
     }

@@ -12,6 +12,7 @@ use windows_sys::Win32::{
     },
 };
 
+use crate::admission::secure_zero_bytes;
 use crate::{
     AdmissionBackendError, AdmissionBinding, CredentialLease, CredentialReference,
     GithubApiTransport, GithubRestAdmissionBackend, GithubWireClient, GithubWireError,
@@ -120,7 +121,7 @@ impl GithubWireClient for WindowsWinHttpClient {
             return Err(last_transport_error());
         }
 
-        let headers = SensitiveWide::request_headers(&request.headers, credential);
+        let headers = SensitiveWide::request_headers(&request.headers, credential)?;
         let header_length = u32::try_from(headers.len_without_nul())
             .map_err(|_| GithubWireError::InvalidResponse)?;
         let body_length =
@@ -190,8 +191,27 @@ impl Drop for InternetHandle {
 struct SensitiveWide(Vec<u16>);
 
 impl SensitiveWide {
-    fn request_headers(headers: &[(String, String)], credential: &CredentialLease) -> Self {
+    fn request_headers(
+        headers: &[(String, String)],
+        credential: &CredentialLease,
+    ) -> Result<Self, GithubWireError> {
+        let fixed_length = b"Authorization: Bearer ".len() + b"\r\n\0".len();
+        let required = headers
+            .iter()
+            .try_fold(fixed_length, |length, (name, value)| {
+                length
+                    .checked_add(name.len())?
+                    .checked_add(b": ".len())?
+                    .checked_add(value.len())?
+                    .checked_add(b"\r\n".len())
+            });
+        let required = required
+            .and_then(|length| length.checked_add(credential.expose_for_transport().len()))
+            .ok_or(GithubWireError::InvalidResponse)?;
         let mut value = Vec::new();
+        value
+            .try_reserve_exact(required)
+            .map_err(|_| GithubWireError::InvalidResponse)?;
         for (name, header_value) in headers {
             append_wide(&mut value, name.as_bytes());
             append_wide(&mut value, b": ");
@@ -202,7 +222,8 @@ impl SensitiveWide {
         append_wide(&mut value, credential.expose_for_transport());
         append_wide(&mut value, b"\r\n");
         value.push(0);
-        Self(value)
+        debug_assert_eq!(value.len(), required);
+        Ok(Self(value))
     }
 
     fn as_ptr(&self) -> *const u16 {
@@ -216,8 +237,21 @@ impl SensitiveWide {
 
 impl Drop for SensitiveWide {
     fn drop(&mut self) {
-        self.0.fill(0);
+        secure_zero_wide(&mut self.0);
     }
+}
+
+#[inline(never)]
+fn secure_zero_wide(values: &mut [u16]) {
+    // SAFETY: a u16 slice is contiguous and may be viewed as its complete byte
+    // representation for in-place clearing.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            values.as_mut_ptr().cast::<u8>(),
+            std::mem::size_of_val(values),
+        )
+    };
+    secure_zero_bytes(bytes);
 }
 
 fn append_wide(target: &mut Vec<u16>, bytes: &[u8]) {
@@ -350,11 +384,18 @@ mod tests {
     #[test]
     fn sensitive_headers_are_zeroized_and_not_debuggable() {
         let credential = CredentialLease::from_secret("synthetic-token-shape").unwrap();
-        let headers = SensitiveWide::request_headers(&[], &credential);
+        let headers = SensitiveWide::request_headers(&[], &credential).unwrap();
         assert!(headers
             .0
             .windows(3)
             .any(|window| window == ['B' as u16, 'e' as u16, 'a' as u16]));
         assert_eq!(headers.0.last(), Some(&0));
+    }
+
+    #[test]
+    fn sensitive_wide_scrubbing_clears_the_complete_allocation_contents() {
+        let mut values = vec![0x1234_u16; 32];
+        secure_zero_wide(&mut values);
+        assert!(values.iter().all(|value| *value == 0));
     }
 }

@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{compiler_fence, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -612,6 +615,10 @@ impl CredentialReference {
             Err("credential reference components must be non-secret printable tokens")
         }
     }
+
+    pub fn is_valid(&self) -> bool {
+        valid_reference_component(&self.provider) && valid_reference_component(&self.key)
+    }
 }
 
 pub struct CredentialLease {
@@ -628,7 +635,7 @@ impl CredentialLease {
             || secret.len() > 4096
             || secret.iter().any(|byte| !byte.is_ascii_graphic())
         {
-            secret.fill(0);
+            secure_zero_bytes(&mut secret);
             return Err("credential material must be bounded printable ASCII without whitespace");
         }
         Ok(Self { secret })
@@ -647,8 +654,20 @@ impl fmt::Debug for CredentialLease {
 
 impl Drop for CredentialLease {
     fn drop(&mut self) {
-        self.secret.fill(0);
+        secure_zero_bytes(&mut self.secret);
     }
+}
+
+/// Volatile writes plus a compiler fence prevent dead-store elimination of
+/// credential clearing. Callers must also avoid reallocating a buffer after it
+/// contains secret material, because an allocator can retain an old copy.
+#[inline(never)]
+pub(crate) fn secure_zero_bytes(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is a unique, live pointer within the supplied slice.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
 }
 
 pub trait CredentialProvider {
@@ -714,6 +733,7 @@ impl AdmissionBinding {
             && self.runner_id != 0
             && !self.runner_name.trim().is_empty()
             && !self.runner_name.contains(['\r', '\n'])
+            && self.credential_ref.is_valid()
             && self
                 .reserved_label
                 .eq_ignore_ascii_case(RESERVED_ADMISSION_LABEL)
@@ -1549,6 +1569,33 @@ mod tests {
             AdmissionBackendError::CredentialUnavailable
         );
         assert!(backend.transport().requests.is_empty());
+    }
+
+    #[test]
+    fn deserialized_invalid_credential_reference_is_refused_at_backend_boundary() {
+        let mut candidate = binding(true);
+        candidate.credential_ref = serde_json::from_str(
+            r#"{"provider":"windows-credential-manager","key":"truncated\u0000target"}"#,
+        )
+        .unwrap();
+
+        assert!(!candidate.credential_ref.is_valid());
+        assert!(!candidate.is_valid());
+        assert!(matches!(
+            GithubRestAdmissionBackend::new(
+                candidate,
+                FakeTransport::default(),
+                FakeCredentialProvider::default(),
+            ),
+            Err(AdmissionBackendError::BindingInvalid)
+        ));
+    }
+
+    #[test]
+    fn secure_clear_uses_the_credential_scrubbing_primitive() {
+        let mut bytes = b"synthetic-secret-shape".to_vec();
+        secure_zero_bytes(&mut bytes);
+        assert!(bytes.iter().all(|byte| *byte == 0));
     }
 
     #[test]

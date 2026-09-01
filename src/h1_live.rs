@@ -37,6 +37,10 @@ impl OpaqueIdentityReference {
             Err("identity reference components must be opaque printable tokens")
         }
     }
+
+    pub fn is_valid(&self) -> bool {
+        valid_reference_component(&self.provider) && valid_reference_component(&self.key)
+    }
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -85,6 +89,7 @@ impl ExactLocalRunnerBinding {
                 == normalized_path(&self.runner_home.join("bin").join("Runner.Listener.exe"))
             && normalized_path(&self.worker_image)
                 == normalized_path(&self.runner_home.join("bin").join("Runner.Worker.exe"))
+            && self.execution_identity_ref.is_valid()
     }
 }
 
@@ -206,6 +211,16 @@ impl<V: LocalIdentityOwnershipVerifier> ExactLocalBindingSource
     for FilesystemExactLocalBindingSource<V>
 {
     fn observe(&mut self, binding: &ExactLocalRunnerBinding) -> ExactLocalBindingObservation {
+        if !binding.is_valid() {
+            return ExactLocalBindingObservation {
+                runner_home: EvidenceState::Fail,
+                listener_image: EvidenceState::Fail,
+                worker_image: EvidenceState::Fail,
+                execution_identity: EvidenceState::Fail,
+                work_root_ownership: EvidenceState::Fail,
+                active_bound_worker: None,
+            };
+        }
         ExactLocalBindingObservation {
             runner_home: path_kind_state(&binding.runner_home, true),
             listener_image: path_kind_state(&binding.listener_image, false),
@@ -804,6 +819,13 @@ mod tests {
         local.listener_image = local.runner_home.join("bin").join("other.exe");
         assert!(!local.is_valid());
 
+        let mut local = local_binding();
+        local.execution_identity_ref = OpaqueIdentityReference {
+            provider: "synthetic-identity".to_owned(),
+            key: "truncated\0identity".to_owned(),
+        };
+        assert!(!local.is_valid());
+
         let mut admission = admission_binding();
         admission.ownership = None;
         let binding = H1LiveBinding {
@@ -853,6 +875,24 @@ mod tests {
         fn active_bound_worker(&mut self, _binding: &ExactLocalRunnerBinding) -> Option<bool> {
             Some(false)
         }
+    }
+
+    #[test]
+    fn filesystem_binding_source_refuses_invalid_binding_before_verifier_evidence() {
+        let mut binding = local_binding();
+        binding.execution_identity_ref = OpaqueIdentityReference {
+            provider: "synthetic-identity".to_owned(),
+            key: "truncated\0identity".to_owned(),
+        };
+        let observed =
+            FilesystemExactLocalBindingSource::new(PassingLocalVerifier).observe(&binding);
+
+        assert_eq!(observed.runner_home, EvidenceState::Fail);
+        assert_eq!(observed.listener_image, EvidenceState::Fail);
+        assert_eq!(observed.worker_image, EvidenceState::Fail);
+        assert_eq!(observed.execution_identity, EvidenceState::Fail);
+        assert_eq!(observed.work_root_ownership, EvidenceState::Fail);
+        assert_eq!(observed.active_bound_worker, None);
     }
 
     #[test]
