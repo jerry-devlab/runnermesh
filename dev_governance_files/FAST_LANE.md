@@ -70,6 +70,12 @@ not an automatic independent auditor.  Aim for 2-5 minutes on an ordinary delta
 and 10-20 minutes on material runner/source risk; trust/security and H1/H2/release
 take the depth they require.  These aims never create an automatic PASS.
 
+Before an expensive independent run, prove the fresh profile can start one
+harmless child with `tools/dev/auditor_preflight.py`. This is admission evidence
+only: it always reports `AUDIT_ACCEPTANCE_PASS=false`. Diagnosis may continue
+with `EVIDENCE_SCOPE=DIAGNOSTIC_ONLY` if admission is externally blocked; never
+convert that infrastructure failure into a product failure or acceptance.
+
 ## Post-merge overlap
 
 After merge, verify remote `main` and start the next safe Goal while main CI runs
@@ -84,6 +90,11 @@ Normal source receipts stay at or below 15 decision-relevant fields unless an
 active high-risk surface requires more evidence.
 
 ## Blockers
+
+Follow the eight-rule Blocker Policy v2 in `QUALITY_GATES.md`: current
+postconditions outrank obsolete intervention paths, durable identity is distinct
+from same-transaction process evidence, Owner wait/cancellation is control flow,
+and accepted policy is reopened only by new technical evidence.
 
 Latch one sufficient unchanged blocker:
 

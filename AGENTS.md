@@ -242,6 +242,12 @@ Dedicated auditors are reserved for changed destructive/persistent external writ
 
 Do not chain auditors over unchanged evidence.
 
+`dev_governance_files/QUALITY_GATES.md` owns Blocker Policy v2. In particular,
+diagnostic evidence is not independent acceptance, audit-admission failure is
+infrastructure rather than product failure, current invariants outrank obsolete
+intervention sequences, and volatile process evidence is refreshed inside the
+same Owner transaction instead of frozen as durable identity.
+
 Ordinary code uses Implementer self-review, focused tests, and one settled-head
 hosted CI run.  When an independent audit is required, its basis is accepted
 prior evidence plus the current risk delta, not an automatic full-history audit.

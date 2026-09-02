@@ -30,6 +30,16 @@ Last roadmap reset: 2026-08-31 (Roadmap v3).
 - `PASS` — the bounded result and required verification passed.
 - `TODO` — not yet implemented or qualified.
 
+Evidence-scope flags are not top-level result dispositions:
+
+- `AUDIT_ADMISSION_FAILED` — the independent review process could not execute
+  its harmless read-only child; this is infrastructure evidence, not an
+  artifact failure.
+- `DIAGNOSTIC_ONLY` — useful evidence from a normal read-only diagnostic
+  process that is not independent acceptance.
+- `INDEPENDENT_ACCEPTANCE_PENDING` — the active risk policy still requires a
+  fresh independent result before the affected external authority can be used.
+
 ## Current ledger
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
@@ -40,7 +50,8 @@ Last roadmap reset: 2026-08-31 (Roadmap v3).
 | Roadmap v3 governance truth | ACCEPTED | `af0c14e63f070409c7c31f92c986aca5214ac379` | #29 | accepted health-audit conclusions; parallel source lane plus H1 merge gate | follow the eight execution blocks |
 | Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S remain private evidence, not active transaction variants | P0 supervised restore only |
 | PR #17 bounded executor | SUPERSEDED | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 closed | exact-scope/no-signal evidence preserved by ADR 0004 and accepted G11R; run-once path obsolete | none |
-| P0 supervised baseline restore | PREPARING | N/A | N/A | simplified read-only preflight -> Owner present -> minimum exact action -> independent postverification -> stop | fresh exact-scope preflight and Owner window |
+| P0 supervised baseline restore | PREPARING | containing protected-main merge | containing implementation PR | current-invariant branch model prepared; latest independent reconciliation stopped before live observation because the exact private baseline was not readable | narrow read-only baseline access, one fresh exact-scope reconciliation, then Owner window |
+| Independent Auditor admission | PREPARED | containing protected-main merge | containing implementation PR | read-only/never profile plus one-child admission preflight; packaged-shell resolution is scoped to the child environment; admission is not audit acceptance | reuse for bounded independent reviews; grant only the exact evidence scope each audit requires |
 | GOV1 governance reset | ACCEPTED | PR #20 accepted | #20 | public ledger and PR-only governance foundation | none |
 | Fast Lane v2 CI/audit automation | ACCEPTED | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative classification, deterministic audit, stable `CI Gate`, hosted Windows/Ubuntu coverage | keep full post-merge code main CI |
 | DVP1 developer velocity pack | ACCEPTED | containing protected-main merge | containing implementation PR | anti-sleep train wrapper; docs-main fast path; exact-head candidate, wait, merge, and main-health helpers; compact ledger/receipt policy | productization salvage preparation |
@@ -48,7 +59,7 @@ Last roadmap reset: 2026-08-31 (Roadmap v3).
 | G11R-B lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 | exact-scope REST seam, desired/achieved state, drift refusal, no normal Worker signal | H1 live adapter source |
 | G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
 | H1 live adapters/readiness source | ACCEPTED_SOURCE | `60c443b120a24fe4f59fd83cd595f5e547273f0e` | #30 | fixed-authority transport, opaque credential provider, exact bindings, workflow/routing/readiness collectors; exact-head CI Gate, focused trust review, and post-merge full main CI passed; tests remain synthetic-only | Owner configuration and fresh live readiness |
-| H1 one-shot qualification | PREPARING | N/A | N/A | live mutation remains unauthorized; synthetic/source proof cannot authorize H1 | P0 PASS, private ACL, live configuration/readiness, Owner gate |
+| H1 one-shot qualification | PREPARING | N/A | N/A | private non-repository Owner-corridor source and inert workflow candidate prepared; every live field remains unknown and live mutation remains unauthorized | P0 PASS, private ACL, live configuration/readiness, Owner gate |
 | G12 autostart | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
 | G13 versioned install | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
 | G14 update + rollback | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #15 draft | selective extraction allowed; acceptance/merge held | accepted G13 after H1 |
@@ -124,6 +135,8 @@ G11R_B=ACCEPTED
 G11R_C=ACCEPTED_SOURCE
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_LIVE_ADAPTER_SOURCE_READY=true
+H1_NON_MUTATING_READINESS=PREPARING
+H1_OWNER_BUNDLE_SOURCE_PREPARED=true
 H1_MUTATION_ALLOWED=false
 LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
