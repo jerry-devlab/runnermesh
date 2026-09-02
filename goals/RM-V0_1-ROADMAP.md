@@ -58,8 +58,9 @@ tests.
 Roadmap v3 and `RM-V0_1-EXECUTION-STATUS.md` are the durable execution truth.
 Repository governance is machine enforced by the active `protect-main`
 ruleset, with no bypass actors and required check `CI Gate`. Full post-merge
-`main` CI remains enabled because the required status policy is intentionally
-not strict/up-to-date.
+Windows and Ubuntu code CI remains enabled because the required status policy
+is intentionally not strict/up-to-date. Docs-only main pushes retain the
+classification/Fast Gate/`CI Gate` path without Cargo.
 
 Source work uses focused branches, exact-head CI, selected risk gates, and
 protected-main merges. PR #17 closes as superseded; PRs #14-#16 remain intact as

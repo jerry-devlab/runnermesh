@@ -42,7 +42,8 @@ Last roadmap reset: 2026-08-31 (Roadmap v3).
 | PR #17 bounded executor | SUPERSEDED | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 closed | exact-scope/no-signal evidence preserved by ADR 0004 and accepted G11R; run-once path obsolete | none |
 | P0 supervised baseline restore | PREPARING | N/A | N/A | simplified read-only preflight -> Owner present -> minimum exact action -> independent postverification -> stop | fresh exact-scope preflight and Owner window |
 | GOV1 governance reset | ACCEPTED | PR #20 accepted | #20 | public ledger and PR-only governance foundation | none |
-| Fast Lane v2 CI/audit automation | ACCEPTED | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative classification, deterministic audit, stable `CI Gate`, hosted Windows/Ubuntu coverage | keep full post-merge main CI |
+| Fast Lane v2 CI/audit automation | ACCEPTED | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative classification, deterministic audit, stable `CI Gate`, hosted Windows/Ubuntu coverage | keep full post-merge code main CI |
+| DVP1 developer velocity pack | ACCEPTED | containing protected-main merge | containing implementation PR | anti-sleep train wrapper; docs-main fast path; exact-head candidate, wait, merge, and main-health helpers; compact ledger/receipt policy | productization salvage preparation |
 | G11R-A admission architecture | ACCEPTED | `91cf656fde0b365fb97197c1bef93991a4f44c6e` | #21 | ADR 0004 selects exact-runner `runnermesh-admit` and two-phase withdrawal | none |
 | G11R-B lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 | exact-scope REST seam, desired/achieved state, drift refusal, no normal Worker signal | H1 live adapter source |
 | G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
@@ -83,12 +84,14 @@ DIRECT_PUSH_TO_MAIN=BLOCKED_BY_PULL_REQUEST_RULE
 FORCE_PUSH_TO_MAIN=BLOCKED
 MAIN_DELETION=BLOCKED
 STRICT_REQUIRED_STATUS_CHECKS_POLICY=false
-POST_MERGE_MAIN_CI=FULL
+POST_MERGE_MAIN_CODE_CI=FULL_WINDOWS_UBUNTU
+POST_MERGE_MAIN_DOCS_CI=LIGHTWEIGHT
 ```
 
-Full Windows and Ubuntu CI remains enabled on `main` because the required check
-does not require an up-to-date base. Do not merge a next PR until the prior
-post-merge `main` run is healthy.
+Full Windows and Ubuntu CI remains enabled for code changes on `main` because
+the required check does not require an up-to-date base. Docs-only main pushes
+use the lightweight Fast Gate plus stable `CI Gate`. Do not merge a next PR
+until the prior risk-appropriate post-merge `main` run is healthy.
 
 ## Source lane and Owner lane
 
