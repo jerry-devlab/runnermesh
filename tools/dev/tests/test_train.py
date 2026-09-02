@@ -18,6 +18,7 @@ from tools.dev.train import (
     build_merge_command,
     calculate_timing_fields,
     command_candidate,
+    command_merge,
     command_wait_main,
     command_wait_pr,
     _main_run_health,
@@ -52,7 +53,31 @@ def open_pr(head: str = HEAD, gate: str = "SUCCESS") -> dict:
         "headRefOid": head,
         "baseRefName": "main",
         "baseRefOid": MAIN,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [check(CI_GATE_NAME, gate)],
+    }
+
+
+def protection_detail(*, strict: bool = False) -> dict:
+    return {
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {
+            "ref_name": {"include": ["refs/heads/main"], "exclude": []}
+        },
+        "rules": [
+            {"type": "deletion"},
+            {"type": "pull_request"},
+            {"type": "non_fast_forward"},
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": strict,
+                    "required_status_checks": [{"context": CI_GATE_NAME}],
+                },
+            },
+        ],
     }
 
 
@@ -231,9 +256,12 @@ class MergeSafetyTests(unittest.TestCase):
         pr = open_pr("c" * 40, gate="PENDING")
         pr["baseRefName"] = "release"
         pr["baseRefOid"] = "d" * 40
+        pr["mergeable"] = "CONFLICTING"
+        pr["mergeStateStatus"] = "DIRTY"
         errors = validate_merge_preconditions(
             pr,
             HEAD,
+            expected_base=MAIN,
             current_main=MAIN,
             repository_ok=False,
             protection_ok=False,
@@ -247,7 +275,8 @@ class MergeSafetyTests(unittest.TestCase):
                 "WRONG_REPOSITORY",
                 "STALE_HEAD",
                 "WRONG_BASE",
-                "STALE_BASE",
+                "BASE_STALE",
+                "PR_NOT_MERGEABLE",
                 "CI_GATE_NOT_PASS",
                 "MAIN_PROTECTION_NOT_EFFECTIVE",
                 "CURRENT_MAIN_NOT_HEALTHY",
@@ -262,6 +291,49 @@ class MergeSafetyTests(unittest.TestCase):
         self.assertIn("--merge", command)
         self.assertNotIn("--admin", command)
         self.assertFalse(any("bypass" in argument for argument in command))
+
+    def test_merge_command_rechecks_remote_snapshot_before_dispatch(self) -> None:
+        final_main = "c" * 40
+        merged_pr = open_pr()
+        merged_pr["state"] = "MERGED"
+        merged_pr["mergeCommit"] = {"oid": final_main}
+        fake_repository = mock.Mock()
+        fake_repository.assert_identity = mock.Mock()
+        fake_repository.head.return_value = HEAD
+        fake_repository.clean.return_value = True
+        fake_client = mock.Mock()
+        fake_client.available.return_value = True
+        fake_client.pr_view.side_effect = [open_pr(), open_pr(), merged_pr]
+        fake_client.protection.side_effect = [
+            protection_detail(),
+            protection_detail(),
+        ]
+        fake_client.main_sha.side_effect = [MAIN, MAIN, final_main, final_main]
+        fake_client.merge.return_value = CommandResult(0)
+        fake_client.commit_parents.return_value = [MAIN, HEAD]
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_repository.timing_path.side_effect = lambda sha: Path(temporary) / sha
+            with (
+                mock.patch("tools.dev.train.Repository", return_value=fake_repository),
+                mock.patch("tools.dev.train.GithubClient", return_value=fake_client),
+                mock.patch(
+                    "tools.dev.train.classify_main_commit",
+                    return_value=ChangeClass.RUST_OR_RUNTIME_CHANGE,
+                ),
+                mock.patch("tools.dev.train._main_run_health", return_value="PASS"),
+                mock.patch("sys.stdout", io.StringIO()),
+            ):
+                result = command_merge(
+                    argparse.Namespace(
+                        pr=32,
+                        expected_head=HEAD,
+                        expected_base=MAIN,
+                    )
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(fake_client.pr_view.call_count, 3)
+        self.assertEqual(fake_client.protection.call_count, 2)
+        fake_client.merge.assert_called_once_with(32, HEAD)
 
     def test_ambiguous_merge_exit_reconciles_to_exact_pr_commit(self) -> None:
         pr = open_pr()
@@ -309,26 +381,15 @@ class MergeSafetyTests(unittest.TestCase):
         )
 
     def test_protection_requires_ci_gate_and_no_bypass(self) -> None:
-        detail = {
-            "enforcement": "active",
-            "bypass_actors": [],
-            "conditions": {"ref_name": {"include": ["refs/heads/main"]}},
-            "rules": [
-                {"type": "pull_request"},
-                {"type": "non_fast_forward"},
-                {
-                    "type": "required_status_checks",
-                    "parameters": {
-                        "required_status_checks": [{"context": CI_GATE_NAME}]
-                    },
-                },
-            ],
-        }
+        detail = protection_detail()
         self.assertTrue(protection_is_effective(detail))
         detail["bypass_actors"] = [{"actor_id": 1}]
         self.assertFalse(protection_is_effective(detail))
         detail["bypass_actors"] = []
         detail["conditions"]["ref_name"]["exclude"] = ["refs/heads/*"]
+        self.assertFalse(protection_is_effective(detail))
+        detail["conditions"]["ref_name"]["exclude"] = []
+        detail["rules"] = [rule for rule in detail["rules"] if rule["type"] != "deletion"]
         self.assertFalse(protection_is_effective(detail))
 
     def test_protection_rejects_ambiguous_ref_globs(self) -> None:
@@ -337,6 +398,7 @@ class MergeSafetyTests(unittest.TestCase):
             "bypass_actors": [],
             "conditions": {"ref_name": {"include": ["refs/*"]}},
             "rules": [
+                {"type": "deletion"},
                 {"type": "pull_request"},
                 {"type": "non_fast_forward"},
                 {
@@ -362,6 +424,7 @@ class MergeSafetyTests(unittest.TestCase):
             "bypass_actors": [],
             "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
             "rules": [
+                {"type": "deletion"},
                 {"type": "pull_request"},
                 {"type": "non_fast_forward"},
                 {
@@ -383,50 +446,98 @@ class MergeSafetyTests(unittest.TestCase):
         detail["conditions"]["ref_name"] = {"include": ["~ALL"]}
         self.assertTrue(protection_is_effective(detail))
 
-    def test_safe_merge_requires_strict_base_freshness_and_no_merge_queue(self) -> None:
-        detail = {
-            "enforcement": "active",
-            "bypass_actors": [],
-            "conditions": {"ref_name": {"include": ["refs/heads/main"]}},
-            "rules": [
-                {"type": "pull_request"},
-                {"type": "non_fast_forward"},
-                {
-                    "type": "required_status_checks",
-                    "parameters": {
-                        "strict_required_status_checks_policy": False,
-                        "required_status_checks": [{"context": CI_GATE_NAME}],
-                    },
-                },
-            ],
-        }
+    def test_non_strict_protection_and_unchanged_exact_base_pass(self) -> None:
+        detail = protection_detail(strict=False)
         self.assertTrue(protection_is_effective(detail))
-        self.assertFalse(protection_supports_safe_merge(detail))
-        detail["rules"][2]["parameters"]["strict_required_status_checks_policy"] = True
         self.assertTrue(protection_supports_safe_merge(detail))
+        self.assertEqual(
+            validate_merge_preconditions(
+                open_pr(),
+                HEAD,
+                expected_base=MAIN,
+                current_main=MAIN,
+                repository_ok=True,
+                protection_ok=protection_supports_safe_merge(detail),
+                current_main_health="PASS",
+                checked_out_head=HEAD,
+            ),
+            [],
+        )
+
+    def test_non_strict_protection_refuses_advanced_main_as_base_stale(self) -> None:
+        errors = validate_merge_preconditions(
+            open_pr(),
+            HEAD,
+            expected_base=MAIN,
+            current_main="c" * 40,
+            repository_ok=True,
+            protection_ok=protection_supports_safe_merge(protection_detail()),
+            current_main_health="PASS",
+            checked_out_head=HEAD,
+        )
+        self.assertIn("BASE_STALE", errors)
+
+    def test_safe_merge_refuses_exact_head_mismatch(self) -> None:
+        errors = validate_merge_preconditions(
+            open_pr("c" * 40),
+            HEAD,
+            expected_base=MAIN,
+            current_main=MAIN,
+            repository_ok=True,
+            protection_ok=True,
+            current_main_health="PASS",
+            checked_out_head=HEAD,
+        )
+        self.assertIn("STALE_HEAD", errors)
+
+    def test_safe_merge_refuses_ci_gate_not_pass(self) -> None:
+        errors = validate_merge_preconditions(
+            open_pr(gate="FAILURE"),
+            HEAD,
+            expected_base=MAIN,
+            current_main=MAIN,
+            repository_ok=True,
+            protection_ok=True,
+            current_main_health="PASS",
+            checked_out_head=HEAD,
+        )
+        self.assertIn("CI_GATE_NOT_PASS", errors)
+
+    def test_safe_merge_refuses_bypass_or_protection_drift(self) -> None:
+        detail = protection_detail()
+        detail["bypass_actors"] = [{"actor_id": 1}]
+        self.assertFalse(protection_supports_safe_merge(detail))
+        detail = protection_detail()
+        detail["rules"] = [
+            rule for rule in detail["rules"] if rule["type"] != "non_fast_forward"
+        ]
+        self.assertFalse(protection_supports_safe_merge(detail))
+
+    def test_strict_freshness_still_passes_with_all_other_invariants(self) -> None:
+        detail = protection_detail(strict=True)
+        self.assertTrue(protection_supports_safe_merge(detail))
+        self.assertEqual(
+            validate_merge_preconditions(
+                open_pr(),
+                HEAD,
+                expected_base=MAIN,
+                current_main=MAIN,
+                repository_ok=True,
+                protection_ok=protection_supports_safe_merge(detail),
+                current_main_health="PASS",
+                checked_out_head=HEAD,
+            ),
+            [],
+        )
+
+    def test_safe_merge_rejects_merge_queue(self) -> None:
+        detail = protection_detail()
         detail["rules"].append({"type": "merge_queue"})
         self.assertFalse(protection_is_effective(detail))
         self.assertFalse(protection_supports_safe_merge(detail))
 
     def test_next_merge_requires_main_health_and_safe_protection(self) -> None:
-        detail = {
-            "enforcement": "active",
-            "bypass_actors": [],
-            "conditions": {"ref_name": {"include": ["refs/heads/main"]}},
-            "rules": [
-                {"type": "pull_request"},
-                {"type": "non_fast_forward"},
-                {
-                    "type": "required_status_checks",
-                    "parameters": {
-                        "strict_required_status_checks_policy": False,
-                        "required_status_checks": [{"context": CI_GATE_NAME}],
-                    },
-                },
-            ],
-        }
-        self.assertFalse(next_merge_allowed("PASS", detail))
-        detail["rules"][2]["parameters"]["strict_required_status_checks_policy"] = True
+        detail = protection_detail(strict=False)
         self.assertTrue(next_merge_allowed("PASS", detail))
         self.assertFalse(next_merge_allowed("FAIL", detail))
 

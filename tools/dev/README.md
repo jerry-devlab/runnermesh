@@ -47,7 +47,7 @@ The individual commands are authoritative:
 ```text
 python tools/dev/train.py health
 python tools/dev/train.py wait-pr --pr <number> --expected-head <sha>
-python tools/dev/train.py merge --pr <number> --expected-head <sha>
+python tools/dev/train.py merge --pr <number> --expected-head <sha> --expected-base <accepted-main>
 python tools/dev/train.py wait-main --expected-main <sha>
 ```
 
@@ -56,11 +56,13 @@ and authenticated `gh`; they neither read nor persist token bytes. `wait-pr`
 refuses a changed head, applies the remaining deadline to every GitHub call,
 and has bounded interval/timeout options. `merge` is restricted to
 `jerry-devlab/runnermesh`, an open PR targeting `main`, an exact head, passing
-`CI Gate`, fully healthy current-main job shape, and active no-bypass
-protection. It also fails closed when merge-queue rules are present or GitHub
-does not enforce strict base freshness; the current non-strict repository
-policy is reported as `SAFE_MERGE_PROTECTION=FAIL` and is not changed by this
-tool.
+`CI Gate`, clean GitHub mergeability, fully healthy current-main job shape, and
+active no-bypass pull-request, status-check, deletion, and non-fast-forward
+protection. Non-strict required-check freshness is supported only while both
+the PR base and authoritative `main` still equal the explicit `--expected-base`.
+An advanced base reports `BASE_STALE=true`, refuses the merge, and never rebases
+automatically. Strict freshness also remains compatible, but this tool never
+changes repository rulesets.
 It invokes a normal merge with `--match-head-commit`; there is no admin or
 bypass path. After the attempt it binds the PR's actual `mergeCommit.oid` to
 authoritative `main`, verifies its parents are the health-checked main and exact

@@ -240,7 +240,7 @@ class GithubClient:
                 "--repo",
                 EXPECTED_REPOSITORY,
                 "--json",
-                "number,state,headRefOid,baseRefName,baseRefOid,statusCheckRollup,mergeCommit,url",
+                "number,state,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus,statusCheckRollup,mergeCommit,url",
             ),
             "PR lookup",
             timeout=timeout,
@@ -551,7 +551,12 @@ def protection_is_effective(detail: Mapping[str, Any] | None) -> bool:
     types = {rule.get("type") for rule in rules}
     if "merge_queue" in types:
         return False
-    if not {"pull_request", "non_fast_forward", "required_status_checks"}.issubset(types):
+    if not {
+        "deletion",
+        "pull_request",
+        "non_fast_forward",
+        "required_status_checks",
+    }.issubset(types):
         return False
     status_rule = next(
         (rule for rule in rules if rule.get("type") == "required_status_checks"), {}
@@ -564,22 +569,15 @@ def protection_is_effective(detail: Mapping[str, Any] | None) -> bool:
 
 
 def protection_supports_safe_merge(detail: Mapping[str, Any] | None) -> bool:
-    """Require GitHub to enforce base freshness atomically at merge dispatch."""
+    """Accept active no-bypass protection; exact-base freshness is checked separately."""
 
-    if not protection_is_effective(detail):
-        return False
-    rules = detail.get("rules") or []
-    status_rule = next(
-        (rule for rule in rules if rule.get("type") == "required_status_checks"), {}
-    )
-    parameters = status_rule.get("parameters", {})
-    return parameters.get("strict_required_status_checks_policy") is True
+    return protection_is_effective(detail)
 
 
 def next_merge_allowed(
     main_ci: str, protection: Mapping[str, Any] | None
 ) -> bool:
-    """Combine prior-main health and atomic protected-merge preconditions."""
+    """Combine prior-main health and repository protection preconditions."""
 
     return main_ci == "PASS" and protection_supports_safe_merge(protection)
 
@@ -588,6 +586,7 @@ def validate_merge_preconditions(
     pr: Mapping[str, Any],
     expected_head: str,
     *,
+    expected_base: str,
     current_main: str,
     repository_ok: bool,
     protection_ok: bool,
@@ -608,8 +607,14 @@ def validate_merge_preconditions(
         errors.append("PR_NOT_OPEN")
     if pr.get("baseRefName") != "main":
         errors.append("WRONG_BASE")
-    if str(pr.get("baseRefOid") or "").lower() != current_main:
-        errors.append("STALE_BASE")
+    pr_base = str(pr.get("baseRefOid") or "").lower()
+    if pr_base != expected_base or current_main != expected_base:
+        errors.append("BASE_STALE")
+    if (
+        str(pr.get("mergeable") or "").upper() != "MERGEABLE"
+        or str(pr.get("mergeStateStatus") or "").upper() != "CLEAN"
+    ):
+        errors.append("PR_NOT_MERGEABLE")
     if check_state(find_ci_gate(pr)) != "PASS":
         errors.append("CI_GATE_NOT_PASS")
     if not protection_ok:
@@ -977,14 +982,27 @@ def command_health(args: argparse.Namespace) -> int:
 
     prs = client.open_prs(branch)
     pr = prs[0] if len(prs) == 1 else None
+    merge_ready = False
     if pr is not None:
         detailed_pr = client.pr_view(int(pr["number"]))
+        merge_ready = (
+            repository.clean()
+            and str(detailed_pr.get("state") or "").upper() == "OPEN"
+            and str(detailed_pr.get("headRefOid") or "").lower() == head
+            and detailed_pr.get("baseRefName") == "main"
+            and str(detailed_pr.get("baseRefOid") or "").lower() == origin_main
+            and str(detailed_pr.get("mergeable") or "").upper() == "MERGEABLE"
+            and str(detailed_pr.get("mergeStateStatus") or "").upper() == "CLEAN"
+            and check_state(find_ci_gate(detailed_pr)) == "PASS"
+        )
         fields.update(
             {
                 "OPEN_PR": pr["number"],
                 "PR_HEAD": pr.get("headRefOid") or "N/A",
                 "PR_STATE": pr.get("state") or "UNKNOWN",
                 "CI_GATE": check_state(find_ci_gate(detailed_pr)),
+                "BASE_STALE": str(detailed_pr.get("baseRefOid") or "").lower()
+                != origin_main,
             }
         )
     else:
@@ -1006,7 +1024,9 @@ def command_health(args: argparse.Namespace) -> int:
     fields["SAFE_MERGE_PROTECTION"] = (
         "PASS" if safe_merge_protection else "FAIL"
     )
-    fields["NEXT_MERGE_ALLOWED"] = next_merge_allowed(main_health, protection)
+    fields["NEXT_MERGE_ALLOWED"] = (
+        merge_ready and next_merge_allowed(main_health, protection)
+    )
     _emit(fields)
     return 0
 
@@ -1062,6 +1082,7 @@ def command_wait_pr(args: argparse.Namespace) -> int:
 
 def command_merge(args: argparse.Namespace) -> int:
     expected_head = _validate_sha(args.expected_head, "expected head")
+    expected_base = _validate_sha(args.expected_base, "expected base")
     repository = Repository(REPO_ROOT)
     repository.assert_identity()
     client = GithubClient(REPO_ROOT)
@@ -1076,6 +1097,7 @@ def command_merge(args: argparse.Namespace) -> int:
     errors = validate_merge_preconditions(
         pr,
         expected_head,
+        expected_base=expected_base,
         current_main=current_main,
         repository_ok=True,
         protection_ok=protection_ok,
@@ -1084,13 +1106,45 @@ def command_merge(args: argparse.Namespace) -> int:
         worktree_clean=repository.clean(),
     )
     if errors:
-        _emit({"MERGE": "REFUSED", "REFUSAL_REASONS": ",".join(errors)})
+        _emit(
+            {
+                "MERGE": "REFUSED",
+                "BASE_STALE": "BASE_STALE" in errors,
+                "REFUSAL_REASONS": ",".join(errors),
+            }
+        )
         return 1
     if repository.head().lower() != expected_head or not repository.clean():
         _emit(
             {
                 "MERGE": "REFUSED",
                 "REFUSAL_REASONS": "CHECKED_OUT_CANDIDATE_CHANGED",
+            }
+        )
+        return 1
+    # Refresh every mutable remote precondition immediately before dispatch.
+    # The final remote read is authoritative main, minimizing the non-strict
+    # ruleset's base-staleness window without mutating or rebasing the PR.
+    pr = client.pr_view(args.pr)
+    protection_ok = protection_supports_safe_merge(client.protection())
+    current_main = client.main_sha()
+    errors = validate_merge_preconditions(
+        pr,
+        expected_head,
+        expected_base=expected_base,
+        current_main=current_main,
+        repository_ok=True,
+        protection_ok=protection_ok,
+        current_main_health=current_health,
+        checked_out_head=repository.head(),
+        worktree_clean=repository.clean(),
+    )
+    if errors:
+        _emit(
+            {
+                "MERGE": "REFUSED",
+                "BASE_STALE": "BASE_STALE" in errors,
+                "REFUSAL_REASONS": ",".join(errors),
             }
         )
         return 1
@@ -1264,6 +1318,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge = subparsers.add_parser("merge", help="merge through protected GitHub PR flow")
     merge.add_argument("--pr", type=int, required=True)
     merge.add_argument("--expected-head", required=True)
+    merge.add_argument("--expected-base", required=True)
     merge.set_defaults(handler=command_merge)
 
     wait_main = subparsers.add_parser("wait-main", help="wait for exact main CI health")
