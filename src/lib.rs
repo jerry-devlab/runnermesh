@@ -10,8 +10,10 @@ mod credential;
 mod github_transport;
 mod h1_live;
 mod host;
+mod installation;
 mod ipc;
 mod model;
+mod package;
 mod policy;
 mod probe;
 mod process_snapshot;
@@ -20,6 +22,7 @@ mod runner_observer;
 mod runtime;
 mod supervisor;
 mod tray;
+mod update;
 #[cfg(windows)]
 mod windows_github;
 #[cfg(windows)]
@@ -70,11 +73,20 @@ pub use host::{
     RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
     RecoverySource, RecoveryTrigger, SessionState, WindowsHostSource,
 };
+pub use installation::{
+    AutostartBackend, AutostartEntry, InstallError, InstallReceipt, Installation,
+    InstallationState, SandboxAutostartBackend, UninstallReceipt, VersionManifest,
+};
 pub use ipc::{
     IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResponseBody,
     IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
 };
 pub use model::{NodeState, ParseUserModeError, UserMode};
+pub use package::{
+    PackageDoctor, PackageDoctorReport, PackageError, PackageInput, PackageManifest,
+    PackageProvenance, PackageReceipt, PackageVerifier, ProductizationCheck,
+    ProductizationCheckStatus, WINDOWS_X64_TARGET,
+};
 pub use policy::decide_admission;
 pub use probe::{
     ActivityWorkloadProbe, ProbeReadError, ProcessListProbe, ProcessSource, SteamAppIdSource,
@@ -109,6 +121,10 @@ pub use supervisor::{
 pub use tray::{
     localized_menu_hint, NativeTrayEventLoop, TrayActionResult, TrayError, TrayHelpKey,
     TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
+};
+pub use update::{
+    payload_sha256, HealthObservation, ReconcileReceipt, SafePointObservation, UpdateCoordinator,
+    UpdateError, UpdateOutcome, UpdatePhase, UpdateReceipt, UpdateRequest, UpdateTransaction,
 };
 #[cfg(windows)]
 pub use windows_github::{
