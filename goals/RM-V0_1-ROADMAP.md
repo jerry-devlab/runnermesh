@@ -70,17 +70,23 @@ selective-extraction assets for the productization preparation Goal.
 
 Goal: `RM-V0_1-P0-SUPERVISED-BASELINE-RESTORE-001`.
 
-This is a recovery-only Owner transaction for one historical incident, not a
-product-development or qualification Goal. It uses:
+This is a current-state reconciliation Owner transaction for one historical
+incident, not a product-development or qualification Goal. It uses:
 
 1. fresh read-only exact-scope preflight;
 2. Owner presence and explicit authorization;
-3. the minimum exact recovery action;
+3. the minimum exact action selected by current invariants, possibly no action;
 4. independent postverification of the known-good baseline;
 5. stop.
 
 It does not continue into H1 and does not introduce another proliferating
 recovery-transaction family. Historical R1/R2/R3 details remain private.
+
+Orphan absence is the desired cleanup postcondition, not a reason to reproduce
+the historical orphan. Durable runner/service/ownership bindings may survive
+preparation, while PID, creation time, session, and process-instance evidence
+have `LIVE_PROCESS_EVIDENCE_TTL=SAME_OWNER_TRANSACTION_ONLY` and are reacquired
+immediately before any mutation.
 
 ## 3. H1 live adapters and readiness
 

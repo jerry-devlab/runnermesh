@@ -160,6 +160,52 @@ unchanged history.  Non-binding scope guidance is:
 These are not automatic PASS timeouts.  Once sufficient evidence exists, stop
 expanding scope merely to consume more time or tokens.
 
+## Blocker Policy v2
+
+1. **Separate diagnosis from acceptance.** A normal read-only diagnostic
+   process may explain a blocker with `EVIDENCE_SCOPE=DIAGNOSTIC_ONLY`; it never
+   claims independent acceptance. Independent acceptance is required only when
+   the active risk policy above calls for it.
+2. **Gate current invariants, not obsolete intervention paths.** A satisfied
+   current safety or postcondition invariant is a no-op success for that
+   subgoal. Do not recreate an old failure state merely to replay its cleanup.
+3. **Separate durable and volatile identity.** Runner scope/registration,
+   runner home, service configuration/security, work root, execution identity,
+   and ownership bindings may be frozen. PID, creation time, process handle,
+   session, and a specific Listener instance are volatile and have
+   `LIVE_PROCESS_EVIDENCE_TTL=SAME_OWNER_TRANSACTION_ONLY`; reacquire and
+   revalidate them immediately before mutation.
+4. **Owner control flow is not product failure.** `WAITING_FOR_OWNER` is
+   resumable and `OWNER_CANCELED` ends only that authorization attempt. Both
+   require fresh transaction evidence before a later mutation.
+5. **Audit admission failure is infrastructure evidence.** Record
+   `STOP_REASON=AUDIT_ADMISSION_FAILED` and, when applicable,
+   `INDEPENDENT_ACCEPTANCE_PENDING=true`; it is not proof that the audited
+   artifact failed and does not prevent diagnostic work.
+6. **Latch one unchanged blocker.** After sufficient evidence, set
+   `BLOCKER_LATCHED=true` and retry only after relevant source, evidence, trust,
+   Owner action, live state, or external prerequisites change.
+7. **Respect accepted Owner policy.** An unchanged generic review may record a
+   preference but cannot reopen an explicitly accepted policy decision as a
+   blocker without new technical evidence.
+8. **Bound retries and corrections.** Use the existing three materially
+   distinct deterministic repair-cycle limit and one live Owner transaction
+   per authorization. Review the focused correction delta instead of
+   automatically re-auditing unchanged history.
+
+Before an expensive independent review, use the admission-only preflight:
+
+```text
+conda run -n base python tools/dev/auditor_preflight.py --profile jerry-auditor
+```
+
+The preflight starts a fresh profile, admits exactly one harmless PowerShell
+child, verifies the configured read-only/never contract, and always reports
+`AUDIT_ACCEPTANCE_PASS=false`. On Windows it removes Microsoft Store
+`WindowsApps` executable resolution only from that child environment so the
+Codex restricted-token sandbox selects the inbox `powershell.exe`; it does not
+change the global profile, sandbox implementation, ACLs, or Windows policy.
+
 ## Repository automation
 
 Run the common local gate from a settled commit with:

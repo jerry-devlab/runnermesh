@@ -247,7 +247,7 @@ copied into public code, PRs, logs, or the execution ledger.
 ## Current live disposition
 
 The accepted source can establish a synthetic proof, ready adapter layer, and
-ready source transaction family, but the frozen historical P0 incident and
+ready source transaction family, but the unclosed P0 baseline prerequisite and
 absent Owner trust configuration keep live H1 fail-closed:
 
 ```text
