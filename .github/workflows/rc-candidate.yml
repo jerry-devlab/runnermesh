@@ -47,6 +47,22 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/runnermesh-build
         run: cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+      - name: Execute the installed RC runtime before packaging
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/runnermesh-build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binaryRoot = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP ("runnermesh-rc-smoke-" + [guid]::NewGuid().ToString('N'))
+          cargo run --locked --example g15r-rc-smoke -- `
+            (Join-Path $binaryRoot 'runnermesh-agent.exe') `
+            (Join-Path $binaryRoot 'runnermesh.exe') `
+            (Join-Path $PWD 'resources\runnermesh-agent.manifest') `
+            $smokeRoot `
+            $env:RUNNERMESH_BUILD_COMMIT `
+            $env:RUNNERMESH_BUILD_CHANNEL
+          if ($LASTEXITCODE -ne 0) { throw 'installed RC runtime smoke failed' }
       - name: Create and independently read back the immutable package
         id: package
         shell: pwsh
