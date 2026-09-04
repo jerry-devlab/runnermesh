@@ -21,6 +21,7 @@ mod process_snapshot;
 mod qualification;
 mod runner_observer;
 mod runtime;
+mod runtime_binding;
 mod supervisor;
 mod tray;
 mod update;
@@ -118,6 +119,7 @@ pub use runtime::{
     ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
     SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
 };
+pub use runtime_binding::{InstalledRuntimeBinding, INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION};
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
     SupervisorOutcome, SupervisorRefusal, SupervisorRequest, SyntheticProcessBackend,

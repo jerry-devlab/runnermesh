@@ -29,7 +29,9 @@ const BIN_DIR: &str = "bin";
 const CONFIG_DIR: &str = "config";
 const STATE_DIR: &str = "state";
 const LOGS_DIR: &str = "logs";
-const STABLE_AGENT_ENTRY: &str = "runnermesh-agent.cmd";
+const STABLE_AGENT_ENTRY: &str = "runnermesh-agent.exe";
+const RUNTIME_BINDING_FILE: &str = "runtime-binding.json";
+const AGENT_CONFIG_FILE: &str = "agent.json";
 const INSTALL_TRANSACTION_FILE: &str = "installation-transaction.json";
 const INSTALL_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const UNINSTALL_TRANSACTION_FILE: &str = "uninstall-transaction.json";
@@ -64,6 +66,18 @@ impl Installation {
 
     pub(crate) fn state_dir(&self) -> PathBuf {
         self.root.join(STATE_DIR)
+    }
+
+    pub(crate) fn agent_state_dir(&self) -> PathBuf {
+        self.state_dir().join("agent")
+    }
+
+    pub(crate) fn agent_config_path(&self) -> PathBuf {
+        self.root.join(CONFIG_DIR).join(AGENT_CONFIG_FILE)
+    }
+
+    pub fn runtime_binding_path(&self) -> PathBuf {
+        self.root.join(CONFIG_DIR).join(RUNTIME_BINDING_FILE)
     }
 
     /// Copy a verified payload into an immutable slot. Repeating identical
@@ -222,6 +236,55 @@ impl Installation {
             return Err(InstallError::OwnershipDrift(path));
         }
         Ok(path)
+    }
+
+    /// Reads the optional non-secret runtime binding from persistent config.
+    /// Absence is a valid unconfigured state; malformed or unsafe content
+    /// fails closed.
+    pub fn runtime_binding(&self) -> Result<Option<crate::InstalledRuntimeBinding>, InstallError> {
+        let _ = self.state()?;
+        let path = self.runtime_binding_path();
+        let Some(bytes) = read_optional_owned_file(&path)? else {
+            return Ok(None);
+        };
+        if bytes.len() > 128 * 1024 {
+            return Err(InstallError::DamagedRuntimeBinding);
+        }
+        let binding = serde_json::from_slice::<crate::InstalledRuntimeBinding>(&bytes)
+            .map_err(|_| InstallError::DamagedRuntimeBinding)?;
+        if !binding.is_valid() {
+            return Err(InstallError::DamagedRuntimeBinding);
+        }
+        Ok(Some(binding))
+    }
+
+    /// Establishes the exact installed-runtime binding once. Repeating the
+    /// same bytes is idempotent; a different existing binding is an explicit
+    /// trust drift and is never overwritten implicitly.
+    pub fn configure_runtime_binding(
+        &self,
+        binding: &crate::InstalledRuntimeBinding,
+    ) -> Result<bool, InstallError> {
+        if !binding.is_valid() {
+            return Err(InstallError::DamagedRuntimeBinding);
+        }
+        let _ = self.state()?;
+        let guards = self.guard_owned_directories()?;
+        let path = self.runtime_binding_path();
+        let bytes =
+            serde_json::to_vec_pretty(binding).map_err(|_| InstallError::DamagedRuntimeBinding)?;
+        match read_optional_owned_file(&path)? {
+            Some(existing) if existing == bytes => return Ok(false),
+            Some(_) => return Err(InstallError::RuntimeBindingDrift),
+            None => {}
+        }
+        guards.verify()?;
+        atomic_write(&path, &bytes).map_err(InstallError::io)?;
+        guards.verify()?;
+        if read_optional_owned_file(&path)?.as_deref() != Some(bytes.as_slice()) {
+            return Err(InstallError::RuntimeBindingDrift);
+        }
+        Ok(true)
     }
 
     pub(crate) fn installed_payload_sha256(
@@ -708,20 +771,12 @@ impl Installation {
     ) -> Result<(), InstallError> {
         let previous = activation_artifacts(&transaction.previous)?;
         let desired = activation_artifacts(&transaction.desired)?;
-        for (path, previous_bytes, desired_bytes) in [
-            (
-                self.root.join(CURRENT_FILE),
-                previous.as_ref().map(|value| value.0.as_slice()),
-                desired.as_ref().map(|value| value.0.as_slice()),
-            ),
-            (
-                self.stable_agent_entry(),
-                previous.as_ref().map(|value| value.1.as_bytes()),
-                desired.as_ref().map(|value| value.1.as_bytes()),
-            ),
-        ] {
+        let path = self.root.join(CURRENT_FILE);
+        {
+            let previous_bytes = previous.as_ref().map(|value| value.0.as_slice());
+            let desired_bytes = desired.as_ref().map(|value| value.0.as_slice());
             if is_reparse_point(&path)? {
-                return Err(InstallError::OwnershipDrift(path));
+                return Err(InstallError::OwnershipDrift(path.clone()));
             }
             let observed = match fs::read(&path) {
                 Ok(bytes) => Some(bytes),
@@ -735,6 +790,25 @@ impl Installation {
             if !known {
                 return Err(InstallError::OwnershipDrift(path));
             }
+        }
+        let path = self.stable_agent_entry();
+        if is_reparse_point(&path)? {
+            return Err(InstallError::OwnershipDrift(path));
+        }
+        let observed = match fs::read(&path) {
+            Ok(bytes) => Some(sha256_bytes(&bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(InstallError::io(error)),
+        };
+        let known = match observed.as_deref() {
+            Some(digest) => {
+                previous.as_ref().map(|value| value.1.as_str()) == Some(digest)
+                    || desired.as_ref().map(|value| value.1.as_str()) == Some(digest)
+            }
+            None => previous.is_none() || desired.is_none(),
+        };
+        if !known {
+            return Err(InstallError::OwnershipDrift(path));
         }
         Ok(())
     }
@@ -887,8 +961,10 @@ impl Installation {
                     return Err(InstallError::OwnershipDrift(current_path));
                 }
                 let stable = self.stable_agent_entry();
-                if fs::read_to_string(&stable).map_err(InstallError::io)?
-                    != stable_entry_contents(version)
+                if !stable.is_file()
+                    || is_reparse_point(&stable)?
+                    || sha256_file(&stable).map_err(InstallError::io)?
+                        != active_agent_digest(state, version)?
                 {
                     return Err(InstallError::OwnershipDrift(stable));
                 }
@@ -922,11 +998,9 @@ impl Installation {
             .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?,
         )
         .map_err(InstallError::io)?;
-        atomic_write(
-            &self.stable_agent_entry(),
-            stable_entry_contents(version).as_bytes(),
-        )
-        .map_err(InstallError::io)
+        let active_agent = self.active_agent_path_without_state(version)?;
+        let bytes = fs::read(active_agent).map_err(InstallError::io)?;
+        atomic_write(&self.stable_agent_entry(), &bytes).map_err(InstallError::io)
     }
 
     fn write_state(&self, state: &InstallationState) -> Result<(), InstallError> {
@@ -1127,9 +1201,10 @@ impl AutostartBackend for SandboxAutostartBackend {
 
 /// Production-capable Windows user-session backend. The caller supplies the
 /// exact current-user Startup directory; this type never discovers or mutates
-/// any broader startup scope. Creation is create-new only, and removal verifies
-/// bytes and deletes the same locked file handle so concurrent replacement
-/// cannot turn an owned delete into a foreign delete.
+/// any broader startup scope. The exact VBS entry launches the GUI-subsystem
+/// stable Agent without a visible console. Creation is create-new only, and
+/// removal verifies bytes and deletes the same locked file handle so concurrent
+/// replacement cannot turn an owned delete into a foreign delete.
 #[cfg(windows)]
 #[derive(Clone, Debug)]
 pub struct WindowsUserStartupBackend {
@@ -1179,7 +1254,7 @@ impl WindowsUserStartupBackend {
 
     pub fn new(startup_directory: impl Into<PathBuf>) -> Self {
         Self {
-            path: startup_directory.into().join("RunnerMesh.cmd"),
+            path: startup_directory.into().join("RunnerMesh.vbs"),
             lock: Arc::new(Mutex::new(())),
         }
     }
@@ -1318,9 +1393,9 @@ fn windows_startup_entry_bytes(entry: &AutostartEntry) -> io::Result<Vec<u8>> {
             "invalid RunnerMesh startup entry",
         ));
     }
+    let command = entry.command.replace('"', "\"\"");
     Ok(format!(
-        "@echo off\r\nrem RunnerMesh owner={AUTOSTART_OWNER}\r\ncall {}\r\n",
-        entry.command
+        "' RunnerMesh owner={AUTOSTART_OWNER}\r\nCreateObject(\"WScript.Shell\").Run \"{command}\", 0, False\r\n"
     )
     .into_bytes())
 }
@@ -1329,16 +1404,24 @@ fn windows_startup_entry_bytes(entry: &AutostartEntry) -> io::Result<Vec<u8>> {
 fn parse_windows_startup_entry(bytes: &[u8]) -> io::Result<AutostartEntry> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "startup entry is not UTF-8"))?;
-    let prefix = format!("@echo off\r\nrem RunnerMesh owner={AUTOSTART_OWNER}\r\ncall ");
-    let command = text
+    let prefix =
+        format!("' RunnerMesh owner={AUTOSTART_OWNER}\r\nCreateObject(\"WScript.Shell\").Run \"");
+    let encoded = text
         .strip_prefix(&prefix)
-        .and_then(|value| value.strip_suffix("\r\n"))
+        .and_then(|value| value.strip_suffix("\", 0, False\r\n"))
         .filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "startup entry is foreign"))?;
-    Ok(AutostartEntry {
+    let entry = AutostartEntry {
         owner: AUTOSTART_OWNER.to_owned(),
-        command: command.to_owned(),
-    })
+        command: encoded.replace("\"\"", "\""),
+    };
+    if windows_startup_entry_bytes(&entry)? != bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "startup entry is not canonical",
+        ));
+    }
+    Ok(entry)
 }
 
 #[cfg(windows)]
@@ -1434,6 +1517,8 @@ pub enum InstallError {
     UnreconciledTransaction,
     UninstallInProgress,
     PayloadChecksumMismatch { expected: String, actual: String },
+    DamagedRuntimeBinding,
+    RuntimeBindingDrift,
     RecoveryFailed(String),
 }
 
@@ -1480,6 +1565,12 @@ impl fmt::Display for InstallError {
                 formatter,
                 "payload checksum mismatch: expected {expected}, got {actual}"
             ),
+            Self::DamagedRuntimeBinding => {
+                formatter.write_str("installed runtime binding is damaged or invalid")
+            }
+            Self::RuntimeBindingDrift => {
+                formatter.write_str("installed runtime binding differs from the accepted binding")
+            }
             Self::RecoveryFailed(error) => {
                 write!(formatter, "installation recovery failed: {error}")
             }
@@ -1669,10 +1760,13 @@ fn verify_bin_root(root: &Path, state: &InstallationState) -> Result<(), Install
         return Err(InstallError::OwnershipDrift(root.to_path_buf()));
     }
     if let Some(active) = state.active_version.as_deref() {
-        if fs::read_to_string(root.join(STABLE_AGENT_ENTRY)).map_err(InstallError::io)?
-            != stable_entry_contents(active)
+        let stable = root.join(STABLE_AGENT_ENTRY);
+        if !stable.is_file()
+            || is_reparse_point(&stable)?
+            || sha256_file(&stable).map_err(InstallError::io)?
+                != active_agent_digest(state, active)?
         {
-            return Err(InstallError::OwnershipDrift(root.join(STABLE_AGENT_ENTRY)));
+            return Err(InstallError::OwnershipDrift(stable));
         }
     }
     Ok(())
@@ -1872,8 +1966,15 @@ pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn stable_entry_contents(version: &str) -> String {
-    format!("@echo off\r\n\"%~dp0..\\{VERSIONS_DIR}\\{version}\\runnermesh-agent.exe\" %*\r\n")
+fn active_agent_digest(state: &InstallationState, version: &str) -> Result<String, InstallError> {
+    state
+        .versions
+        .get(version)
+        .and_then(|manifest| manifest.files.get("runnermesh-agent.exe"))
+        .cloned()
+        .ok_or_else(|| {
+            InstallError::DamagedMetadata("active Agent is absent from manifest".to_owned())
+        })
 }
 
 fn activation_artifacts(
@@ -1892,7 +1993,7 @@ fn activation_artifacts(
         version: version.to_owned(),
     })
     .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
-    Ok(Some((current, stable_entry_contents(version))))
+    Ok(Some((current, active_agent_digest(state, version)?)))
 }
 
 /// Persist a complete replacement without deleting the destination first.
@@ -2237,6 +2338,32 @@ mod tests {
         payload
     }
 
+    fn runtime_binding(root: &Path) -> crate::InstalledRuntimeBinding {
+        let scope = crate::RegistrationScope::Repository {
+            owner: "fixture-owner".to_owned(),
+            repository: "fixture-repository".to_owned(),
+        };
+        crate::InstalledRuntimeBinding::new(
+            crate::AdmissionBinding::new(
+                scope.clone(),
+                42,
+                "fixture-runner",
+                crate::CredentialReference::new("windows-credential-manager", "fixture-reference")
+                    .unwrap(),
+                Some(crate::ReservedLabelOwnership::for_runner(scope, 42)),
+            )
+            .unwrap(),
+            crate::ExactLocalRunnerBinding::new(
+                root.join("runner"),
+                root.join("work"),
+                crate::OpaqueIdentityReference::new("windows-user", "fixture-reference").unwrap(),
+            )
+            .unwrap(),
+            vec!["fixture.exe".to_owned()],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn immutable_slots_and_stable_autostart_are_sandboxed() {
         let root = root("stable");
@@ -2257,6 +2384,41 @@ mod tests {
             .unwrap()
             .command
             .contains("target\\debug"));
+        assert_eq!(
+            fs::read(install.stable_agent_entry()).unwrap(),
+            fs::read(payload.join("runnermesh-agent.exe")).unwrap()
+        );
+        assert_eq!(
+            install
+                .stable_agent_entry()
+                .extension()
+                .and_then(|value| value.to_str()),
+            Some("exe")
+        );
+    }
+
+    #[test]
+    fn runtime_binding_is_idempotent_and_drift_safe_outside_immutable_slots() {
+        let root = root("runtime-binding");
+        let install = Installation::new(root.join("installed"));
+        install.install("0.1.0", &payload(&root, "one")).unwrap();
+        let binding = runtime_binding(&root);
+        assert!(install.configure_runtime_binding(&binding).unwrap());
+        assert!(!install.configure_runtime_binding(&binding).unwrap());
+        assert!(install.runtime_binding().unwrap().unwrap() == binding);
+
+        let mut drift = binding;
+        drift.process_probe_executables = vec!["other.exe".to_owned()];
+        assert_eq!(
+            install.configure_runtime_binding(&drift),
+            Err(InstallError::RuntimeBindingDrift)
+        );
+
+        let receipt = install
+            .uninstall(&SandboxAutostartBackend::new(root.join("autostart.json")))
+            .unwrap();
+        assert!(receipt.foreign_content_preserved);
+        assert!(install.runtime_binding_path().is_file());
     }
 
     #[test]
@@ -2518,6 +2680,13 @@ mod tests {
         assert_eq!(
             backend.read().unwrap().unwrap(),
             install.expected_autostart_entry()
+        );
+        let startup_source = fs::read_to_string(backend.path()).unwrap();
+        assert!(startup_source.contains("WScript.Shell"));
+        assert!(!startup_source.to_ascii_lowercase().contains("cmd.exe"));
+        assert_eq!(
+            backend.path().extension().and_then(|value| value.to_str()),
+            Some("vbs")
         );
         assert!(install.disable_autostart(&backend).unwrap());
         assert!(startup.join("OtherApp.cmd").is_file());

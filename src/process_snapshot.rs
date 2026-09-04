@@ -127,9 +127,77 @@ pub(crate) fn executable_images() -> Result<Vec<ProcessImage>, ProcessSnapshotEr
     }
 }
 
+/// Compares the user SID of one already-observed process with the current
+/// Agent process. This is used only for the exact configured runner images;
+/// it does not enumerate identities or disclose SID text.
+#[cfg(windows)]
+pub(crate) fn process_user_matches_current(process_id: u32) -> Result<bool, ProcessSnapshotError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
+        System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+
+    struct OwnedHandle(HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    fn token_user_buffer(token: HANDLE) -> Result<Vec<u8>, ProcessSnapshotError> {
+        let mut required = 0_u32;
+        unsafe {
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+        }
+        if required == 0 {
+            return Err(ProcessSnapshotError::Failed);
+        }
+        let mut buffer = vec![0_u8; required as usize];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        } == 0
+        {
+            return Err(ProcessSnapshotError::Failed);
+        }
+        Ok(buffer)
+    }
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return Err(ProcessSnapshotError::Unavailable);
+    }
+    let process = OwnedHandle(process);
+    let mut process_token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut process_token) } == 0 {
+        return Err(ProcessSnapshotError::Unavailable);
+    }
+    let process_token = OwnedHandle(process_token);
+    let mut current_token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current_token) } == 0 {
+        return Err(ProcessSnapshotError::Failed);
+    }
+    let current_token = OwnedHandle(current_token);
+    let process_user = token_user_buffer(process_token.0)?;
+    let current_user = token_user_buffer(current_token.0)?;
+    let process_sid = unsafe { (*(process_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    let current_sid = unsafe { (*(current_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    Ok(unsafe { EqualSid(process_sid, current_sid) } != 0)
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use super::executable_names;
+    use super::{executable_names, process_user_matches_current};
 
     #[test]
     fn native_snapshot_contains_the_current_test_process() {
@@ -146,6 +214,11 @@ mod windows_tests {
                 .any(|name| name.eq_ignore_ascii_case(current_name)),
             "native snapshot must include the current test process"
         );
+    }
+
+    #[test]
+    fn current_process_identity_matches_without_serializing_a_sid() {
+        assert!(process_user_matches_current(std::process::id()).unwrap());
     }
 }
 

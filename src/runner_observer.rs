@@ -1,4 +1,10 @@
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[cfg(windows)]
+use serde::Deserialize;
 
 use crate::{LinkKind, LinkSnapshot, LinkState, ReasonCode, RunnerPhase};
 
@@ -93,12 +99,33 @@ impl<S: RunnerSource> OfficialRunnerObserver<S> {
 #[derive(Clone, Debug)]
 pub struct WindowsRunnerSource {
     runner_home: PathBuf,
+    exact_binding: Option<ExactRuntimeBinding>,
+}
+
+#[derive(Clone, Debug)]
+struct ExactRuntimeBinding {
+    work_root: PathBuf,
+    runner_name: String,
 }
 
 impl WindowsRunnerSource {
     pub fn new(runner_home: impl Into<PathBuf>) -> Self {
         Self {
             runner_home: runner_home.into(),
+            exact_binding: None,
+        }
+    }
+
+    pub(crate) fn for_exact_binding(
+        local: &crate::ExactLocalRunnerBinding,
+        runner_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            runner_home: local.runner_home.clone(),
+            exact_binding: Some(ExactRuntimeBinding {
+                work_root: local.work_root.clone(),
+                runner_name: runner_name.into(),
+            }),
         }
     }
 }
@@ -107,17 +134,46 @@ impl RunnerSource for WindowsRunnerSource {
     fn collect(&self) -> RunnerLocalEvidence {
         let home_exists = self.runner_home.is_dir();
         let metadata_present = self.runner_home.join(".runner").is_file();
-        let (listener_present, worker_present) = exact_runner_process_presence(&self.runner_home);
+        let process = exact_runner_process_observation(&self.runner_home);
+        let (execution_identity, work_root) = match &self.exact_binding {
+            Some(binding) => {
+                let metadata = observe_bound_metadata(
+                    &self.runner_home,
+                    &binding.work_root,
+                    &binding.runner_name,
+                );
+                let execution_identity = match (process.execution_identity, metadata) {
+                    (_, BoundMetadataObservation::MismatchName) => {
+                        ExecutionIdentityEvidence::Mismatch
+                    }
+                    (ExecutionIdentityEvidence::Verified, BoundMetadataObservation::Verified) => {
+                        ExecutionIdentityEvidence::Verified
+                    }
+                    (ExecutionIdentityEvidence::Mismatch, _) => ExecutionIdentityEvidence::Mismatch,
+                    _ => ExecutionIdentityEvidence::Unknown,
+                };
+                let work_root = match metadata {
+                    BoundMetadataObservation::MismatchWorkRoot => OwnershipEvidence::NotOwned,
+                    BoundMetadataObservation::Verified => {
+                        current_user_owns_runner_paths(&self.runner_home, &binding.work_root)
+                    }
+                    _ => OwnershipEvidence::Unknown,
+                };
+                (execution_identity, work_root)
+            }
+            None => (
+                ExecutionIdentityEvidence::Unknown,
+                OwnershipEvidence::Unknown,
+            ),
+        };
 
         RunnerLocalEvidence {
             runner_home: home_exists.then(|| self.runner_home.clone()),
             metadata_present,
-            listener_present,
-            worker_present,
-            execution_identity: ExecutionIdentityEvidence::Unknown,
-            // Directory existence proves neither ownership nor a safe work-root
-            // adoption claim; G09/G10 keep that distinction explicit.
-            work_root: OwnershipEvidence::Unknown,
+            listener_present: process.listener_present,
+            worker_present: process.worker_present,
+            execution_identity,
+            work_root,
             connection: if metadata_present {
                 ConnectionEvidence::Insufficient
             } else {
@@ -127,10 +183,235 @@ impl RunnerSource for WindowsRunnerSource {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ExactProcessObservation {
+    listener_present: bool,
+    worker_present: bool,
+    execution_identity: ExecutionIdentityEvidence,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundMetadataObservation {
+    Verified,
+    MismatchName,
+    MismatchWorkRoot,
+    Unknown,
+}
+
 #[cfg(windows)]
-fn exact_runner_process_presence(runner_home: &std::path::Path) -> (bool, bool) {
+#[derive(Deserialize)]
+struct OfficialRunnerMetadata {
+    #[serde(rename = "agentName")]
+    agent_name: String,
+    #[serde(rename = "workFolder")]
+    work_folder: String,
+}
+
+#[cfg(windows)]
+fn observe_bound_metadata(
+    runner_home: &Path,
+    expected_work_root: &Path,
+    expected_runner_name: &str,
+) -> BoundMetadataObservation {
+    use std::os::windows::fs::MetadataExt;
+
+    let path = runner_home.join(".runner");
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return BoundMetadataObservation::Unknown;
+    };
+    if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 || metadata.len() > 128 * 1024
+    {
+        return BoundMetadataObservation::Unknown;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return BoundMetadataObservation::Unknown;
+    };
+    let Ok(metadata) = serde_json::from_slice::<OfficialRunnerMetadata>(&bytes) else {
+        return BoundMetadataObservation::Unknown;
+    };
+    if metadata.agent_name != expected_runner_name {
+        return BoundMetadataObservation::MismatchName;
+    }
+    let configured_work_root = PathBuf::from(metadata.work_folder);
+    let configured_work_root = if configured_work_root.is_absolute() {
+        configured_work_root
+    } else {
+        runner_home.join(configured_work_root)
+    };
+    let (Ok(configured), Ok(expected)) = (
+        configured_work_root.canonicalize(),
+        expected_work_root.canonicalize(),
+    ) else {
+        return BoundMetadataObservation::Unknown;
+    };
+    if !configured
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.to_string_lossy())
+    {
+        return BoundMetadataObservation::MismatchWorkRoot;
+    }
+    BoundMetadataObservation::Verified
+}
+
+#[cfg(not(windows))]
+fn observe_bound_metadata(
+    _runner_home: &Path,
+    _expected_work_root: &Path,
+    _expected_runner_name: &str,
+) -> BoundMetadataObservation {
+    BoundMetadataObservation::Unknown
+}
+
+#[cfg(windows)]
+fn current_user_owns_runner_paths(runner_home: &Path, work_root: &Path) -> OwnershipEvidence {
+    match (
+        current_user_owns_path(runner_home),
+        current_user_owns_path(work_root),
+    ) {
+        (Ok(true), Ok(true)) => OwnershipEvidence::Verified,
+        (Ok(false), _) | (_, Ok(false)) => OwnershipEvidence::NotOwned,
+        _ => OwnershipEvidence::Unknown,
+    }
+}
+
+#[cfg(not(windows))]
+fn current_user_owns_runner_paths(_runner_home: &Path, _work_root: &Path) -> OwnershipEvidence {
+    OwnershipEvidence::Unknown
+}
+
+#[cfg(windows)]
+fn current_user_owns_path(path: &Path) -> Result<bool, ()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE},
+        Security::{
+            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+            EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    struct OwnedHandle(HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+    struct OwnedDescriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for OwnedDescriptor {
+        fn drop(&mut self) {
+            unsafe {
+                LocalFree(self.0.cast());
+            }
+        }
+    }
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS || descriptor.is_null() || owner.is_null() {
+        return Err(());
+    }
+    let _descriptor = OwnedDescriptor(descriptor);
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(());
+    }
+    let token = OwnedHandle(token);
+    let mut required = 0_u32;
+    unsafe {
+        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut required);
+    }
+    if required == 0 {
+        return Err(());
+    }
+    let mut buffer = vec![0_u8; required as usize];
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(());
+    }
+    let current_sid = unsafe { (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    Ok(unsafe { EqualSid(owner, current_sid) } != 0)
+}
+
+#[cfg(windows)]
+fn exact_runner_process_observation(runner_home: &std::path::Path) -> ExactProcessObservation {
     let images = crate::process_snapshot::executable_images().unwrap_or_default();
-    bound_process_presence(runner_home, &images)
+    let (listener_present, worker_present) = bound_process_presence(runner_home, &images);
+    let expected_listener = runner_home.join("bin").join("Runner.Listener.exe");
+    let expected_worker = runner_home.join("bin").join("Runner.Worker.exe");
+    let (Ok(expected_listener), Ok(expected_worker)) = (
+        expected_listener.canonicalize(),
+        expected_worker.canonicalize(),
+    ) else {
+        return ExactProcessObservation {
+            listener_present,
+            worker_present,
+            execution_identity: ExecutionIdentityEvidence::Unknown,
+        };
+    };
+    let mut matched = 0_usize;
+    let mut unknown = false;
+    for image in &images {
+        let Some(path) = image
+            .executable_path
+            .as_ref()
+            .and_then(|path| path.canonicalize().ok())
+        else {
+            continue;
+        };
+        if path != expected_listener && path != expected_worker {
+            continue;
+        }
+        matched += 1;
+        match crate::process_snapshot::process_user_matches_current(image.process_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return ExactProcessObservation {
+                    listener_present,
+                    worker_present,
+                    execution_identity: ExecutionIdentityEvidence::Mismatch,
+                };
+            }
+            Err(_) => unknown = true,
+        }
+    }
+    ExactProcessObservation {
+        listener_present,
+        worker_present,
+        execution_identity: if matched == 0 || unknown {
+            ExecutionIdentityEvidence::Unknown
+        } else {
+            ExecutionIdentityEvidence::Verified
+        },
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -175,8 +456,12 @@ fn bound_process_presence(
 }
 
 #[cfg(not(windows))]
-fn exact_runner_process_presence(_runner_home: &std::path::Path) -> (bool, bool) {
-    (false, false)
+fn exact_runner_process_observation(_runner_home: &std::path::Path) -> ExactProcessObservation {
+    ExactProcessObservation {
+        listener_present: false,
+        worker_present: false,
+        execution_identity: ExecutionIdentityEvidence::Unknown,
+    }
 }
 
 fn derive_phase(evidence: &RunnerLocalEvidence) -> RunnerPhase {
@@ -227,6 +512,9 @@ mod tests {
     };
     use crate::{LinkState, RunnerPhase};
 
+    #[cfg(windows)]
+    use crate::{ExactLocalRunnerBinding, OpaqueIdentityReference};
+
     #[test]
     fn unrelated_same_name_process_images_remain_outside_the_exact_runner_home() {
         let root = temporary_root();
@@ -255,6 +543,57 @@ mod tests {
             (false, false)
         );
         assert_eq!(images[0].process_id, 10);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_runtime_binding_verifies_metadata_and_current_user_owned_paths() {
+        let root = temporary_root();
+        let runner_home = root.join("runner");
+        let work_root = runner_home.join("_work");
+        fs::create_dir_all(runner_home.join("bin")).unwrap();
+        fs::create_dir_all(&work_root).unwrap();
+        fs::write(
+            runner_home.join("bin").join("Runner.Listener.exe"),
+            b"fixture",
+        )
+        .unwrap();
+        fs::write(
+            runner_home.join("bin").join("Runner.Worker.exe"),
+            b"fixture",
+        )
+        .unwrap();
+        fs::write(
+            runner_home.join(".runner"),
+            br#"{"agentName":"fixture-runner","workFolder":"_work","other":"tolerated"}"#,
+        )
+        .unwrap();
+        let local = ExactLocalRunnerBinding::new(
+            &runner_home,
+            &work_root,
+            OpaqueIdentityReference::new("windows-user", "fixture-reference").unwrap(),
+        )
+        .unwrap();
+        let observed =
+            super::WindowsRunnerSource::for_exact_binding(&local, "fixture-runner").collect();
+        assert_eq!(observed.work_root, OwnershipEvidence::Verified);
+        assert_eq!(
+            observed.execution_identity,
+            ExecutionIdentityEvidence::Unknown
+        );
+
+        fs::write(
+            runner_home.join(".runner"),
+            br#"{"agentName":"other-runner","workFolder":"_work"}"#,
+        )
+        .unwrap();
+        let drift =
+            super::WindowsRunnerSource::for_exact_binding(&local, "fixture-runner").collect();
+        assert_eq!(
+            drift.execution_identity,
+            ExecutionIdentityEvidence::Mismatch
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

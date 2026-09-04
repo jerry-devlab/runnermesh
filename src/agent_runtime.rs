@@ -1,8 +1,8 @@
-//! Ordinary-user development runtime for the persistent Windows Agent.
+//! Ordinary-user runtime for the persistent Windows Agent.
 //!
-//! This module deliberately requires an explicit development root. It never
-//! selects an installed runtime location and its reconciler does not control an
-//! official runner before H1.
+//! Development execution requires an explicit sandbox root and never controls
+//! a runner. Installed execution requires an explicit, ledger-verified install
+//! root and uses the accepted admission binding when one is configured.
 
 use std::{
     collections::HashMap,
@@ -24,24 +24,26 @@ use tray_icon::{
 };
 
 use crate::{
-    ActivityWorkloadProbe, AdmissionControlSnapshot, AdmissionDecision, AgentCommand, AgentCore,
-    AgentHealth, AgentObservation, AgentObserver, AgentReconciler, AgentResponse, AgentSnapshot,
-    BuildProvenance, DesiredAdmissionState, DoctorCheck, DoctorReport, DoctorStatus,
-    EffectiveLocale, EffectiveTheme, ExecutionIdentityEvidence, FileConfigStore, HardSafetyState,
-    HostSnapshot, HostSource, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot,
-    LinkState, LocalAgentTransport, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
+    ActivityWorkloadProbe, AdmissionAgentReconciler, AdmissionControlSnapshot, AdmissionController,
+    AdmissionDecision, AgentCommand, AgentCore, AgentHealth, AgentObservation, AgentObserver,
+    AgentReconciler, AgentResponse, AgentSnapshot, BuildProvenance, DesiredAdmissionState,
+    DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
+    ExecutionIdentityEvidence, FileConfigStore, HardSafetyState, HostSnapshot, HostSource,
+    Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
+    LocalAgentTransport, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
     ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph, TrayMenuEntry,
-    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe, WindowsHostSource,
-    WindowsProcessSource, WindowsRunnerSource, WindowsSteamAppIdSource, WindowsUserActivitySource,
-    WindowsUserSessionSupervisorAdapter,
+    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
+    WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
+    WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
 };
 
-/// Result persisted only inside the caller-owned development root, so automated
-/// qualification can prove native initialization without treating a source
-/// build as an installed runtime.
+/// Reconstructable smoke evidence persisted only under the selected runtime
+/// state root. The profile booleans prevent a development launch from being
+/// mistaken for an installed runtime.
 #[derive(Serialize)]
-struct DevelopmentRuntimeEvidence {
+struct RuntimeEvidence {
     development_test_runtime: bool,
+    installed_runtime: bool,
     native_tray_initialized: bool,
     native_icon_registered: bool,
     native_event_loop_alive: bool,
@@ -60,10 +62,11 @@ struct RuntimeReadiness {
     native_tray_ready: AtomicBool,
     runner_observer_configured: bool,
     supervisor_adapter_ready: bool,
+    runner_control_configured: bool,
 }
 
 impl RuntimeReadiness {
-    fn from_runner_home(runner_home: Option<&Path>) -> Self {
+    fn from_runner_home(runner_home: Option<&Path>, runner_control_configured: bool) -> Self {
         let runner_observer_configured = runner_home.is_some_and(Path::is_dir);
         let supervisor_adapter_ready = runner_home.is_some_and(|home| {
             WindowsUserSessionSupervisorAdapter::for_runner_home(home).readiness()
@@ -73,11 +76,30 @@ impl RuntimeReadiness {
             native_tray_ready: AtomicBool::new(false),
             runner_observer_configured,
             supervisor_adapter_ready,
+            runner_control_configured,
         }
     }
 }
 
-type RuntimeCore = AgentCore<RuntimeObserver, NoRunnerControl, FileConfigStore>;
+enum RuntimeReconciler {
+    Unconfigured(NoRunnerControl),
+    Configured(Box<AdmissionAgentReconciler<WindowsGithubAdmissionBackend>>),
+}
+
+impl AgentReconciler for RuntimeReconciler {
+    fn reconcile(
+        &mut self,
+        decision: &AdmissionDecision,
+        observation: &AgentObservation,
+    ) -> Result<AdmissionControlSnapshot, String> {
+        match self {
+            Self::Unconfigured(reconciler) => reconciler.reconcile(decision, observation),
+            Self::Configured(reconciler) => reconciler.reconcile(decision, observation),
+        }
+    }
+}
+
+type RuntimeCore = AgentCore<RuntimeObserver, RuntimeReconciler, FileConfigStore>;
 
 /// Starts the development-only Agent. `development_root` must be a caller-owned
 /// sandbox path; no default is intentionally provided.
@@ -87,42 +109,136 @@ pub fn run_development_agent(
     process_probe_names: Vec<String>,
 ) -> Result<(), String> {
     fs::create_dir_all(&development_root).map_err(|error| error.to_string())?;
-    let store = FileConfigStore::new(development_root.join("config.json"));
-    let readiness = Arc::new(RuntimeReadiness::from_runner_home(runner_home.as_deref()));
     let observer = RuntimeObserver::new(runner_home, process_probe_names);
-    let mut core = AgentCore::new(observer, NoRunnerControl, store, build_provenance())
+    run_agent(
+        development_root.join("config.json"),
+        development_root,
+        observer,
+        RuntimeReconciler::Unconfigured(NoRunnerControl),
+        true,
+    )
+}
+
+/// Starts only the active executable from an explicit, ledger-verified
+/// installation. An absent binding produces a safe unconfigured runtime; a
+/// present binding enables the accepted exact-runner admission controller.
+pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
+    let install_root = install_root
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let installation = Installation::new(install_root);
+    let _active_agent = installation
+        .active_agent_path()
+        .map_err(|error| error.to_string())?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let stable_agent = installation
+        .stable_agent_entry()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let current_agent = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if stable_agent != current_agent {
+        return Err("installed Agent is not the ledger-owned stable executable".to_owned());
+    }
+    let binding = installation
+        .runtime_binding()
+        .map_err(|error| error.to_string())?;
+    let (observer, reconciler) = match binding {
+        Some(binding) => {
+            let backend = crate::windows_github_admission_backend(binding.admission.clone())
+                .map_err(|error| error.to_string())?;
+            let observer = RuntimeObserver::new_bound(
+                &binding.local,
+                &binding.admission.runner_name,
+                binding.process_probe_executables,
+            );
+            (
+                observer,
+                RuntimeReconciler::Configured(Box::new(AdmissionAgentReconciler::new(
+                    AdmissionController::new(backend),
+                ))),
+            )
+        }
+        None => (
+            RuntimeObserver::new(None, Vec::new()),
+            RuntimeReconciler::Unconfigured(NoRunnerControl),
+        ),
+    };
+    let state_root = installation.agent_state_dir();
+    let state_guards = crate::installation::guard_existing_directories(&state_root)
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
+    state_guards.verify().map_err(|error| error.to_string())?;
+    if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
+        return Err("installed Agent state root is a reparse point".to_owned());
+    }
+    run_agent(
+        installation.agent_config_path(),
+        state_root,
+        observer,
+        reconciler,
+        false,
+    )
+}
+
+fn run_agent(
+    config_path: PathBuf,
+    runtime_state_root: PathBuf,
+    observer: RuntimeObserver,
+    reconciler: RuntimeReconciler,
+    development_controls: bool,
+) -> Result<(), String> {
+    let runner_home = observer.runner_home.as_deref();
+    let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
+    let store = FileConfigStore::new(config_path);
+    let readiness = Arc::new(RuntimeReadiness::from_runner_home(
+        runner_home,
+        runner_control_configured,
+    ));
+    let mut core = AgentCore::new(observer, reconciler, store, build_provenance())
         .map_err(|error| error.to_string())?;
     let initial_snapshot = core
         .observe_decide_reconcile()
         .map_err(|error| error.to_string())?;
-    write_runtime_stage(&development_root, "observation-complete")?;
+    write_runtime_stage(&runtime_state_root, "observation-complete")?;
     let core = Arc::new(Mutex::new(core));
-    let exit_requested = Arc::new(AtomicBool::new(false));
+    let exit = Arc::new(RuntimeExitState::default());
     let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
     let server = IpcServer::bind(endpoint).map_err(|error| error.to_string())?;
-    write_runtime_stage(&development_root, "pipe-bound")?;
+    write_runtime_stage(&runtime_state_root, "pipe-bound")?;
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let pipe_thread = spawn_pipe_loop(
         server,
         Arc::clone(&core),
-        Arc::clone(&exit_requested),
+        Arc::clone(&exit),
         Arc::clone(&readiness),
         snapshot_sender,
+        development_controls,
     );
 
     let result = run_native_tray_loop(
-        &development_root,
+        &runtime_state_root,
         Arc::clone(&core),
         initial_snapshot,
         snapshot_receiver,
-        Arc::clone(&exit_requested),
+        Arc::clone(&exit),
         readiness,
+        development_controls,
     );
-    exit_requested.store(true, Ordering::Release);
+    exit.requested.store(true, Ordering::Release);
     // Exit is requested through the same typed local IPC route. The pipe loop
     // returns after that request; never force-terminate a thread or runner.
     let _ = pipe_thread.join();
     result
+}
+
+#[derive(Default)]
+struct RuntimeExitState {
+    requested: AtomicBool,
+    after_drain: AtomicBool,
 }
 
 fn build_provenance() -> BuildProvenance {
@@ -137,15 +253,16 @@ fn build_provenance() -> BuildProvenance {
 fn spawn_pipe_loop(
     server: IpcServer,
     core: Arc<Mutex<RuntimeCore>>,
-    exit_requested: Arc<AtomicBool>,
+    exit: Arc<RuntimeExitState>,
     readiness: Arc<RuntimeReadiness>,
     snapshot_sender: Sender<AgentSnapshot>,
+    development_controls: bool,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        while !exit_requested.load(Ordering::Acquire) {
+        while !exit.requested.load(Ordering::Acquire) {
             let core = Arc::clone(&core);
-            let exit_requested = Arc::clone(&exit_requested);
-            let exit_for_after_serve = Arc::clone(&exit_requested);
+            let exit = Arc::clone(&exit);
+            let exit_for_after_serve = Arc::clone(&exit);
             let readiness = Arc::clone(&readiness);
             let snapshot_sender = snapshot_sender.clone();
             let served = server.serve_once(move |command| {
@@ -153,18 +270,37 @@ fn spawn_pipe_loop(
                     .lock()
                     .map_err(|_| static_reason("agent-runtime-poisoned"))?;
                 let response = if matches!(command, AgentCommand::ExitAfterDrain) {
-                    // Before H1 this is an Agent-only development exit. It does
-                    // not issue any real runner command or change a work root.
-                    exit_requested.store(true, Ordering::Release);
-                    AgentResponse::Accepted {
-                        snapshot: core.snapshot(),
+                    if development_controls || !readiness.runner_control_configured {
+                        // Development and unconfigured installed runtimes have
+                        // no selector authority, so only the Agent exits.
+                        exit.requested.store(true, Ordering::Release);
+                        AgentResponse::Accepted {
+                            snapshot: core.snapshot(),
+                        }
+                    } else {
+                        // A configured runtime persists the conservative Work
+                        // intent, withdraws through the normal reconciler, and
+                        // remains alive until independent readback proves the
+                        // selector absent and any active Worker has completed.
+                        let response = core
+                            .handle_command(AgentCommand::SetMode {
+                                mode: crate::UserMode::Work,
+                            })
+                            .map_err(|_| static_reason("agent-runtime-command-failed"))?;
+                        if let AgentResponse::Accepted { snapshot } = &response {
+                            exit.after_drain.store(true, Ordering::Release);
+                            if snapshot.achieved_node_state == Some(crate::NodeState::Drained) {
+                                exit.requested.store(true, Ordering::Release);
+                            }
+                        }
+                        response
                     }
                 } else {
                     let response = core
                         .handle_command(command)
                         .map_err(|_| static_reason("agent-runtime-command-failed"))?;
                     if let AgentResponse::Doctor(mut report) = response {
-                        append_pre_h1_doctor_checks(&mut report, &core.snapshot(), &readiness);
+                        append_runtime_doctor_checks(&mut report, &core.snapshot(), &readiness);
                         AgentResponse::Doctor(report)
                     } else {
                         response
@@ -177,7 +313,7 @@ fn spawn_pipe_loop(
                 }
                 Ok(response)
             });
-            if served.is_err() && !exit_for_after_serve.load(Ordering::Acquire) {
+            if served.is_err() && !exit_for_after_serve.requested.load(Ordering::Acquire) {
                 // A broken client is recoverable; the next loop iteration
                 // recreates the one-shot Named Pipe server instance.
                 thread::sleep(Duration::from_millis(10));
@@ -187,12 +323,13 @@ fn spawn_pipe_loop(
 }
 
 fn run_native_tray_loop(
-    development_root: &Path,
+    runtime_state_root: &Path,
     core: Arc<Mutex<RuntimeCore>>,
     initial_snapshot: AgentSnapshot,
     snapshots: Receiver<AgentSnapshot>,
-    exit_requested: Arc<AtomicBool>,
+    exit: Arc<RuntimeExitState>,
     readiness: Arc<RuntimeReadiness>,
+    development_controls: bool,
 ) -> Result<(), String> {
     let transport = LocalAgentTransport::new(Duration::from_secs(2));
     let mut frontend = NativeTrayEventLoop::new(transport);
@@ -201,32 +338,38 @@ fn run_native_tray_loop(
         .apply(TrayUiUpdate::Snapshot(current_snapshot.clone()))
         .map_err(|error| error.to_string())?
         .clone();
-    write_runtime_stage(development_root, "tray-starting")?;
+    write_runtime_stage(runtime_state_root, "tray-starting")?;
     let mut native = NativeTrayBackend::new(
-        development_root,
+        runtime_state_root,
         &initial_render,
         current_snapshot.effective_ui_preferences.theme,
         current_snapshot.ui_preferences.theme != ThemePreference::System,
     )?;
-    write_runtime_stage(development_root, "tray-backend-ready")?;
+    write_runtime_stage(runtime_state_root, "tray-backend-ready")?;
     readiness.native_tray_ready.store(true, Ordering::Release);
     // UISettings.ColorValuesChanged runs outside the tray ownership boundary.
     // The callback only marks a refresh pending; this loop resolves and
     // applies the owner-draw palette on the UI thread.
     let system_theme_monitor = crate::windows_preferences::SystemThemeChangeMonitor::new().ok();
-    write_runtime_stage(development_root, "system-theme-monitor-ready")?;
+    write_runtime_stage(runtime_state_root, "system-theme-monitor-ready")?;
     let mut refreshes = 1;
-    write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
-    write_runtime_stage(development_root, "runtime-ready")?;
-    write_hint_evidence(development_root, &mut native)?;
+    write_runtime_evidence(
+        runtime_state_root,
+        &current_snapshot,
+        refreshes,
+        development_controls,
+    )?;
+    write_runtime_stage(runtime_state_root, "runtime-ready")?;
+    write_hint_evidence(runtime_state_root, &mut native)?;
     let mut last_observation = Instant::now();
 
-    while !exit_requested.load(Ordering::Acquire) {
+    while !exit.requested.load(Ordering::Acquire) {
         pump_windows_messages();
         if last_observation.elapsed() >= Duration::from_secs(1) {
             // Observation is reconstructed in the Agent Core on the normal
             // Observe -> Decide -> Reconcile path. It is independent of tray
-            // rendering and has no pre-H1 runner-control backend.
+            // rendering. Installed runtimes reconcile only through the exact
+            // accepted binding; development remains explicitly unconfigured.
             if let Ok(mut core) = core.lock() {
                 if let Ok(snapshot) = core.observe_decide_reconcile() {
                     current_snapshot = snapshot;
@@ -239,7 +382,17 @@ fn run_native_tray_loop(
                         current_snapshot.ui_preferences.theme != ThemePreference::System,
                     )?;
                     refreshes += 1;
-                    write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
+                    write_runtime_evidence(
+                        runtime_state_root,
+                        &current_snapshot,
+                        refreshes,
+                        development_controls,
+                    )?;
+                    if exit.after_drain.load(Ordering::Acquire)
+                        && current_snapshot.achieved_node_state == Some(crate::NodeState::Drained)
+                    {
+                        exit.requested.store(true, Ordering::Release);
+                    }
                 }
             }
             last_observation = Instant::now();
@@ -254,33 +407,47 @@ fn run_native_tray_loop(
                 current_snapshot.ui_preferences.theme != ThemePreference::System,
             )?;
             refreshes += 1;
-            write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
-        }
-        maybe_run_hint_exercise(development_root, &native)?;
-        write_hint_evidence(development_root, &mut native)?;
-
-        for (request_name, enabled) in [
-            ("development-menu-hints-disable.request", false),
-            ("development-menu-hints-enable.request", true),
-        ] {
-            if let Some(snapshot) = maybe_toggle_menu_hints_for_development(
-                development_root,
-                &mut frontend,
+            write_runtime_evidence(
+                runtime_state_root,
                 &current_snapshot,
-                request_name,
-                enabled,
-            )? {
-                current_snapshot = snapshot;
-                let render = frontend
-                    .current_render()
-                    .expect("a successful development tray action updates the render");
-                native.apply(
-                    render,
-                    current_snapshot.effective_ui_preferences.theme,
-                    current_snapshot.ui_preferences.theme != ThemePreference::System,
-                )?;
-                refreshes += 1;
-                write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
+                refreshes,
+                development_controls,
+            )?;
+        }
+        if development_controls {
+            maybe_run_hint_exercise(runtime_state_root, &native)?;
+        }
+        write_hint_evidence(runtime_state_root, &mut native)?;
+
+        if development_controls {
+            for (request_name, enabled) in [
+                ("development-menu-hints-disable.request", false),
+                ("development-menu-hints-enable.request", true),
+            ] {
+                if let Some(snapshot) = maybe_toggle_menu_hints_for_development(
+                    runtime_state_root,
+                    &mut frontend,
+                    &current_snapshot,
+                    request_name,
+                    enabled,
+                )? {
+                    current_snapshot = snapshot;
+                    let render = frontend
+                        .current_render()
+                        .expect("a successful development tray action updates the render");
+                    native.apply(
+                        render,
+                        current_snapshot.effective_ui_preferences.theme,
+                        current_snapshot.ui_preferences.theme != ThemePreference::System,
+                    )?;
+                    refreshes += 1;
+                    write_runtime_evidence(
+                        runtime_state_root,
+                        &current_snapshot,
+                        refreshes,
+                        development_controls,
+                    )?;
+                }
             }
         }
 
@@ -300,7 +467,12 @@ fn run_native_tray_loop(
                 current_snapshot.ui_preferences.theme != ThemePreference::System,
             )?;
             refreshes += 1;
-            write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
+            write_runtime_evidence(
+                runtime_state_root,
+                &current_snapshot,
+                refreshes,
+                development_controls,
+            )?;
         }
 
         while let Ok(snapshot) = snapshots.try_recv() {
@@ -314,7 +486,12 @@ fn run_native_tray_loop(
                 current_snapshot.ui_preferences.theme != ThemePreference::System,
             )?;
             refreshes += 1;
-            write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
+            write_runtime_evidence(
+                runtime_state_root,
+                &current_snapshot,
+                refreshes,
+                development_controls,
+            )?;
         }
 
         while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -336,7 +513,12 @@ fn run_native_tray_loop(
                         current_snapshot.ui_preferences.theme != ThemePreference::System,
                     )?;
                     refreshes += 1;
-                    write_runtime_evidence(development_root, &current_snapshot, refreshes)?;
+                    write_runtime_evidence(
+                        runtime_state_root,
+                        &current_snapshot,
+                        refreshes,
+                        development_controls,
+                    )?;
                 }
                 crate::TrayActionResult::Doctor(_)
                 | crate::TrayActionResult::Rejected(_)
@@ -350,12 +532,14 @@ fn run_native_tray_loop(
 }
 
 fn write_runtime_evidence(
-    development_root: &Path,
+    runtime_state_root: &Path,
     snapshot: &AgentSnapshot,
     tray_refreshes: u64,
+    development_controls: bool,
 ) -> Result<(), String> {
-    let evidence = DevelopmentRuntimeEvidence {
-        development_test_runtime: true,
+    let evidence = RuntimeEvidence {
+        development_test_runtime: development_controls,
+        installed_runtime: !development_controls,
         native_tray_initialized: true,
         native_icon_registered: true,
         native_event_loop_alive: true,
@@ -368,12 +552,16 @@ fn write_runtime_evidence(
         menu_hints_enabled: snapshot.ui_preferences.menu_hints_enabled,
     };
     let bytes = serde_json::to_vec_pretty(&evidence).map_err(|error| error.to_string())?;
-    fs::write(development_root.join("runtime-evidence.json"), bytes)
+    crate::installation::atomic_write(&runtime_state_root.join("runtime-evidence.json"), &bytes)
         .map_err(|error| error.to_string())
 }
 
 fn write_runtime_stage(development_root: &Path, stage: &str) -> Result<(), String> {
-    fs::write(development_root.join("runtime-stage.txt"), stage).map_err(|error| error.to_string())
+    crate::installation::atomic_write(
+        &development_root.join("runtime-stage.txt"),
+        stage.as_bytes(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn write_hint_evidence(
@@ -384,7 +572,8 @@ fn write_hint_evidence(
         return Ok(());
     };
     let bytes = serde_json::to_vec_pretty(&evidence).map_err(|error| error.to_string())?;
-    fs::write(development_root.join("hint-evidence.json"), bytes).map_err(|error| error.to_string())
+    crate::installation::atomic_write(&development_root.join("hint-evidence.json"), &bytes)
+        .map_err(|error| error.to_string())
 }
 
 fn maybe_run_hint_exercise(
@@ -714,6 +903,7 @@ struct RuntimeObserver {
     steam: crate::SteamGameProbe<WindowsSteamAppIdSource>,
     process_list: ProcessListProbe<WindowsProcessSource>,
     runner_home: Option<PathBuf>,
+    exact_runner_source: Option<WindowsRunnerSource>,
 }
 
 impl RuntimeObserver {
@@ -724,6 +914,22 @@ impl RuntimeObserver {
             steam: crate::SteamGameProbe::new(WindowsSteamAppIdSource),
             process_list: ProcessListProbe::new(WindowsProcessSource, process_probe_names),
             runner_home,
+            exact_runner_source: None,
+        }
+    }
+
+    fn new_bound(
+        local: &crate::ExactLocalRunnerBinding,
+        runner_name: &str,
+        process_probe_names: Vec<String>,
+    ) -> Self {
+        Self {
+            host: WindowsHostSource::default(),
+            user_activity: UserActivityProbe::new(WindowsUserActivitySource, 300),
+            steam: crate::SteamGameProbe::new(WindowsSteamAppIdSource),
+            process_list: ProcessListProbe::new(WindowsProcessSource, process_probe_names),
+            runner_home: Some(local.runner_home.clone()),
+            exact_runner_source: Some(WindowsRunnerSource::for_exact_binding(local, runner_name)),
         }
     }
 }
@@ -733,8 +939,11 @@ impl AgentObserver for RuntimeObserver {
         let host = HostSnapshot::from_evidence(self.host.collect());
         let (runner_phase, execution_identity, work_root, links) = match &self.runner_home {
             Some(home) => {
-                let observed =
-                    OfficialRunnerObserver::new(WindowsRunnerSource::new(home)).observe();
+                let source = self
+                    .exact_runner_source
+                    .clone()
+                    .unwrap_or_else(|| WindowsRunnerSource::new(home));
+                let observed = OfficialRunnerObserver::new(source).observe();
                 (
                     observed.phase,
                     observed.execution_identity,
@@ -782,7 +991,8 @@ impl AgentReconciler for NoRunnerControl {
         decision: &AdmissionDecision,
         observation: &AgentObservation,
     ) -> Result<AdmissionControlSnapshot, String> {
-        // This explicit pre-H1 reconciler has no process-control backend.
+        // Development and unconfigured installed runtimes have no remote
+        // selector-control backend.
         Ok(observation
             .admission_control
             .clone()
@@ -790,7 +1000,7 @@ impl AgentReconciler for NoRunnerControl {
     }
 }
 
-fn append_pre_h1_doctor_checks(
+fn append_runtime_doctor_checks(
     report: &mut DoctorReport,
     snapshot: &AgentSnapshot,
     readiness: &RuntimeReadiness,
@@ -819,10 +1029,32 @@ fn append_pre_h1_doctor_checks(
     } else {
         DoctorStatus::Warn
     };
-    let pre_h1_ready = readiness.native_tray_ready.load(Ordering::Acquire)
-        && readiness.runner_observer_configured
-        && readiness.supervisor_adapter_ready
-        && probes_ready;
+    let runtime_ready = readiness.native_tray_ready.load(Ordering::Acquire) && probes_ready;
+    let control_status = if readiness.runner_control_configured {
+        if snapshot.admission_control.lifecycle == crate::AdmissionLifecycleState::NotConfigured {
+            DoctorStatus::Fail
+        } else {
+            DoctorStatus::Pass
+        }
+    } else {
+        DoctorStatus::Warn
+    };
+    let local_binding_status = if !readiness.runner_control_configured {
+        DoctorStatus::Warn
+    } else if snapshot
+        .admission_control
+        .reason_code
+        .as_ref()
+        .is_some_and(|reason| reason.as_str() == "admission-local-evidence-inconsistent")
+    {
+        DoctorStatus::Fail
+    } else if snapshot.admission_control.exact_runner_identity
+        == crate::ExactRunnerIdentityState::Verified
+    {
+        DoctorStatus::Pass
+    } else {
+        DoctorStatus::Unknown
+    };
 
     report.checks.extend([
         check("agent-runtime", DoctorStatus::Pass, None),
@@ -859,22 +1091,23 @@ fn append_pre_h1_doctor_checks(
         ),
         check(
             "work-root-safety",
-            DoctorStatus::Pass,
-            Some("work-root-verification-required-at-h1"),
+            local_binding_status,
+            (local_binding_status != DoctorStatus::Pass)
+                .then_some("exact-local-binding-not-verified"),
         ),
         check(
-            "pre-h1-runtime-ready",
-            if pre_h1_ready {
+            "agent-runtime-ready",
+            if runtime_ready {
                 DoctorStatus::Pass
             } else {
                 DoctorStatus::Warn
             },
-            (!pre_h1_ready).then_some("pre-h1-runtime-incomplete"),
+            (!runtime_ready).then_some("agent-runtime-incomplete"),
         ),
         check(
-            "real-runner-drain",
-            DoctorStatus::Warn,
-            Some("h1-real-runner-lifecycle-required"),
+            "runner-admission-control",
+            control_status,
+            (control_status != DoctorStatus::Pass).then_some("runner-control-not-configured"),
         ),
     ]);
 }
