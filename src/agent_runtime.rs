@@ -907,5 +907,6 @@ mod tests {
         assert!(manifest.contains("Microsoft.Windows.Common-Controls"));
         assert!(manifest.contains("PerMonitorV2, PerMonitor"));
         assert!(manifest.contains("true/pm"));
+        assert!(manifest.contains("version=\"0.1.0.0\""));
     }
 }

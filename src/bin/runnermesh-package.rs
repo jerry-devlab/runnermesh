@@ -23,7 +23,6 @@ fn main() {
                 |manifest| {
                     serde_json::json!({
                         "result": "extracted",
-                        "destination": destination,
                         "provenance": manifest.provenance,
                     })
                 },

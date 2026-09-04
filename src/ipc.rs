@@ -252,11 +252,11 @@ impl IpcServer {
                 }
             }
 
-            let authorized = client_matches_current_user(raw_pipe)?;
             let mut pipe = unsafe {
                 use std::os::windows::io::{FromRawHandle, RawHandle};
                 std::fs::File::from_raw_handle(raw_pipe as RawHandle)
             };
+            let authorized = client_matches_current_user(raw_pipe)?;
             let result = if authorized {
                 serve_stream(&mut pipe, &mut handle_command)
             } else {
@@ -881,7 +881,9 @@ mod tests {
                 } else {
                     Ok(())
                 };
-                self.0 = false;
+                if result.is_ok() {
+                    self.0 = false;
+                }
                 result
             }
         }
