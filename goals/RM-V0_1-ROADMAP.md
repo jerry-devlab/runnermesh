@@ -227,8 +227,6 @@ Qualification and restoration remain independent after mutation.
 
 ## Remaining security debt
 
-- Harden the private evidence ACL before storing H1 live artifacts or opening
-  the H1 Owner gate. This is a separately authorized Owner action.
 - Keep active workflow dependencies pinned to reviewed immutable full commit
   SHAs before release.
 - Add an explicit current-user/logon Named Pipe DACL and denial coverage before
