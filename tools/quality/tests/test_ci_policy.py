@@ -67,6 +67,20 @@ class CiPolicyTests(unittest.TestCase):
             rc_workflow.index("Execute the installed RC runtime before packaging"),
             rc_workflow.index("Create and independently read back the immutable package"),
         )
+        self.assertIn("runnermesh-package.exe.sha256", rc_workflow)
+        self.assertIn("operator_helper_sha256", rc_workflow)
+        self.assertIn("OPERATOR_INSTALL=PASS", rc_workflow)
+        self.assertIn("OPERATOR_UNINSTALL=PASS", rc_workflow)
+        self.assertLess(
+            rc_workflow.index("Create and independently read back the immutable package"),
+            rc_workflow.index("Execute immutable operator install and owned uninstall smoke"),
+        )
+        self.assertLess(
+            rc_workflow.index("Execute immutable operator install and owned uninstall smoke"),
+            rc_workflow.index(
+                "Upload only the frozen RC package, operator, and verification metadata"
+            ),
+        )
 
     def test_only_pull_request_updates_cancel_in_progress(self) -> None:
         workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
