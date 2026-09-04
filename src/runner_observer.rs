@@ -197,11 +197,12 @@ impl RunnerSource for WindowsRunnerSource {
             ),
         };
         #[cfg(not(windows))]
-        let (process, execution_identity, work_root) = (
+        let (process, work_root) = (
             exact_runner_process_observation_unbound(&self.runner_home),
-            ExecutionIdentityEvidence::Unknown,
             OwnershipEvidence::Unknown,
         );
+        #[cfg(not(windows))]
+        let execution_identity = process.execution_identity;
         RunnerLocalEvidence {
             runner_home: home_exists.then(|| self.runner_home.clone()),
             metadata_present,
