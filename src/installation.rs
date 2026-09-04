@@ -518,6 +518,7 @@ impl Installation {
         )
         .map_err(InstallError::io)?;
         remove_owned_file(&self.uninstall_transaction_path())?;
+        #[cfg(windows)]
         drop(root_guards);
         for directory in [CONFIG_DIR, LOGS_DIR] {
             let directory = self.root.join(directory);
