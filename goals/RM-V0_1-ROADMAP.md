@@ -13,16 +13,18 @@ live work are separate lanes:
 ```text
 EXECUTION_MODEL=PARALLEL_SOURCE_PREP_WITH_H1_MERGE_GATE
 P0_PRODUCT_BLOCKER=false
-H1_TARGET_AUTHORITY_BLOCKER=true
+H1_TARGET_AUTHORITY_BLOCKER=false
+H1_TARGET_AUTHORITY_WAITING_FOR_OWNER=true
 P0_SOURCE_DEVELOPMENT_BLOCKER=false
 H1_SHOULD_BLOCK_SOURCE_PREPARATION=false
 ```
 
-The historical P0 lane or its accepted fresh-target replacement may block live
-qualification and product acceptance. They do not automatically stop bounded,
-non-mutating source work. G12-G15 may be extracted, refactored, tested, and
-prepared before H1, but they may not be accepted or merged as product
-milestones until H1 qualification, restoration, and target authority pass.
+The historical P0 lane or its accepted fresh-target replacement gates live
+qualification and product acceptance. Waiting for the exact Owner decision is
+not a project blocker and does not stop bounded, non-mutating source work.
+G12-G15 may be extracted, refactored, tested, and prepared before H1, but they
+may not be accepted or merged as product milestones until H1 qualification,
+restoration, and target authority pass.
 
 ## Product invariant carried forward
 
