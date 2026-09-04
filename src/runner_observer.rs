@@ -1,14 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-#[cfg(any(windows, test))]
-use std::fs;
+#[cfg(windows)]
+use std::{fs, path::Path};
 
 #[cfg(windows)]
 use serde::Deserialize;
 
-use crate::{
-    AdmissionBinding, LinkKind, LinkSnapshot, LinkState, ReasonCode, RegistrationScope, RunnerPhase,
-};
+use crate::{LinkKind, LinkSnapshot, LinkState, ReasonCode, RunnerPhase};
+
+#[cfg(windows)]
+use crate::{AdmissionBinding, RegistrationScope};
 
 /// Evidence about whether a runner-owned path belongs to the expected execution
 /// identity. `Unknown` is intentionally not treated as verified ownership.
@@ -101,9 +102,11 @@ impl<S: RunnerSource> OfficialRunnerObserver<S> {
 #[derive(Clone)]
 pub struct WindowsRunnerSource {
     runner_home: PathBuf,
+    #[cfg(windows)]
     exact_binding: Option<ExactRuntimeBinding>,
 }
 
+#[cfg(windows)]
 #[derive(Clone)]
 struct ExactRuntimeBinding {
     work_root: PathBuf,
@@ -115,10 +118,12 @@ impl WindowsRunnerSource {
     pub fn new(runner_home: impl Into<PathBuf>) -> Self {
         Self {
             runner_home: runner_home.into(),
+            #[cfg(windows)]
             exact_binding: None,
         }
     }
 
+    #[cfg(windows)]
     pub(crate) fn for_exact_binding(
         local: &crate::ExactLocalRunnerBinding,
         admission: &AdmissionBinding,
@@ -138,6 +143,7 @@ impl RunnerSource for WindowsRunnerSource {
     fn collect(&self) -> RunnerLocalEvidence {
         let home_exists = self.runner_home.is_dir();
         let metadata_present = self.runner_home.join(".runner").is_file();
+        #[cfg(windows)]
         let (process, execution_identity, work_root) = match &self.exact_binding {
             Some(binding) => {
                 let Ok(guards) = exact_binding_path_guards(&self.runner_home, binding) else {
@@ -190,6 +196,12 @@ impl RunnerSource for WindowsRunnerSource {
                 OwnershipEvidence::Unknown,
             ),
         };
+        #[cfg(not(windows))]
+        let (process, execution_identity, work_root) = (
+            exact_runner_process_observation_unbound(&self.runner_home),
+            ExecutionIdentityEvidence::Unknown,
+            OwnershipEvidence::Unknown,
+        );
         RunnerLocalEvidence {
             runner_home: home_exists.then(|| self.runner_home.clone()),
             metadata_present,
@@ -213,6 +225,7 @@ struct ExactProcessObservation {
     execution_identity: ExecutionIdentityEvidence,
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BoundMetadataObservation {
     Verified,
@@ -292,14 +305,7 @@ fn observe_bound_metadata(
     BoundMetadataObservation::Verified
 }
 
-#[cfg(not(windows))]
-fn observe_bound_metadata(
-    _runner_home: &Path,
-    _binding: &ExactRuntimeBinding,
-) -> BoundMetadataObservation {
-    BoundMetadataObservation::Unknown
-}
-
+#[cfg(windows)]
 fn github_url_matches_scope(github_url: &str, scope: &RegistrationScope) -> bool {
     let expected = match scope {
         RegistrationScope::Organization { organization } => {
@@ -335,14 +341,6 @@ fn exact_binding_path_guards(
         .collect()
 }
 
-#[cfg(not(windows))]
-fn exact_binding_path_guards(
-    _runner_home: &Path,
-    _binding: &ExactRuntimeBinding,
-) -> Result<Vec<crate::installation::ExistingDirectoryGuards>, ()> {
-    Err(())
-}
-
 #[cfg(windows)]
 fn current_user_owns_runner_paths(runner_home: &Path, work_root: &Path) -> OwnershipEvidence {
     match (
@@ -353,11 +351,6 @@ fn current_user_owns_runner_paths(runner_home: &Path, work_root: &Path) -> Owner
         (Ok(false), _) | (_, Ok(false)) => OwnershipEvidence::NotOwned,
         _ => OwnershipEvidence::Unknown,
     }
-}
-
-#[cfg(not(windows))]
-fn current_user_owns_runner_paths(_runner_home: &Path, _work_root: &Path) -> OwnershipEvidence {
-    OwnershipEvidence::Unknown
 }
 
 #[cfg(windows)]
@@ -570,18 +563,6 @@ fn bound_process_presence(
         }
     }
     (listener_present, worker_present)
-}
-
-#[cfg(not(windows))]
-fn exact_runner_process_observation(
-    _runner_home: &std::path::Path,
-    _binding: &ExactRuntimeBinding,
-) -> ExactProcessObservation {
-    ExactProcessObservation {
-        listener_present: false,
-        worker_present: false,
-        execution_identity: ExecutionIdentityEvidence::Unknown,
-    }
 }
 
 #[cfg(not(windows))]

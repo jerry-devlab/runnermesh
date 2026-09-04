@@ -31,6 +31,7 @@ const STATE_DIR: &str = "state";
 const LOGS_DIR: &str = "logs";
 const STABLE_AGENT_ENTRY: &str = "runnermesh-agent.exe";
 const RUNTIME_BINDING_FILE: &str = "runtime-binding.json";
+#[cfg(windows)]
 const AGENT_CONFIG_FILE: &str = "agent.json";
 const INSTALL_TRANSACTION_FILE: &str = "installation-transaction.json";
 const INSTALL_TRANSACTION_SCHEMA_VERSION: u32 = 1;
@@ -68,10 +69,12 @@ impl Installation {
         self.root.join(STATE_DIR)
     }
 
+    #[cfg(windows)]
     pub(crate) fn agent_state_dir(&self) -> PathBuf {
         self.state_dir().join("agent")
     }
 
+    #[cfg(windows)]
     pub(crate) fn agent_config_path(&self) -> PathBuf {
         self.root.join(CONFIG_DIR).join(AGENT_CONFIG_FILE)
     }
