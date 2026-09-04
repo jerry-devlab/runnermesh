@@ -41,10 +41,11 @@ jobs:
       H1_EXPECTED_RUNNER_NAME: ${{ vars.RUNNERMESH_EXPECTED_RUNNER_NAME }}
       H1_EXPECTED_TRANSACTION_ID: ${{ vars.RUNNERMESH_EXPECTED_TRANSACTION_ID }}
       H1_OBSERVED_QUALIFICATION_REPOSITORY: ${{ github.repository }}
-      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}
       H1_TRANSACTION_ID: ${{ inputs.transaction_id }}
     steps:
       - name: Assert immutable envelope and runtime identity
+        env:
+          H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
