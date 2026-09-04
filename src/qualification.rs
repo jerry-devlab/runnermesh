@@ -241,6 +241,8 @@ pub struct H1WorkflowTemplateAssessment {
     pub workflow_dispatch_only: bool,
     pub reserved_selector_exact: bool,
     pub runtime_identity_asserted: bool,
+    pub candidate_identity_asserted: bool,
+    pub transaction_identity_asserted: bool,
     pub arbitrary_command_input_absent: bool,
     pub secret_context_absent: bool,
 }
@@ -250,6 +252,8 @@ impl H1WorkflowTemplateAssessment {
         self.workflow_dispatch_only
             && self.reserved_selector_exact
             && self.runtime_identity_asserted
+            && self.candidate_identity_asserted
+            && self.transaction_identity_asserted
             && self.arbitrary_command_input_absent
             && self.secret_context_absent
     }
@@ -279,6 +283,17 @@ pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
             && source.contains("H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}")
             && source.contains("RUNNERMESH_EXPECTED_RUNNER_NAME")
             && source.contains("-cne $env:H1_OBSERVED_RUNNER_NAME"),
+        candidate_identity_asserted: frozen_template_exact
+            && source.contains(
+                "H1_EXPECTED_CANDIDATE_SHA: ${{ vars.RUNNERMESH_EXPECTED_CANDIDATE_SHA }}",
+            )
+            && source.contains("$env:H1_CANDIDATE_SHA -cne $env:H1_EXPECTED_CANDIDATE_SHA")
+            && source.contains("ref: ${{ vars.RUNNERMESH_EXPECTED_CANDIDATE_SHA }}"),
+        transaction_identity_asserted: frozen_template_exact
+            && source.contains(
+                "H1_EXPECTED_TRANSACTION_ID: ${{ vars.RUNNERMESH_EXPECTED_TRANSACTION_ID }}",
+            )
+            && source.contains("$env:H1_TRANSACTION_ID -cne $env:H1_EXPECTED_TRANSACTION_ID"),
         arbitrary_command_input_absent: frozen_template_exact
             && workflow_inputs == ["witness", "candidate_sha", "transaction_id"]
             && !lowercase.contains("inputs.command")
@@ -947,6 +962,8 @@ mod tests {
     fn inert_workflow_template_has_the_label_identity_and_trigger_contract() {
         let assessment = assess_h1_workflow_template();
         assert!(assessment.source_contract_ready());
+        assert!(assessment.candidate_identity_asserted);
+        assert!(assessment.transaction_identity_asserted);
         assert!(H1_WORKFLOW_TEMPLATE.contains("workflow_dispatch"));
         assert!(!H1_WORKFLOW_TEMPLATE.contains("pull_request"));
     }
@@ -983,6 +1000,18 @@ mod tests {
             "      # H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
         );
         assert!(!assess_h1_workflow_source(&commented_identity).source_contract_ready());
+
+        let unbound_candidate = H1_WORKFLOW_TEMPLATE.replace(
+            "$env:H1_CANDIDATE_SHA -cne $env:H1_EXPECTED_CANDIDATE_SHA",
+            "$env:H1_CANDIDATE_SHA -cne $env:H1_CANDIDATE_SHA",
+        );
+        assert!(!assess_h1_workflow_source(&unbound_candidate).candidate_identity_asserted);
+
+        let unbound_transaction = H1_WORKFLOW_TEMPLATE.replace(
+            "$env:H1_TRANSACTION_ID -cne $env:H1_EXPECTED_TRANSACTION_ID",
+            "$env:H1_TRANSACTION_ID -cne $env:H1_TRANSACTION_ID",
+        );
+        assert!(!assess_h1_workflow_source(&unbound_transaction).transaction_identity_asserted);
 
         let bracket_secret = format!("{H1_WORKFLOW_TEMPLATE}\n# ${{{{ secrets['UNSAFE'] }}}}\n");
         assert!(!assess_h1_workflow_source(&bracket_secret).secret_context_absent);
