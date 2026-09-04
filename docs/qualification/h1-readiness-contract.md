@@ -76,8 +76,14 @@ Binding and response drift fail closed. The workflow client can only read the
 configured file at an immutable commit reference; it has no dispatch method.
 Fetched workflow bytes must match the frozen inert template (apart from line
 ending normalization), preventing duplicate-key or equivalent-YAML ambiguity.
-That read proves source identity but leaves the private runtime runner-name
-variable `UNKNOWN` until a separate Owner-side verifier proves its exact value.
+The template compares the dispatched candidate SHA and transaction ID to exact
+private repository variables and uses the expected candidate variable for
+checkout. That read proves source identity but leaves all four private runtime
+variables (`RUNNERMESH_EXPECTED_CANDIDATE_SHA`,
+`RUNNERMESH_EXPECTED_TRANSACTION_ID`,
+`RUNNERMESH_EXPECTED_QUALIFICATION_REPOSITORY`, and
+`RUNNERMESH_EXPECTED_RUNNER_NAME`) `UNKNOWN` until a separate Owner-side
+verifier proves their exact values.
 Organization-scoped runner visibility does not prove that the trusted
 repository can route to that runner. `ROUTING_READY` is therefore derived from
 the same exact workflow and admission observations plus an explicit repository
@@ -131,9 +137,27 @@ runs-on:
 
 The first step validates the exact accepted source SHA, a bounded transaction
 token, the private qualification-repository identity, and `${{ runner.name }}`
-against Owner-configured private repository variables. Fixed `primary`,
+against Owner-configured private repository variables. Candidate and
+transaction inputs must equal their frozen variables, and checkout uses the
+frozen candidate variable rather than the caller-selected input. Fixed `primary`,
 `no-new-admission`, and `reconnect` choices are witnesses inside one transaction
 family; none accepts an arbitrary shell command.
+
+The `${{ runner.name }}` observation is bound through the first step's `env`,
+where the runner context is available. It is deliberately not evaluated in
+job-level `env`, which GitHub rejects before dispatch.
+
+Before live collection, the dedicated read-only artifact verifier parses the
+private binding through the exact `H1LiveBinding` schema, rejects placeholder or
+unknown members, applies cross-binding semantic checks, and assesses the
+fetched workflow through this frozen source contract:
+
+```text
+cargo run --quiet --example h1-verify -- --binding <private-binding.json> --workflow <fetched-workflow.yml>
+```
+
+This verifier emits only booleans and never resolves credentials, performs
+network or host I/O, issues a live attestation, or authorizes H1 mutation.
 
 For the withdrawn witness, the future transaction controller dispatches after
 positive selector-absence readback and expects the job to remain unassigned for
@@ -247,8 +271,11 @@ copied into public code, PRs, logs, or the execution ledger.
 ## Current live disposition
 
 The accepted source can establish a synthetic proof, ready adapter layer, and
-ready source transaction family, but the frozen historical P0 incident and
-absent Owner trust configuration keep live H1 fail-closed:
+ready source transaction family. H1 entry authority is satisfied either by an
+accepted P0 PASS or by the Owner explicitly retiring the exhausted historical
+P0 target from v0.1 qualification authority and selecting a fresh official H1
+target. Until one of those paths is accepted, and until the exact Owner trust
+configuration exists, live H1 remains fail-closed:
 
 ```text
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
@@ -272,10 +299,12 @@ LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
 ```
 
-P0 recovery and H1 preparation remain separate future Owner transactions. This
-Goal does not start/stop a service, invoke a recovery helper, touch the real
-qualification workspace, change a runner label/group/registration, create a
-credential, or dispatch H1.
+Historical P0 recovery is not a prerequisite for the accepted fresh-target
+path and the exhausted historical target must not be retried, repaired for
+v0.1, or used as H1 evidence. Fresh-target establishment and H1 qualification
+remain separate explicit Owner gates. Source preparation does not start/stop a
+service, invoke a recovery helper, touch the real qualification workspace,
+change a runner label/group/registration, create a credential, or dispatch H1.
 
 `WAITING_FOR_OWNER` and `OWNER_CANCELED` remain outer control states, not H1
 implementation failures. A later attempt must collect fresh live evidence and

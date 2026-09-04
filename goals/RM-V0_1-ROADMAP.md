@@ -13,16 +13,18 @@ live work are separate lanes:
 ```text
 EXECUTION_MODEL=PARALLEL_SOURCE_PREP_WITH_H1_MERGE_GATE
 P0_PRODUCT_BLOCKER=false
-P0_H1_BLOCKER=true
+H1_TARGET_AUTHORITY_BLOCKER=false
+H1_TARGET_AUTHORITY_WAITING_FOR_OWNER=false
 P0_SOURCE_DEVELOPMENT_BLOCKER=false
 H1_SHOULD_BLOCK_SOURCE_PREPARATION=false
 ```
 
-P0 and H1 may block live qualification and product acceptance. They do not
-automatically stop bounded, non-mutating source work. G12-G15 may be extracted,
-refactored, tested, and prepared before H1, but they may not be accepted or
-merged as product milestones until H1 qualification and baseline restoration
-both pass.
+The Owner-accepted fresh-target replacement now gates live qualification and
+product acceptance. Its completed target decision is not a project blocker;
+the exact qualification transaction remains separately Owner-gated.
+G12-G15 may be extracted, refactored, tested, and prepared before H1, but they
+may not be accepted or merged as product milestones until H1 qualification,
+restoration, and target authority pass.
 
 ## Product invariant carried forward
 
@@ -70,17 +72,44 @@ selective-extraction assets for the productization preparation Goal.
 
 Goal: `RM-V0_1-P0-SUPERVISED-BASELINE-RESTORE-001`.
 
-This is a recovery-only Owner transaction for one historical incident, not a
-product-development or qualification Goal. It uses:
+This is a current-state reconciliation Owner transaction for one historical
+incident, not a product-development or qualification Goal. It uses:
 
 1. fresh read-only exact-scope preflight;
 2. Owner presence and explicit authorization;
-3. the minimum exact recovery action;
+3. the minimum exact action selected by current invariants, possibly no action;
 4. independent postverification of the known-good baseline;
 5. stop.
 
 It does not continue into H1 and does not introduce another proliferating
 recovery-transaction family. Historical R1/R2/R3 details remain private.
+
+Orphan absence is the desired cleanup postcondition, not a reason to reproduce
+the historical orphan. Durable runner/service/ownership bindings may survive
+preparation, while PID, creation time, session, and process-instance evidence
+have `LIVE_PROCESS_EVIDENCE_TTL=SAME_OWNER_TRANSACTION_ONLY` and are reacquired
+immediately before any mutation.
+
+The authoritative ledger records that the historical target consumed its one
+permitted fresh retry. The final v0.1 Master Goal must not retry it, repair its
+generic Auditor route, invent P0 PASS, or recreate historical failure state.
+H1 entry is instead governed by:
+
+```text
+H1_ENTRY_AUTHORITY =
+    P0_PASS
+    OR
+    (
+        HISTORICAL_P0_TARGET_RETIRED_BY_OWNER=true
+        AND
+        FRESH_OFFICIAL_H1_TARGET_SELECTED=true
+    )
+```
+
+Retiring the historical target and selecting or establishing the exact fresh
+official target are one explicit, plan-bound Owner decision. This changes only
+qualification authority; all H1 safety, live-readiness, and restoration
+requirements remain intact.
 
 ## 3. H1 live adapters and readiness
 
@@ -120,10 +149,10 @@ Do not rebase or merge the stale stack wholesale.
 
 ## 5. H1 qualification and restore
 
-After P0 baseline restoration, protected private evidence storage, approved
-credential/binding/workflow/routing configuration, and all eleven live
-readiness fields pass, one immutable accepted source candidate enters one Owner
-transaction.
+After `H1_ENTRY_AUTHORITY` is satisfied, protected private evidence storage,
+approved credential/binding/workflow/routing configuration, and all eleven
+live-readiness fields pass, one immutable accepted source candidate enters one
+Owner transaction.
 
 H1 proves advertised capacity, trusted routing, active-job preservation,
 selector withdrawal/readback, conservative racing-assignment handling,
@@ -134,7 +163,16 @@ QUALIFICATION=<PASS|FAIL|BLOCKED>
 RESTORE=<PASS|FAIL>
 ```
 
-Productization acceptance requires `QUALIFICATION=PASS` and `RESTORE=PASS`.
+Productization acceptance requires:
+
+```text
+H1_QUALIFICATION=PASS
+H1_RESTORE=PASS
+H1_TARGET_AUTHORITY=ACCEPTED
+```
+
+`H1_TARGET_AUTHORITY=ACCEPTED` means either the original P0 path passed or the
+explicit fresh-target Owner path was accepted.
 
 ## 6. Productization acceptance and G15R
 
@@ -189,8 +227,6 @@ Qualification and restoration remain independent after mutation.
 
 ## Remaining security debt
 
-- Harden the private evidence ACL before storing H1 live artifacts or opening
-  the H1 Owner gate. This is a separately authorized Owner action.
 - Keep active workflow dependencies pinned to reviewed immutable full commit
   SHAs before release.
 - Add an explicit current-user/logon Named Pipe DACL and denial coverage before

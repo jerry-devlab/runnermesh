@@ -8,6 +8,7 @@ mod cli;
 mod credential;
 #[cfg(any(windows, test))]
 mod github_transport;
+mod h1_artifact;
 mod h1_live;
 mod host;
 mod installation;
@@ -57,6 +58,7 @@ pub(crate) use github_transport::{
     GithubApiTransport, GithubWireClient, GithubWireError, GithubWireRequest, GithubWireResponse,
     GITHUB_API_HOST, GITHUB_API_USER_AGENT,
 };
+pub use h1_artifact::{assess_h1_artifacts, H1ArtifactAssessment};
 pub use h1_live::{
     collect_h1_live_readiness, observe_github_admission_readiness, verify_h1_routing,
     verify_repository_runner_access, verify_trusted_workflow, ExactLocalBindingObservation,
