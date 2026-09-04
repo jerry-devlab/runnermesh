@@ -56,11 +56,15 @@ pub enum UpdatePhase {
     Switched,
     Committed,
     RolledBack,
+    RecoveredRollback,
 }
 
 impl UpdatePhase {
     fn terminal(self) -> bool {
-        matches!(self, Self::Committed | Self::RolledBack)
+        matches!(
+            self,
+            Self::Committed | Self::RolledBack | Self::RecoveredRollback
+        )
     }
 }
 
@@ -142,6 +146,14 @@ impl UpdateCoordinator {
     /// `INTENT` is persisted before the immutable slot is written; only a
     /// verified slot advances the durable journal to `READY_TO_ACTIVATE`.
     pub fn stage(&self, request: &UpdateRequest) -> Result<UpdateTransaction, UpdateError> {
+        self.stage_with_verification_hook(request, || {})
+    }
+
+    fn stage_with_verification_hook(
+        &self,
+        request: &UpdateRequest,
+        after_first_digest: impl FnOnce(),
+    ) -> Result<UpdateTransaction, UpdateError> {
         validate_update_version(&request.version)?;
         if !request.compatible {
             return Err(UpdateError::Incompatible);
@@ -173,8 +185,32 @@ impl UpdateCoordinator {
             phase: UpdatePhase::Intent,
         };
         self.write_transaction(&transaction)?;
-        self.installation
-            .install(&request.version, &request.payload)?;
+        after_first_digest();
+        match self.installation.install_with_payload_sha256(
+            &request.version,
+            &request.payload,
+            &request.expected_payload_sha256,
+        ) {
+            Ok(_) => {}
+            Err(InstallError::PayloadChecksumMismatch { expected, actual }) => {
+                let active = self.active_version()?;
+                if active != transaction.previous_version {
+                    return Err(UpdateError::ActiveVersionDrift {
+                        expected: transaction.previous_version,
+                        actual: active,
+                    });
+                }
+                transaction.phase = UpdatePhase::RecoveredRollback;
+                self.write_transaction(&transaction)?;
+                self.write_receipt(
+                    &transaction,
+                    UpdateOutcome::RecoveredRollback,
+                    &transaction.previous_version,
+                )?;
+                return Err(UpdateError::ChecksumMismatch { expected, actual });
+            }
+            Err(error) => return Err(error.into()),
+        }
         transaction.phase = UpdatePhase::ReadyToActivate;
         self.write_transaction(&transaction)?;
         Ok(transaction)
@@ -253,10 +289,11 @@ impl UpdateCoordinator {
                     actual: current,
                 });
             }
-            let outcome = if transaction.phase == UpdatePhase::Committed {
-                UpdateOutcome::Committed
-            } else {
-                UpdateOutcome::RolledBack
+            let outcome = match transaction.phase {
+                UpdatePhase::Committed => UpdateOutcome::Committed,
+                UpdatePhase::RolledBack => UpdateOutcome::RolledBack,
+                UpdatePhase::RecoveredRollback => UpdateOutcome::RecoveredRollback,
+                _ => unreachable!("terminal update phase matched above"),
             };
             self.ensure_terminal_receipt(&transaction, outcome, expected)?;
             return Ok(ReconcileReceipt {
@@ -275,7 +312,7 @@ impl UpdateCoordinator {
             self.installation
                 .select_active(&transaction.previous_version)?;
         }
-        transaction.phase = UpdatePhase::RolledBack;
+        transaction.phase = UpdatePhase::RecoveredRollback;
         self.write_transaction(&transaction)?;
         self.write_receipt(
             &transaction,
@@ -670,6 +707,25 @@ mod tests {
                 .as_deref(),
             Some("0.1.0")
         );
+
+        let (_root, raced, raced_payload) = prepared("stage-second-digest");
+        let expected = payload_sha256(&raced_payload).unwrap();
+        assert!(matches!(
+            raced.stage_with_verification_hook(
+                &UpdateRequest::new("0.2.0", &raced_payload, &expected, true),
+                || fs::write(raced_payload.join("runnermesh-agent.exe"), b"changed").unwrap()
+            ),
+            Err(UpdateError::ChecksumMismatch { .. })
+        ));
+        assert_eq!(
+            raced.transaction().unwrap().unwrap().phase,
+            UpdatePhase::RecoveredRollback
+        );
+        assert_eq!(
+            raced.receipt().unwrap().unwrap().outcome,
+            UpdateOutcome::RecoveredRollback
+        );
+        assert!(!raced.installation().versions_dir().join("0.2.0").exists());
     }
 
     #[test]
@@ -753,7 +809,7 @@ mod tests {
         );
         assert_eq!(
             update.reconcile().unwrap().outcome,
-            UpdateOutcome::RolledBack
+            UpdateOutcome::RecoveredRollback
         );
         update.clear_terminal_journal().unwrap();
         fs::write(

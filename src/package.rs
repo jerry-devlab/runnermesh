@@ -6,8 +6,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    fs::{self, OpenOptions},
+    io::{self, Cursor, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::{
-    installation::{is_reparse_point, sha256_bytes, sha256_file},
+    installation::{is_reparse_point, sha256_bytes, sha256_file, validate_explicit_path},
     AutostartBackend, Installation, UpdateCoordinator, UpdatePhase,
 };
 
@@ -23,6 +23,8 @@ pub const PACKAGE_SCHEMA_VERSION: u32 = 1;
 pub const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
 const MANIFEST_NAME: &str = "PACKAGE-MANIFEST.json";
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
+const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const RUNTIME_NAMES: [&str; 3] = [
     "runnermesh.exe",
     "runnermesh-agent.exe",
@@ -62,6 +64,12 @@ pub struct PackageReceipt {
     pub archive: PathBuf,
     pub archive_sha256: String,
     pub manifest: PackageManifest,
+}
+
+struct VerifiedArchive {
+    manifest: PackageManifest,
+    contents: BTreeMap<String, Vec<u8>>,
+    archive_sha256: String,
 }
 
 pub struct PackageVerifier;
@@ -106,10 +114,18 @@ impl PackageVerifier {
             checksum_file(&contents).into_bytes(),
         );
 
-        if output_directory.exists() && !output_directory.is_dir() {
+        validate_explicit_path(output_directory)
+            .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
+        if output_directory.exists()
+            && (!output_directory.is_dir()
+                || is_reparse_point(output_directory)
+                    .map_err(|error| PackageError::MalformedManifest(error.to_string()))?)
+        {
             return Err(PackageError::ForeignOutput(output_directory.to_path_buf()));
         }
         fs::create_dir_all(output_directory).map_err(PackageError::io)?;
+        validate_explicit_path(output_directory)
+            .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
         let archive = output_directory.join(format!(
             "runnermesh-{}-windows-x64.zip",
             input.provenance.version
@@ -118,24 +134,35 @@ impl PackageVerifier {
             return Err(PackageError::ForeignOutput(archive));
         }
         write_zip(&archive, &contents)?;
-        let receipt = PackageReceipt {
-            archive: archive.clone(),
-            archive_sha256: sha256_file(&archive).map_err(PackageError::io)?,
-            manifest,
-        };
-        let verified = Self::verify(&archive)?;
-        if verified != receipt.manifest {
+        let verified = read_verified_archive(&archive)?;
+        if verified.manifest != manifest {
             return Err(PackageError::MalformedManifest(
                 "post-write manifest changed".to_owned(),
             ));
         }
-        Ok(receipt)
+        Ok(PackageReceipt {
+            archive,
+            archive_sha256: verified.archive_sha256,
+            manifest,
+        })
     }
 
     /// Validates archive member names, duplicate entries, exact content set,
     /// package checksums and schema/provenance semantics.
     pub fn verify(archive: &Path) -> Result<PackageManifest, PackageError> {
-        let contents = read_zip_contents(archive)?;
+        Self::verify_with_hash(archive).map(|(manifest, _)| manifest)
+    }
+
+    /// Returns the manifest and SHA-256 derived from the same in-memory bytes.
+    /// Callers that publish or record a digest must use this method rather than
+    /// reopening a previously verified path.
+    pub fn verify_with_hash(archive: &Path) -> Result<(PackageManifest, String), PackageError> {
+        read_verified_archive(archive).map(|verified| (verified.manifest, verified.archive_sha256))
+    }
+
+    fn verify_contents(
+        contents: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<PackageManifest, PackageError> {
         let names = contents.keys().cloned().collect::<BTreeSet<_>>();
         let expected = expected_package_names();
         if names != expected {
@@ -174,7 +201,7 @@ impl PackageVerifier {
                 .ok_or(PackageError::UnexpectedArchiveContents)?,
         )
         .map_err(|error| PackageError::MalformedManifest(error.to_string()))?;
-        verify_checksum_file(sums, &contents)?;
+        verify_checksum_file(sums, contents)?;
         Ok(manifest)
     }
 
@@ -193,6 +220,13 @@ impl PackageVerifier {
     }
 
     pub fn archive_sha256(archive: &Path) -> Result<String, PackageError> {
+        validate_explicit_path(archive)
+            .map_err(|_| PackageError::ForeignOutput(archive.to_path_buf()))?;
+        if is_reparse_point(archive)
+            .map_err(|error| PackageError::MalformedManifest(error.to_string()))?
+        {
+            return Err(PackageError::ForeignOutput(archive.to_path_buf()));
+        }
         sha256_file(archive).map_err(PackageError::io)
     }
 
@@ -202,36 +236,53 @@ impl PackageVerifier {
         archive: &Path,
         destination: &Path,
     ) -> Result<PackageManifest, PackageError> {
-        let manifest = Self::verify(archive)?;
-        if destination.exists()
-            && fs::read_dir(destination)
-                .map_err(PackageError::io)?
-                .next()
-                .is_some()
-        {
+        let verified = read_verified_archive(archive)?;
+        validate_explicit_path(destination)
+            .map_err(|_| PackageError::ForeignOutput(destination.to_path_buf()))?;
+        if destination.exists() {
             return Err(PackageError::ForeignOutput(destination.to_path_buf()));
         }
-        fs::create_dir_all(destination).map_err(PackageError::io)?;
-        let contents = read_zip_contents(archive)?;
-        for name in RUNTIME_NAMES {
-            let path = destination.join(name);
-            if path.parent() != Some(destination) {
-                return Err(PackageError::UnexpectedArchiveContents);
-            }
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
+        let parent = destination
+            .parent()
+            .ok_or_else(|| PackageError::ForeignOutput(destination.to_path_buf()))?;
+        validate_explicit_path(parent)
+            .map_err(|_| PackageError::ForeignOutput(parent.to_path_buf()))?;
+        fs::create_dir_all(parent).map_err(PackageError::io)?;
+        let staging = parent.join(format!(
+            ".runnermesh-extract-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir(&staging).map_err(PackageError::io)?;
+        let result = (|| {
+            for name in RUNTIME_NAMES {
+                let path = staging.join(name);
+                if path.parent() != Some(staging.as_path()) {
+                    return Err(PackageError::UnexpectedArchiveContents);
+                }
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(PackageError::io)?;
+                file.write_all(
+                    verified
+                        .contents
+                        .get(name)
+                        .ok_or(PackageError::UnexpectedArchiveContents)?,
+                )
                 .map_err(PackageError::io)?;
-            file.write_all(
-                contents
-                    .get(name)
-                    .ok_or(PackageError::UnexpectedArchiveContents)?,
-            )
-            .map_err(PackageError::io)?;
-            file.sync_all().map_err(PackageError::io)?;
+                file.sync_all().map_err(PackageError::io)?;
+            }
+            fs::rename(&staging, destination).map_err(PackageError::io)
+        })();
+        if result.is_err() && staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
         }
-        Ok(manifest)
+        result?;
+        Ok(verified.manifest)
     }
 }
 
@@ -294,7 +345,9 @@ impl PackageDoctor {
             Ok(Some(value))
                 if matches!(
                     value.phase,
-                    UpdatePhase::Committed | UpdatePhase::RolledBack
+                    UpdatePhase::Committed
+                        | UpdatePhase::RolledBack
+                        | UpdatePhase::RecoveredRollback
                 ) =>
             {
                 ProductizationCheckStatus::Pass
@@ -373,6 +426,7 @@ impl fmt::Display for PackageError {
 impl std::error::Error for PackageError {}
 
 fn read_required_file(path: &Path) -> Result<Vec<u8>, PackageError> {
+    validate_explicit_path(path).map_err(|_| PackageError::ForeignOutput(path.to_path_buf()))?;
     let metadata = fs::symlink_metadata(path).map_err(PackageError::io)?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
@@ -387,15 +441,14 @@ fn read_required_file(path: &Path) -> Result<Vec<u8>, PackageError> {
 fn validate_provenance(provenance: &PackageProvenance) -> Result<(), PackageError> {
     validate_token("version", &provenance.version, 128)?;
     validate_token("channel", &provenance.channel, 64)?;
-    if provenance.commit.len() < 7
-        || provenance.commit.len() > 64
+    if provenance.commit.len() != 40
         || !provenance
             .commit
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         return Err(PackageError::InvalidProvenance(
-            "commit must be an exact hexadecimal identity".to_owned(),
+            "commit must be the exact lowercase 40-hex Git identity".to_owned(),
         ));
     }
     if provenance.target != WINDOWS_X64_TARGET {
@@ -510,10 +563,23 @@ fn write_zip(path: &Path, contents: &BTreeMap<String, Vec<u8>>) -> Result<(), Pa
     Ok(())
 }
 
-fn read_zip_contents(archive_path: &Path) -> Result<BTreeMap<String, Vec<u8>>, PackageError> {
-    let mut archive = ZipArchive::new(File::open(archive_path).map_err(PackageError::io)?)
+fn read_verified_archive(archive_path: &Path) -> Result<VerifiedArchive, PackageError> {
+    validate_explicit_path(archive_path)
+        .map_err(|_| PackageError::ForeignOutput(archive_path.to_path_buf()))?;
+    let metadata = fs::symlink_metadata(archive_path).map_err(PackageError::io)?;
+    if !metadata.is_file()
+        || metadata.len() > MAX_PACKAGE_BYTES
+        || is_reparse_point(archive_path)
+            .map_err(|error| PackageError::MalformedManifest(error.to_string()))?
+    {
+        return Err(PackageError::ForeignOutput(archive_path.to_path_buf()));
+    }
+    let bytes = fs::read(archive_path).map_err(PackageError::io)?;
+    let archive_sha256 = sha256_bytes(&bytes);
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| PackageError::MalformedManifest(error.to_string()))?;
     let mut contents = BTreeMap::new();
+    let mut total_bytes = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -530,11 +596,32 @@ fn read_zip_contents(archive_path: &Path) -> Result<BTreeMap<String, Vec<u8>>, P
         {
             return Err(PackageError::UnexpectedArchiveContents);
         }
+        if entry.size() > MAX_MEMBER_BYTES {
+            return Err(PackageError::UnexpectedArchiveContents);
+        }
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(PackageError::io)?;
+        entry
+            .by_ref()
+            .take(MAX_MEMBER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(PackageError::io)?;
+        if bytes.len() as u64 > MAX_MEMBER_BYTES {
+            return Err(PackageError::UnexpectedArchiveContents);
+        }
+        total_bytes = total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or(PackageError::UnexpectedArchiveContents)?;
+        if total_bytes > MAX_PACKAGE_BYTES {
+            return Err(PackageError::UnexpectedArchiveContents);
+        }
         contents.insert(name, bytes);
     }
-    Ok(contents)
+    let manifest = PackageVerifier::verify_contents(&contents)?;
+    Ok(VerifiedArchive {
+        manifest,
+        contents,
+        archive_sha256,
+    })
 }
 
 #[cfg(test)]
@@ -596,7 +683,7 @@ mod tests {
     }
 
     fn archive_entries(archive: &Path) -> BTreeMap<String, Vec<u8>> {
-        super::read_zip_contents(archive).unwrap()
+        super::read_verified_archive(archive).unwrap().contents
     }
 
     #[test]
@@ -612,11 +699,28 @@ mod tests {
             PackageVerifier::archive_sha256(&receipt.archive).unwrap(),
             receipt.archive_sha256
         );
+        let (verified_manifest, verified_hash) =
+            PackageVerifier::verify_with_hash(&receipt.archive).unwrap();
+        assert_eq!(verified_manifest, receipt.manifest);
+        assert_eq!(verified_hash, receipt.archive_sha256);
         let mut wrong = input.provenance.clone();
         wrong.channel = "other".to_owned();
         assert!(matches!(
             PackageVerifier::verify_expected(&receipt.archive, &wrong),
             Err(PackageError::ProvenanceMismatch { .. })
+        ));
+
+        let mut abbreviated = candidate(&root, "0.1.0", "short-commit");
+        abbreviated.provenance.commit = "0123456".to_owned();
+        assert!(matches!(
+            PackageVerifier::create(&abbreviated, &root.join("short-commit-output")),
+            Err(PackageError::InvalidProvenance(_))
+        ));
+        let mut uppercase = candidate(&root, "0.1.0", "uppercase-commit");
+        uppercase.provenance.commit = "0123456789ABCDEF0123456789ABCDEF01234567".to_owned();
+        assert!(matches!(
+            PackageVerifier::create(&uppercase, &root.join("uppercase-commit-output")),
+            Err(PackageError::InvalidProvenance(_))
         ));
     }
 
@@ -661,6 +765,20 @@ mod tests {
             PackageVerifier::verify(&duplicate),
             Err(PackageError::UnexpectedArchiveContents)
         );
+
+        let existing_empty = root.join("existing-empty");
+        fs::create_dir(&existing_empty).unwrap();
+        assert!(matches!(
+            PackageVerifier::extract_runtime(&receipt.archive, &existing_empty),
+            Err(PackageError::ForeignOutput(_))
+        ));
+        assert!(matches!(
+            PackageVerifier::extract_runtime(
+                &receipt.archive,
+                &root.join("parent").join("..").join("escaped")
+            ),
+            Err(PackageError::ForeignOutput(_))
+        ));
     }
 
     #[test]

@@ -7,16 +7,16 @@ use runnermesh::{PackageInput, PackageProvenance, PackageVerifier, WINDOWS_X64_T
 fn main() {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     let result = match arguments.as_slice() {
-        [command, archive] if command == "verify" => {
-            PackageVerifier::verify(&PathBuf::from(archive)).and_then(|manifest| {
-                let archive = PathBuf::from(archive);
-                Ok(serde_json::json!({
-                    "result": "verified",
-                    "archive_sha256": PackageVerifier::archive_sha256(&archive)?,
-                    "provenance": manifest.provenance,
-                }))
+        [command, archive] if command == "verify" => PackageVerifier::verify_with_hash(
+            &PathBuf::from(archive),
+        )
+        .map(|(manifest, archive_sha256)| {
+            serde_json::json!({
+                "result": "verified",
+                "archive_sha256": archive_sha256,
+                "provenance": manifest.provenance,
             })
-        }
+        }),
         [command, output, version, commit, channel, cli, agent, manifest]
             if command == "create" =>
         {
@@ -45,7 +45,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: runnermesh-package create <output-dir> <version> <commit> <channel> <runnermesh.exe> <runnermesh-agent.exe> <runnermesh-agent.manifest> | verify <archive>"
+                "usage: runnermesh-package create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive>"
             );
             process::exit(2);
         }

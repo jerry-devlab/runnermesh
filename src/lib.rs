@@ -75,8 +75,10 @@ pub use host::{
     RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
     RecoverySource, RecoveryTrigger, SessionState, WindowsHostSource,
 };
+#[cfg(windows)]
+pub use installation::WindowsUserStartupBackend;
 pub use installation::{
-    AutostartBackend, AutostartEntry, InstallError, InstallReceipt, Installation,
+    AutostartBackend, AutostartChange, AutostartEntry, InstallError, InstallReceipt, Installation,
     InstallationState, SandboxAutostartBackend, UninstallReceipt, VersionManifest,
 };
 pub use ipc::{
