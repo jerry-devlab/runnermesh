@@ -166,11 +166,24 @@ impl FileConfigStore {
 
 impl ConfigStore for FileConfigStore {
     fn load(&self) -> Result<Option<AgentConfig>, ConfigStoreError> {
+        let guards = crate::installation::guard_existing_directories(&self.path)
+            .map_err(|error| ConfigStoreError::Io(io::Error::other(error.to_string())))?;
+        if crate::installation::is_reparse_point(&self.path)
+            .map_err(|error| ConfigStoreError::Io(io::Error::other(error.to_string())))?
+        {
+            return Err(ConfigStoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "configuration path is a reparse point",
+            )));
+        }
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(ConfigStoreError::Io(error)),
         };
+        guards
+            .verify()
+            .map_err(|error| ConfigStoreError::Io(io::Error::other(error.to_string())))?;
         let config: AgentConfig = serde_json::from_slice(&bytes).map_err(ConfigStoreError::Json)?;
         validate_schema(&config)?;
         Ok(Some(config))
@@ -178,8 +191,26 @@ impl ConfigStore for FileConfigStore {
 
     fn save(&self, config: &AgentConfig) -> Result<(), ConfigStoreError> {
         validate_schema(config)?;
+        let guards = crate::installation::guard_existing_directories(&self.path)
+            .map_err(|error| ConfigStoreError::Io(io::Error::other(error.to_string())))?;
+        if crate::installation::is_reparse_point(&self.path)
+            .map_err(|error| ConfigStoreError::Io(io::Error::other(error.to_string())))?
+        {
+            return Err(ConfigStoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "configuration path is a reparse point",
+            )));
+        }
         let bytes = serde_json::to_vec_pretty(config).map_err(ConfigStoreError::Json)?;
-        write_bytes_atomically(&self.path, &bytes).map_err(ConfigStoreError::Io)
+        write_bytes_atomically_with(&self.path, &bytes, |_| {
+            guards
+                .verify()
+                .map_err(|error| io::Error::other(error.to_string()))
+        })
+        .map_err(ConfigStoreError::Io)?;
+        guards
+            .verify()
+            .map_err(|error| ConfigStoreError::Io(io::Error::other(error.to_string())))
     }
 }
 
@@ -469,10 +500,6 @@ fn decide(config: &AgentConfig, observation: &AgentObservation) -> AdmissionDeci
 
 fn static_reason(value: &'static str) -> ReasonCode {
     ReasonCode::new(value).expect("static reason codes must be valid")
-}
-
-fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_bytes_atomically_with(path, bytes, |_| Ok(()))
 }
 
 fn write_bytes_atomically_with(

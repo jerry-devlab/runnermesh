@@ -21,6 +21,7 @@ mod process_snapshot;
 mod qualification;
 mod runner_observer;
 mod runtime;
+mod runtime_binding;
 mod supervisor;
 mod tray;
 mod update;
@@ -117,6 +118,12 @@ pub use runtime::{
     EffectiveUiPreferences, HardSafetyState, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
     ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
     SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
+};
+#[cfg(windows)]
+pub use runtime_binding::current_windows_identity_reference;
+pub use runtime_binding::{
+    InstalledRuntimeBinding, INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION,
+    WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
