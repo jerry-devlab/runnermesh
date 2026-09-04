@@ -178,10 +178,13 @@ expanding scope merely to consume more time or tokens.
 4. **Owner control flow is not product failure.** `WAITING_FOR_OWNER` is
    resumable and `OWNER_CANCELED` ends only that authorization attempt. Both
    require fresh transaction evidence before a later mutation.
-5. **Audit admission failure is infrastructure evidence.** Record
-   `STOP_REASON=AUDIT_ADMISSION_FAILED` and, when applicable,
+5. **Audit admission failure is mechanism-scoped infrastructure evidence.**
+   Record `STOP_REASON=AUDIT_ADMISSION_FAILED` and, when applicable,
    `INDEPENDENT_ACCEPTANCE_PENDING=true`; it is not proof that the audited
-   artifact failed and does not prevent diagnostic work.
+   artifact failed and does not prevent diagnostic work. It blocks that
+   specific Auditor mechanism, not an alternative genuinely independent
+   verification mechanism that satisfies the same active risk requirement.
+   Never weaken or self-certify a required independent result.
 6. **Latch one unchanged blocker.** After sufficient evidence, set
    `BLOCKER_LATCHED=true` and retry only after relevant source, evidence, trust,
    Owner action, live state, or external prerequisites change.
@@ -193,7 +196,8 @@ expanding scope merely to consume more time or tokens.
    per authorization. Review the focused correction delta instead of
    automatically re-auditing unchanged history.
 
-Before an expensive independent review, use the admission-only preflight:
+Before an expensive independent review conducted through a generic
+Codex-profile Auditor, use the admission-only preflight:
 
 ```text
 conda run -n base python tools/dev/auditor_preflight.py --profile jerry-auditor
@@ -205,6 +209,13 @@ child, verifies the configured read-only/never contract, and always reports
 `WindowsApps` executable resolution only from that child environment so the
 Codex restricted-token sandbox selects the inbox `powershell.exe`; it does not
 change the global profile, sandbox implementation, ACLs, or Windows policy.
+
+For H1, prefer the accepted purpose-built deterministic live collectors and
+exact independent GET/local readbacks. Generic Codex-Auditor child-process
+admission is not a universal H1 prerequisite. The independent evidence must be
+produced outside the mutation helper's own success return and remain sufficient
+for every active runner-control, trust, identity, routing, and restoration
+requirement.
 
 ## Repository automation
 

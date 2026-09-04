@@ -36,7 +36,7 @@ Before production mutation, show the exact cutover/rollback plan and wait for ex
 Suggested authorization token:
 
 ```text
-AUTHORIZE_F4_H2_CUTOVER
+AUTHORIZE_MASTER_H2_CUTOVER
 ```
 
 Perform only the accepted production install/activation path. Preserve the prior known-good rollback state.

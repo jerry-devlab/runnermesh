@@ -28,12 +28,14 @@ Do not split G12/G13/G14/G15 into four ceremonial acceptance PRs unless the sour
 Require fresh authoritative evidence:
 
 ```text
-P0=PASS
 H1_QUALIFICATION=PASS
 H1_RESTORE=PASS
+H1_TARGET_AUTHORITY=ACCEPTED
 ```
 
-If any is false/unknown, stop. Do not weaken the gate.
+`H1_TARGET_AUTHORITY=ACCEPTED` means either the original P0 path passed or the
+explicit fresh-target Owner path was accepted. If any entry field is
+false/unknown, stop. Do not weaken the gate.
 
 ## Source handling
 

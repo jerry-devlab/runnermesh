@@ -1,6 +1,6 @@
 # RunnerMesh v0.1 Fast Closeout Plan
 
-Status: **Proposed execution overlay for Roadmap v3**
+Status: **Authoritative execution overlay for Roadmap v3**
 
 This document does not create Roadmap v4 and does not change the frozen v0.1 product contract. It compresses the remaining Roadmap v3 work into five execution blocks by reusing accepted evidence, batching compatible acceptance work, and eliminating repeat ceremony.
 
@@ -44,7 +44,7 @@ Do not remove already-prepared G12-G15 product features merely to save time. The
 
 | Block | Goal | Target active time | Exit condition |
 |---|---|---:|---|
-| F1 | `RM-V0_1-F1-P0-H1-OWNER-CORRIDOR` | 2-4h | P0 PASS, H1 `QUALIFICATION=PASS`, H1 `RESTORE=PASS` |
+| F1 | `RM-V0_1-F1-P0-H1-OWNER-CORRIDOR` | 2-4h | H1 target authority accepted, H1 `QUALIFICATION=PASS`, H1 `RESTORE=PASS` |
 | F2 | `RM-V0_1-F2-PRODUCTIZATION-ACCEPTANCE` | 1-2h | PR #33-equivalent G12-G15 source accepted on protected main |
 | F3 | `RM-V0_1-F3-RC-RELEASE-HARDENING` | 3-5h | one immutable G15R RC; explicit Named Pipe DACL debt closed |
 | F4 | `RM-V0_1-F4-H2-CUTOVER-DOGFOOD` | 1-2h + >=24h wall clock | successful cutover and minimum sustained dogfood PASS |
@@ -53,8 +53,8 @@ Do not remove already-prepared G12-G15 product features merely to save time. The
 ## Process compression rules
 
 1. **One accepted risk delta, one validation family.** Reuse accepted unchanged-risk evidence; do not restart comprehensive audits.
-2. **P0 retry budget is one fresh bounded transaction.** If the historical target is again blocked by non-product infrastructure after the current material evidence change, stop archaeology. An explicit Owner decision may retire that historical qualification target and establish a clean official runner for H1 instead; this escape hatch is never automatic.
-3. **P0 and H1 may share one Owner session, not one authorization.** P0 must independently PASS first. Then a new H1 phase/gate may begin without restarting the whole Codex context.
+2. **The historical P0 retry budget is exhausted.** Do not retry it, repair its generic Auditor route for v0.1, invent P0 PASS, or recreate historical failure state. The final Master Goal uses the explicit, plan-bound Owner decision to retire that target and select a clean official H1 target.
+3. **H1 entry has two safe authorities.** It requires either P0 PASS or both Owner retirement of the historical target and selection of the fresh official H1 target. The fresh path changes qualification authority only; H1 readiness, qualification, and restoration remain fully required under their own Owner gate.
 4. **G12-G15 accept as one coherent productization PR when possible.** Do not create four ceremonial acceptance PRs if the prepared source remains reviewable and current.
 5. **G15R is integration evidence, not a second implementation project.** Reuse G12-G15 unit/ownership evidence and focus on the package -> install -> runtime -> update -> rollback -> uninstall chain.
 6. **Named Pipe explicit DACL closes inside F3.** Do not create a standalone Goal/PR unless the change unexpectedly becomes large or independent.
@@ -80,7 +80,7 @@ G12_G15_SOURCE_PREPARED=true   # PR #33, held behind H1 gate
 The remaining critical path is therefore:
 
 ```text
-F1 P0 + H1
+F1 H1 target authority + H1
   -> F2 G12-G15 acceptance
   -> F3 G15R + release hardening
   -> F4 H2 + >=24h dogfood
@@ -100,9 +100,18 @@ A block is allowed to expand the schedule only when it is one of:
 
 Routine tool friction, stale historical evidence, Owner wait/cancellation, and unchanged audit disagreement are classified and bounded under Blocker Policy v2 rather than turned into new project phases.
 
-## Goal files
+## Master Goal and phase contracts
 
-Execute the following in order:
+The single resumable authority for the remaining v0.1 execution is:
+
+```text
+goals/RM-V0_1-FINAL-AUTONOMOUS-CLOSEOUT.md
+```
+
+The files below remain subordinate phase contracts. Crossing their boundaries
+does not require a new Goal or Codex session.
+
+Execute their intent in order:
 
 1. `goals/RM-V0_1-F1-P0-H1-OWNER-CORRIDOR.md`
 2. `goals/RM-V0_1-F2-PRODUCTIZATION-ACCEPTANCE.md`

@@ -44,6 +44,7 @@ Evidence-scope flags are not top-level result dispositions:
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
+| Final autonomous closeout Master Goal | PREPARING | `d0642d289ec86269edcb428f9288265281d630ca` start | Phase 0 governance PR | single resumable F1-F5 authority; historical P0 retry remains exhausted; fresh official H1 path changes target authority only | merge exact-head Phase 0 governance, verify healthy main, then perform fresh read-only target discovery |
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
@@ -59,9 +60,9 @@ Evidence-scope flags are not top-level result dispositions:
 | G11R-B lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 | exact-scope REST seam, desired/achieved state, drift refusal, no normal Worker signal | H1 live adapter source |
 | G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
 | H1 live adapters/readiness source | ACCEPTED_SOURCE | `60c443b120a24fe4f59fd83cd595f5e547273f0e` | #30 | fixed-authority transport, opaque credential provider, exact bindings, workflow/routing/readiness collectors; exact-head CI Gate, focused trust review, and post-merge full main CI passed; tests remain synthetic-only | Owner configuration and fresh live readiness |
-| H1 one-shot qualification | PREPARING | N/A | N/A | private non-repository Owner-corridor source and inert workflow candidate prepared; every live field remains unknown and live mutation remains unauthorized | explicit Owner decision on a fresh official H1 qualification target, then fresh private ACL, live configuration/readiness, and Owner gates |
-| G12 autostart | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
-| G13 versioned install | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS |
+| H1 one-shot qualification | WAITING_FOR_OWNER | N/A | N/A | private non-repository Owner-corridor source and inert workflow candidate prepared; every live field remains unknown and live mutation remains unauthorized; historical P0 target has no remaining retry authority | Phase 0 governance acceptance, fresh read-only target discovery, then exact-plan `AUTHORIZE_MASTER_FRESH_H1_TARGET` |
+| G12 autostart | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS + target authority ACCEPTED |
+| G13 versioned install | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS + target authority ACCEPTED |
 | G14 update + rollback | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #15 draft | selective extraction allowed; acceptance/merge held | accepted G13 after H1 |
 | G15 packaging + doctor | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #16 draft | selective extraction allowed; acceptance/merge held | accepted G14 after H1 |
 | G15R integrated pre-H2 RC | TODO | N/A | N/A | exactly one authoritative-main sandbox-qualified RC | G12-G15 accepted |
@@ -109,18 +110,20 @@ until the prior risk-appropriate post-merge `main` run is healthy.
 ```text
 EXECUTION_MODEL=PARALLEL_SOURCE_PREP_WITH_H1_MERGE_GATE
 P0_PRODUCT_BLOCKER=false
-P0_H1_BLOCKER=true
+H1_TARGET_AUTHORITY_BLOCKER=true
 P0_SOURCE_DEVELOPMENT_BLOCKER=false
 H1_SHOULD_BLOCK_SOURCE_PREPARATION=false
 G12_G15_SOURCE_PREPARATION_ALLOWED=true
-G12_G15_ACCEPTANCE_REQUIRES_H1_PASS=true
-G12_G15_ACCEPTANCE_REQUIRES_BASELINE_RESTORE_PASS=true
+H1_ENTRY_AUTHORITY=P0_PASS_OR_OWNER_RETIRED_HISTORICAL_P0_PLUS_FRESH_TARGET_SELECTED
+G12_G15_ACCEPTANCE_REQUIRES_H1_QUALIFICATION_PASS=true
+G12_G15_ACCEPTANCE_REQUIRES_H1_RESTORE_PASS=true
+G12_G15_ACCEPTANCE_REQUIRES_H1_TARGET_AUTHORITY_ACCEPTED=true
 ```
 
 P0/H1 waiting does not automatically block safe source-only work. G12-G15 may
 be selectively extracted, corrected, tested, and prepared as focused drafts.
-They remain unaccepted and unmergeable as product milestones until H1 and
-baseline restoration both pass.
+They remain unaccepted and unmergeable as product milestones until H1
+qualification, restoration, and target authority all pass.
 
 ## Current admission decision
 
@@ -137,6 +140,10 @@ H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_LIVE_ADAPTER_SOURCE_READY=true
 H1_NON_MUTATING_READINESS=PREPARING
 H1_OWNER_BUNDLE_SOURCE_PREPARED=true
+P0_HISTORICAL_TARGET_RETRY_EXHAUSTED=true
+HISTORICAL_P0_V0_1_AUTHORITY=ACTIVE_PENDING_OWNER_RETIREMENT
+FRESH_OFFICIAL_H1_TARGET_SELECTED=false
+H1_TARGET_AUTHORITY=UNACCEPTED
 H1_MUTATION_ALLOWED=false
 LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
