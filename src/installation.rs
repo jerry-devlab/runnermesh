@@ -338,8 +338,9 @@ impl Installation {
         }
     }
 
-    /// Removes only ledger-verified runtime content. Config, state, logs and
-    /// all unrelated root content remain untouched.
+    /// Removes only ledger-verified runtime content, including an anchored
+    /// runtime binding. Unrelated config, state, logs and root content remain
+    /// untouched.
     pub fn uninstall(
         &self,
         backend: &impl AutostartBackend,
@@ -676,6 +677,7 @@ impl Installation {
         } else if self.root.join(CURRENT_FILE).exists() || quarantine.current.exists() {
             return Err(InstallError::OwnershipDrift(self.root.join(CURRENT_FILE)));
         }
+        quarantine_runtime_binding(self, transaction, &quarantine.binding)?;
         quarantine_file(
             &self.root.join(LEDGER_FILE),
             &quarantine.ledger,
@@ -697,7 +699,7 @@ impl Installation {
                 fs::remove_dir_all(&directory).map_err(InstallError::io)?;
             }
         }
-        for file in [quarantine.current, quarantine.ledger] {
+        for file in [quarantine.current, quarantine.binding, quarantine.ledger] {
             remove_owned_file(&file)?;
         }
         Ok(())
@@ -1132,6 +1134,7 @@ struct UninstallQuarantinePaths {
     versions: PathBuf,
     bin: PathBuf,
     current: PathBuf,
+    binding: PathBuf,
     ledger: PathBuf,
 }
 
@@ -1748,10 +1751,38 @@ fn uninstall_quarantine_paths(
         current: installation
             .state_dir()
             .join(format!("{prefix}-current.json")),
+        binding: installation
+            .state_dir()
+            .join(format!("{prefix}-runtime-binding.json")),
         ledger: installation
             .state_dir()
             .join(format!("{prefix}-ledger.json")),
     }
+}
+
+fn quarantine_runtime_binding(
+    installation: &Installation,
+    transaction: &UninstallTransaction,
+    destination: &Path,
+) -> Result<(), InstallError> {
+    let source = installation.runtime_binding_path();
+    let Some(expected_digest) = transaction.state.runtime_binding_sha256.as_deref() else {
+        if source.exists() || destination.exists() {
+            return Err(InstallError::RuntimeBindingDrift);
+        }
+        return Ok(());
+    };
+    let observed_path = match (source.exists(), destination.exists()) {
+        (true, false) => source.as_path(),
+        (false, true) => destination,
+        _ => return Err(InstallError::RuntimeBindingDrift),
+    };
+    let bytes =
+        read_optional_owned_file(observed_path)?.ok_or(InstallError::RuntimeBindingDrift)?;
+    if bytes.len() > 128 * 1024 || sha256_bytes(&bytes) != expected_digest {
+        return Err(InstallError::RuntimeBindingDrift);
+    }
+    quarantine_file(&source, destination, &bytes)
 }
 
 fn quarantine_versions(
@@ -2460,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_binding_is_idempotent_and_drift_safe_outside_immutable_slots() {
+    fn runtime_binding_is_idempotent_drift_safe_and_owned_on_uninstall() {
         let root = root("runtime-binding");
         let install = Installation::new(root.join("installed"));
         install.install("0.1.0", &payload(&root, "one")).unwrap();
@@ -2486,8 +2517,8 @@ mod tests {
         let receipt = install
             .uninstall(&SandboxAutostartBackend::new(root.join("autostart.json")))
             .unwrap();
-        assert!(receipt.foreign_content_preserved);
-        assert!(install.runtime_binding_path().is_file());
+        assert!(receipt.root_removed);
+        assert!(!install.root().exists());
     }
 
     #[test]
@@ -2510,6 +2541,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(install.state(), Err(InstallError::RuntimeBindingDrift));
+        assert_eq!(
+            install.uninstall(&SandboxAutostartBackend::new(root.join("autostart.json"))),
+            Err(InstallError::RuntimeBindingDrift)
+        );
     }
 
     #[test]
@@ -2622,6 +2657,9 @@ mod tests {
         let root = root("uninstall-interruption");
         let install = Installation::new(root.join("installed"));
         install.install("0.1.0", &payload(&root, "one")).unwrap();
+        install
+            .configure_runtime_binding(&runtime_binding(&root))
+            .unwrap();
         let backend = SandboxAutostartBackend::new(root.join("autostart.json"));
         install.enable_autostart(&backend).unwrap();
         let mut transaction = UninstallTransaction {
@@ -2635,6 +2673,7 @@ mod tests {
         transaction.phase = UninstallPhase::AutostartRemoved;
         install.write_uninstall_transaction(&transaction).unwrap();
         install.quarantine_uninstall_content(&transaction).unwrap();
+        assert!(!install.runtime_binding_path().exists());
 
         let receipt = install.uninstall(&backend).unwrap();
         assert_eq!(receipt.removed_versions, 1);
