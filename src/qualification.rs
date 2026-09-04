@@ -270,8 +270,8 @@ pub fn assess_h1_workflow_template() -> H1WorkflowTemplateAssessment {
 pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
     let lowercase = source.to_ascii_lowercase();
     let secret_context = ["secrets", "."].concat();
-    let frozen_template_exact =
-        normalize_workflow_source(source) == normalize_workflow_source(H1_WORKFLOW_TEMPLATE);
+    let normalized = normalize_workflow_source(source);
+    let frozen_template_exact = normalized == normalize_workflow_source(H1_WORKFLOW_TEMPLATE);
     let triggers = top_level_child_keys(source, "on", 2);
     let workflow_inputs = nested_child_keys(source, "workflow_dispatch", "inputs", 6);
     let selectors = list_values(source, "runs-on");
@@ -280,7 +280,9 @@ pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
         reserved_selector_exact: frozen_template_exact
             && selectors == ["self-hosted", "Windows", "X64", RESERVED_ADMISSION_LABEL],
         runtime_identity_asserted: frozen_template_exact
-            && source.contains("H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}")
+            && normalized.contains(
+                "      - name: Assert immutable envelope and runtime identity\n        env:\n          H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n        shell: pwsh",
+            )
             && source.contains("RUNNERMESH_EXPECTED_RUNNER_NAME")
             && source.contains("-cne $env:H1_OBSERVED_RUNNER_NAME"),
         candidate_identity_asserted: frozen_template_exact
@@ -966,6 +968,12 @@ mod tests {
         assert!(assessment.transaction_identity_asserted);
         assert!(H1_WORKFLOW_TEMPLATE.contains("workflow_dispatch"));
         assert!(!H1_WORKFLOW_TEMPLATE.contains("pull_request"));
+        assert!(H1_WORKFLOW_TEMPLATE.contains(
+            "      - name: Assert immutable envelope and runtime identity\n        env:\n          H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n        shell: pwsh",
+        ));
+        assert!(!H1_WORKFLOW_TEMPLATE.contains(
+            "      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n      H1_TRANSACTION_ID",
+        ));
     }
 
     #[test]
@@ -996,8 +1004,8 @@ mod tests {
         assert!(!assess_h1_workflow_source(&extra_job).source_contract_ready());
 
         let commented_identity = H1_WORKFLOW_TEMPLATE.replace(
-            "      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
-            "      # H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
+            "          H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
+            "          # H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
         );
         assert!(!assess_h1_workflow_source(&commented_identity).source_contract_ready());
 

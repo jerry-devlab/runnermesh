@@ -143,6 +143,10 @@ frozen candidate variable rather than the caller-selected input. Fixed `primary`
 `no-new-admission`, and `reconnect` choices are witnesses inside one transaction
 family; none accepts an arbitrary shell command.
 
+The `${{ runner.name }}` observation is bound through the first step's `env`,
+where the runner context is available. It is deliberately not evaluated in
+job-level `env`, which GitHub rejects before dispatch.
+
 Before live collection, the dedicated read-only artifact verifier parses the
 private binding through the exact `H1LiveBinding` schema, rejects placeholder or
 unknown members, applies cross-binding semantic checks, and assesses the
