@@ -67,7 +67,7 @@ If not, stop. Do not publish.
 Show a concise publication plan and wait for explicit Owner authorization:
 
 ```text
-AUTHORIZE_F5_H3_V0_1_0_PUBLICATION
+AUTHORIZE_MASTER_V0_1_0_PUBLICATION
 ```
 
 Then:
