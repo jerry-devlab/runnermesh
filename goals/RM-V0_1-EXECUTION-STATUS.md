@@ -44,7 +44,7 @@ Evidence-scope flags are not top-level result dispositions:
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
-| Final autonomous closeout Master Goal | PREPARING | productization accepted on authoritative `4ec66407486c78e0278c470ee6808850a7e01d78` | #37-#41, #33 | Phase 0, fresh-target establishment, H1 qualification/restore, and G12-G15 acceptance are complete | produce and sandbox-qualify the immutable G15R candidate |
+| Final autonomous closeout Master Goal | WAITING_FOR_OWNER | G15R accepted on immutable RC `8d8051ecc8bf556d30e632dd8b09985fc653c905` | #37-#45, #33 | Phase 0, H1 qualification/restore, G12-G15 acceptance, and G15R release/security hardening are complete | exact `AUTHORIZE_MASTER_H2_CUTOVER` gate |
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
@@ -65,8 +65,8 @@ Evidence-scope flags are not top-level result dispositions:
 | G13 versioned install | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | immutable explicit-root versioned install, fail-closed path/reparse validation, and durable interruption reconciliation for slot and activation changes | integrated G15R sandbox proof |
 | G14 update + rollback | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | staged update, active-job deferral, second payload-digest binding, activation rollback, and recovered provenance source accepted | integrated G15R sandbox proof |
 | G15 packaging + doctor | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | explicit-input package uses one verified byte stream for contents and SHA-256, exact full commit provenance, bounded archive safety, and isolated doctor source | integrated G15R sandbox proof |
-| G15R integrated pre-H2 RC | PREPARING | starts from `4ec66407486c78e0278c470ee6808850a7e01d78` | #42 + bounded repair PR | Named Pipe DACL, release-build provenance, immutable packaging, plus installed stable-entry and exact admission-binding repair after integrated smoke exposed the missing production connection | protected repair merge, replacement authoritative-main package, exact installed-runtime smoke, and focused acceptance |
-| H2/G16-A real cutover | TODO | N/A | N/A | immutable RC only | G15R `H2_RC_READY=true` + Owner gate |
+| G15R integrated pre-H2 RC | PASS | `8d8051ecc8bf556d30e632dd8b09985fc653c905` | #42-#45 | exact-main package/provenance and downloaded installed-runtime smoke passed; archive SHA-256 `3c556af60775d5217e67446a57c27d7967fe5e31176e41dced73cc197cb5417f`; focused release/security acceptance passed | H2 Owner gate |
+| H2/G16-A real cutover | WAITING_FOR_OWNER | immutable RC `8d8051ecc8bf556d30e632dd8b09985fc653c905` | #42-#45 | only the accepted immutable RC is eligible; no production mutation has occurred | exact `AUTHORIZE_MASTER_H2_CUTOVER` gate |
 | H2/G16-B sustained dogfood | TODO | N/A | N/A | minimum 24h ordinary-use window | successful cutover |
 | G17 RC closeout | TODO | N/A | N/A | exact candidate/evidence/docs/release closeout | sustained dogfood PASS |
 | H3/G18 v0.1.0 release | TODO | N/A | N/A | stable publication requires Owner authorization | G17 PASS |
@@ -141,8 +141,8 @@ H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_LIVE_ADAPTER_SOURCE_READY=true
 H1_NON_MUTATING_READINESS=PASS_11_OF_11
 H1_OWNER_BUNDLE_SOURCE_PREPARED=true
-MASTER_GOAL_PHASE=F3_RC_RELEASE_HARDENING
-MASTER_GOAL_STATE=PREPARING
+MASTER_GOAL_PHASE=F4_H2_CUTOVER_DOGFOOD
+MASTER_GOAL_STATE=WAITING_FOR_OWNER
 P0_HISTORICAL_TARGET_RETRY_EXHAUSTED=true
 HISTORICAL_P0_V0_1_AUTHORITY=RETIRED_BY_OWNER
 FRESH_OFFICIAL_H1_TARGET_SELECTED=true
@@ -153,6 +153,14 @@ H1_LIVE_READINESS=PASS_11_OF_11
 H1_EXECUTED=true
 H1_QUALIFICATION=PASS
 H1_RESTORE=PASS
+G15R=PASS
+H2_RC_READY=true
+RC_COMMIT=8d8051ecc8bf556d30e632dd8b09985fc653c905
+RC_ARCHIVE_SHA256=3c556af60775d5217e67446a57c27d7967fe5e31176e41dced73cc197cb5417f
+RC_IDENTITY=IMMUTABLE
+NAMED_PIPE_EXPLICIT_DACL=PASS
+RELEASE_SECURITY_DEBT_BLOCKING=0
+H2_CUTOVER_AUTHORIZED=false
 ```
 
 Unknown identity, selector ownership, routing, workflow, credential, local
@@ -164,7 +172,7 @@ binding, rollback, recovery, or Owner evidence fails closed.
 PRIVATE_EVIDENCE_ACL_HARDENING=PASS
 ACTIONS_CHECKOUT_IMMUTABLE_PINNING=RESOLVED_AT_H1_SOURCE
 ACTIONS_CHECKOUT_PIN=3d3c42e5aac5ba805825da76410c181273ba90b1
-NAMED_PIPE_EXPLICIT_DACL=IN_PROGRESS_F3
+NAMED_PIPE_EXPLICIT_DACL=PASS
 ```
 
 The authorized private evidence ACL and fresh-target bindings are established;
