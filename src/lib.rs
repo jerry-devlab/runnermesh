@@ -119,7 +119,12 @@ pub use runtime::{
     ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
     SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
 };
-pub use runtime_binding::{InstalledRuntimeBinding, INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION};
+#[cfg(windows)]
+pub use runtime_binding::current_windows_identity_reference;
+pub use runtime_binding::{
+    InstalledRuntimeBinding, INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION,
+    WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+};
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
     SupervisorOutcome, SupervisorRefusal, SupervisorRequest, SyntheticProcessBackend,

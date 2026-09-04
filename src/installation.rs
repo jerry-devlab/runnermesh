@@ -21,7 +21,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const INSTALLATION_SCHEMA_VERSION: u32 = 1;
+pub const INSTALLATION_SCHEMA_VERSION: u32 = 2;
 const LEDGER_FILE: &str = ".runnermesh-installation.json";
 const CURRENT_FILE: &str = "current.json";
 const VERSIONS_DIR: &str = "versions";
@@ -242,12 +242,15 @@ impl Installation {
     /// Absence is a valid unconfigured state; malformed or unsafe content
     /// fails closed.
     pub fn runtime_binding(&self) -> Result<Option<crate::InstalledRuntimeBinding>, InstallError> {
-        let _ = self.state()?;
-        let path = self.runtime_binding_path();
-        let Some(bytes) = read_optional_owned_file(&path)? else {
+        let state = self.state()?;
+        let Some(expected_digest) = state.runtime_binding_sha256.as_deref() else {
             return Ok(None);
         };
-        if bytes.len() > 128 * 1024 {
+        let path = self.runtime_binding_path();
+        let Some(bytes) = read_optional_owned_file(&path)? else {
+            return Err(InstallError::RuntimeBindingDrift);
+        };
+        if bytes.len() > 128 * 1024 || sha256_bytes(&bytes) != expected_digest {
             return Err(InstallError::DamagedRuntimeBinding);
         }
         let binding = serde_json::from_slice::<crate::InstalledRuntimeBinding>(&bytes)
@@ -268,22 +271,37 @@ impl Installation {
         if !binding.is_valid() {
             return Err(InstallError::DamagedRuntimeBinding);
         }
-        let _ = self.state()?;
+        let mut state = self.state()?;
         let guards = self.guard_owned_directories()?;
         let path = self.runtime_binding_path();
         let bytes =
             serde_json::to_vec_pretty(binding).map_err(|_| InstallError::DamagedRuntimeBinding)?;
-        match read_optional_owned_file(&path)? {
-            Some(existing) if existing == bytes => return Ok(false),
+        let digest = sha256_bytes(&bytes);
+        match state.runtime_binding_sha256.as_deref() {
+            Some(existing) if existing == digest => return Ok(false),
             Some(_) => return Err(InstallError::RuntimeBindingDrift),
-            None => {}
+            None => {
+                if read_optional_owned_file(&path)?.is_some() {
+                    return Err(InstallError::RuntimeBindingDrift);
+                }
+            }
         }
         guards.verify()?;
-        atomic_write(&path, &bytes).map_err(InstallError::io)?;
+        durable_create_new(&path, &bytes).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                InstallError::RuntimeBindingDrift
+            } else {
+                InstallError::io(error)
+            }
+        })?;
         guards.verify()?;
         if read_optional_owned_file(&path)?.as_deref() != Some(bytes.as_slice()) {
             return Err(InstallError::RuntimeBindingDrift);
         }
+        state.runtime_binding_sha256 = Some(digest);
+        self.write_state(&state)?;
+        guards.verify()?;
+        self.verify_state(&state)?;
         Ok(true)
     }
 
@@ -970,6 +988,18 @@ impl Installation {
                 }
                 self.active_agent_path_without_state(version).map(|_| ())
             }
+        }?;
+        match state.runtime_binding_sha256.as_deref() {
+            None if self.runtime_binding_path().exists() => Err(InstallError::RuntimeBindingDrift),
+            None => Ok(()),
+            Some(expected) => {
+                let bytes = read_optional_owned_file(&self.runtime_binding_path())?
+                    .ok_or(InstallError::RuntimeBindingDrift)?;
+                if bytes.len() > 128 * 1024 || sha256_bytes(&bytes) != expected {
+                    return Err(InstallError::RuntimeBindingDrift);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1016,6 +1046,7 @@ pub struct InstallationState {
     pub schema_version: u32,
     pub active_version: Option<String>,
     pub versions: BTreeMap<String, VersionManifest>,
+    pub runtime_binding_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1585,6 +1616,7 @@ fn initial_installation_state() -> InstallationState {
         schema_version: INSTALLATION_SCHEMA_VERSION,
         active_version: None,
         versions: BTreeMap::new(),
+        runtime_binding_sha256: None,
     }
 }
 
@@ -1597,6 +1629,15 @@ fn validate_installation_state_contract(state: &InstallationState) -> Result<(),
     if state.versions.is_empty() != state.active_version.is_none() {
         return Err(InstallError::DamagedMetadata(
             "installation active-version contract is inconsistent".to_owned(),
+        ));
+    }
+    if state
+        .runtime_binding_sha256
+        .as_deref()
+        .is_some_and(|digest| !is_lower_hex_digest(digest, 64))
+    {
+        return Err(InstallError::DamagedMetadata(
+            "runtime binding digest is invalid".to_owned(),
         ));
     }
     for (version, manifest) in &state.versions {
@@ -2308,8 +2349,8 @@ mod tests {
     #[cfg(windows)]
     use super::{guard_existing_directories, WindowsUserStartupBackend};
     use super::{
-        manifest_for_payload, AutostartBackend, AutostartChange, AutostartEntry, InstallError,
-        Installation, InstallationTransaction, InstallationTransactionPhase,
+        manifest_for_payload, sha256_bytes, AutostartBackend, AutostartChange, AutostartEntry,
+        InstallError, Installation, InstallationTransaction, InstallationTransactionPhase,
         SandboxAutostartBackend, UninstallPhase, UninstallTransaction,
         INSTALL_TRANSACTION_SCHEMA_VERSION, UNINSTALL_TRANSACTION_SCHEMA_VERSION,
     };
@@ -2356,7 +2397,11 @@ mod tests {
             crate::ExactLocalRunnerBinding::new(
                 root.join("runner"),
                 root.join("work"),
-                crate::OpaqueIdentityReference::new("windows-user", "fixture-reference").unwrap(),
+                crate::OpaqueIdentityReference::new(
+                    crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
             )
             .unwrap(),
             vec!["fixture.exe".to_owned()],
@@ -2406,6 +2451,13 @@ mod tests {
         assert!(install.configure_runtime_binding(&binding).unwrap());
         assert!(!install.configure_runtime_binding(&binding).unwrap());
         assert!(install.runtime_binding().unwrap().unwrap() == binding);
+        let state = install.state().unwrap();
+        assert_eq!(
+            state.runtime_binding_sha256,
+            Some(sha256_bytes(
+                &fs::read(install.runtime_binding_path()).unwrap()
+            ))
+        );
 
         let mut drift = binding;
         drift.process_probe_executables = vec!["other.exe".to_owned()];
@@ -2419,6 +2471,28 @@ mod tests {
             .unwrap();
         assert!(receipt.foreign_content_preserved);
         assert!(install.runtime_binding_path().is_file());
+    }
+
+    #[test]
+    fn unanchored_or_replaced_runtime_binding_fails_closed() {
+        let root = root("runtime-binding-drift");
+        let install = Installation::new(root.join("installed"));
+        install.install("0.1.0", &payload(&root, "one")).unwrap();
+        let binding = runtime_binding(&root);
+        let bytes = serde_json::to_vec_pretty(&binding).unwrap();
+        fs::write(install.runtime_binding_path(), &bytes).unwrap();
+        assert_eq!(install.state(), Err(InstallError::RuntimeBindingDrift));
+
+        fs::remove_file(install.runtime_binding_path()).unwrap();
+        assert!(install.configure_runtime_binding(&binding).unwrap());
+        let mut replacement = binding;
+        replacement.process_probe_executables = vec!["replacement.exe".to_owned()];
+        fs::write(
+            install.runtime_binding_path(),
+            serde_json::to_vec_pretty(&replacement).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(install.state(), Err(InstallError::RuntimeBindingDrift));
     }
 
     #[test]

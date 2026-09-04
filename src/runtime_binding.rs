@@ -10,6 +10,19 @@ use serde::{Deserialize, Serialize};
 use crate::{AdmissionBinding, ExactLocalRunnerBinding};
 
 pub const INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 1;
+/// Installed runtimes bind the owning Windows identity without persisting SID
+/// text. The key is the lowercase SHA-256 of the binary SID representation.
+pub const WINDOWS_SID_SHA256_IDENTITY_PROVIDER: &str = "windows-sid-sha256-v1";
+
+/// Produces the private opaque reference used to bind an installed runtime to
+/// the current Windows user. SID text never leaves the OS observation helper.
+#[cfg(windows)]
+pub fn current_windows_identity_reference() -> Result<crate::OpaqueIdentityReference, &'static str>
+{
+    let digest = crate::process_snapshot::current_user_identity_sha256()
+        .map_err(|_| "current Windows identity is unavailable")?;
+    crate::OpaqueIdentityReference::new(WINDOWS_SID_SHA256_IDENTITY_PROVIDER, digest)
+}
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +57,8 @@ impl InstalledRuntimeBinding {
             && self.admission.is_valid()
             && self.admission.has_valid_ownership()
             && self.local.is_valid()
+            && self.local.execution_identity_ref.provider == WINDOWS_SID_SHA256_IDENTITY_PROVIDER
+            && is_lower_hex_digest(&self.local.execution_identity_ref.key)
             && self.process_probe_executables.len() <= 64
             && self
                 .process_probe_executables
@@ -51,6 +66,13 @@ impl InstalledRuntimeBinding {
                 .all(|name| valid_executable_name(name))
             && unique_case_insensitive(&self.process_probe_executables)
     }
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn valid_executable_name(name: &str) -> bool {
@@ -101,7 +123,11 @@ mod tests {
             ExactLocalRunnerBinding::new(
                 PathBuf::from(r"C:\fixture\runner"),
                 PathBuf::from(r"C:\fixture\work"),
-                OpaqueIdentityReference::new("windows-user", "fixture-reference").unwrap(),
+                OpaqueIdentityReference::new(
+                    WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
             )
             .unwrap(),
             vec!["fixture.exe".to_owned()],
@@ -130,5 +156,16 @@ mod tests {
             candidate.process_probe_executables = names;
             assert!(!candidate.is_valid());
         }
+
+        let mut wrong_identity_provider = binding();
+        wrong_identity_provider
+            .local
+            .execution_identity_ref
+            .provider = "windows-user".to_owned();
+        assert!(!wrong_identity_provider.is_valid());
+
+        let mut malformed_identity_digest = binding();
+        malformed_identity_digest.local.execution_identity_ref.key = "not-a-digest".to_owned();
+        assert!(!malformed_identity_digest.is_valid());
     }
 }

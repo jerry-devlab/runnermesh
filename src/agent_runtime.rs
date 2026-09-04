@@ -152,7 +152,7 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
             let observer = RuntimeObserver::new_bound(
                 &binding.local,
-                &binding.admission.runner_name,
+                &binding.admission,
                 binding.process_probe_executables,
             );
             (
@@ -191,6 +191,11 @@ fn run_agent(
     reconciler: RuntimeReconciler,
     development_controls: bool,
 ) -> Result<(), String> {
+    // Acquire the user-scoped authority guard before constructing a configured
+    // core or performing any observation/reconciliation that could mutate the
+    // remote admission selector.
+    let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
+    let server = IpcServer::bind(endpoint).map_err(|error| error.to_string())?;
     let runner_home = observer.runner_home.as_deref();
     let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
     let store = FileConfigStore::new(config_path);
@@ -206,8 +211,6 @@ fn run_agent(
     write_runtime_stage(&runtime_state_root, "observation-complete")?;
     let core = Arc::new(Mutex::new(core));
     let exit = Arc::new(RuntimeExitState::default());
-    let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
-    let server = IpcServer::bind(endpoint).map_err(|error| error.to_string())?;
     write_runtime_stage(&runtime_state_root, "pipe-bound")?;
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let pipe_thread = spawn_pipe_loop(
@@ -920,7 +923,7 @@ impl RuntimeObserver {
 
     fn new_bound(
         local: &crate::ExactLocalRunnerBinding,
-        runner_name: &str,
+        admission: &crate::AdmissionBinding,
         process_probe_names: Vec<String>,
     ) -> Self {
         Self {
@@ -929,7 +932,7 @@ impl RuntimeObserver {
             steam: crate::SteamGameProbe::new(WindowsSteamAppIdSource),
             process_list: ProcessListProbe::new(WindowsProcessSource, process_probe_names),
             runner_home: Some(local.runner_home.clone()),
-            exact_runner_source: Some(WindowsRunnerSource::for_exact_binding(local, runner_name)),
+            exact_runner_source: Some(WindowsRunnerSource::for_exact_binding(local, admission)),
         }
     }
 }
@@ -962,10 +965,11 @@ impl AgentObserver for RuntimeObserver {
                 }],
             ),
         };
+        let hard_safety = hard_safety_from_host(&host);
         Ok(AgentObservation {
             health: host.health.health,
             health_reason_code: Some(host.health.reason_code),
-            hard_safety: HardSafetyState::Clear,
+            hard_safety,
             runner_phase,
             execution_identity,
             work_root,
@@ -980,6 +984,19 @@ impl AgentObserver for RuntimeObserver {
             ],
             system_preferences: crate::windows_preferences::observe_system_preferences()?,
         })
+    }
+}
+
+fn hard_safety_from_host(host: &HostSnapshot) -> HardSafetyState {
+    if host.health.health == AgentHealth::Healthy
+        && matches!(
+            host.session,
+            crate::SessionState::Active | crate::SessionState::Inactive
+        )
+    {
+        HardSafetyState::Clear
+    } else {
+        HardSafetyState::Unknown
     }
 }
 
@@ -1031,11 +1048,7 @@ fn append_runtime_doctor_checks(
     };
     let runtime_ready = readiness.native_tray_ready.load(Ordering::Acquire) && probes_ready;
     let control_status = if readiness.runner_control_configured {
-        if snapshot.admission_control.lifecycle == crate::AdmissionLifecycleState::NotConfigured {
-            DoctorStatus::Fail
-        } else {
-            DoctorStatus::Pass
-        }
+        admission_control_doctor_status(snapshot.admission_control.lifecycle)
     } else {
         DoctorStatus::Warn
     };
@@ -1107,9 +1120,30 @@ fn append_runtime_doctor_checks(
         check(
             "runner-admission-control",
             control_status,
-            (control_status != DoctorStatus::Pass).then_some("runner-control-not-configured"),
+            (control_status != DoctorStatus::Pass).then_some(
+                if readiness.runner_control_configured {
+                    "runner-control-unhealthy"
+                } else {
+                    "runner-control-not-configured"
+                },
+            ),
         ),
     ]);
+}
+
+fn admission_control_doctor_status(lifecycle: crate::AdmissionLifecycleState) -> DoctorStatus {
+    use crate::AdmissionLifecycleState::{
+        Advertising, Busy, DrainPending, Drained, Full, Listening, ReAdvertising, Refused, Unknown,
+        WithdrawRequested, WithdrawalBlocked, Withdrawing,
+    };
+    match lifecycle {
+        Full | Advertising | ReAdvertising | Listening | Busy | WithdrawRequested | Withdrawing
+        | DrainPending | Drained => DoctorStatus::Pass,
+        Unknown => DoctorStatus::Unknown,
+        WithdrawalBlocked | Refused | crate::AdmissionLifecycleState::NotConfigured => {
+            DoctorStatus::Fail
+        }
+    }
 }
 
 fn static_reason(value: &'static str) -> ReasonCode {
@@ -1118,8 +1152,11 @@ fn static_reason(value: &'static str) -> ReasonCode {
 
 #[cfg(test)]
 mod tests {
-    use super::icon_for;
-    use crate::TrayIconGlyph;
+    use super::{admission_control_doctor_status, hard_safety_from_host, icon_for};
+    use crate::{
+        AdmissionLifecycleState, DoctorStatus, HardSafetyState, HostEvidence, HostSnapshot,
+        SessionState, TrayIconGlyph,
+    };
 
     #[test]
     fn deterministic_icons_cover_every_capacity_glyph() {
@@ -1141,5 +1178,46 @@ mod tests {
         assert!(manifest.contains("PerMonitorV2, PerMonitor"));
         assert!(manifest.contains("true/pm"));
         assert!(manifest.contains("version=\"0.1.0.0\""));
+    }
+
+    #[test]
+    fn degraded_host_evidence_is_hard_safety_unknown() {
+        let healthy = HostSnapshot::from_evidence(HostEvidence {
+            cpu_percent: Some(1),
+            memory_available_bytes: Some(1),
+            user_idle_seconds: Some(1),
+            session: SessionState::Active,
+        });
+        assert_eq!(hard_safety_from_host(&healthy), HardSafetyState::Clear);
+
+        let incomplete = HostSnapshot::from_evidence(HostEvidence {
+            cpu_percent: None,
+            memory_available_bytes: Some(1),
+            user_idle_seconds: Some(1),
+            session: SessionState::Unknown,
+        });
+        assert_eq!(hard_safety_from_host(&incomplete), HardSafetyState::Unknown);
+    }
+
+    #[test]
+    fn doctor_never_reports_failed_or_unknown_admission_as_pass() {
+        for lifecycle in [
+            AdmissionLifecycleState::WithdrawalBlocked,
+            AdmissionLifecycleState::Refused,
+            AdmissionLifecycleState::NotConfigured,
+        ] {
+            assert_eq!(
+                admission_control_doctor_status(lifecycle),
+                DoctorStatus::Fail
+            );
+        }
+        assert_eq!(
+            admission_control_doctor_status(AdmissionLifecycleState::Unknown),
+            DoctorStatus::Unknown
+        );
+        assert_eq!(
+            admission_control_doctor_status(AdmissionLifecycleState::Drained),
+            DoctorStatus::Pass
+        );
     }
 }
