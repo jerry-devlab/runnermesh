@@ -279,10 +279,10 @@ pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
         workflow_dispatch_only: frozen_template_exact && triggers == ["workflow_dispatch"],
         reserved_selector_exact: frozen_template_exact
             && selectors == ["self-hosted", "Windows", "X64", RESERVED_ADMISSION_LABEL],
-        runtime_identity_asserted: frozen_template_exact
-            && normalized.contains(
+        runtime_identity_asserted: normalized.contains(
                 "      - name: Assert immutable envelope and runtime identity\n        env:\n          H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n        shell: pwsh",
             )
+            && !mapping_at_indent_contains(source, "env", 4, "${{ runner.name }}")
             && source.contains("RUNNERMESH_EXPECTED_RUNNER_NAME")
             && source.contains("-cne $env:H1_OBSERVED_RUNNER_NAME"),
         candidate_identity_asserted: frozen_template_exact
@@ -311,6 +311,25 @@ pub fn assess_h1_workflow_source(source: &str) -> H1WorkflowTemplateAssessment {
 
 fn normalize_workflow_source(source: &str) -> String {
     source.replace("\r\n", "\n")
+}
+
+fn mapping_at_indent_contains(source: &str, key: &str, indent: usize, needle: &str) -> bool {
+    let prefix = format!("{key}:");
+    let lines = source.lines().collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(index, line)| {
+        if indentation(line) != indent {
+            return false;
+        }
+        let Some(value) = line.trim_start().strip_prefix(&prefix) else {
+            return false;
+        };
+        value.contains(needle)
+            || (value.trim().is_empty()
+                && lines[index + 1..]
+                    .iter()
+                    .take_while(|child| child.trim().is_empty() || indentation(child) > indent)
+                    .any(|child| child.contains(needle)))
+    })
 }
 
 fn top_level_child_keys<'a>(source: &'a str, root: &str, child_indent: usize) -> Vec<&'a str> {
@@ -1009,6 +1028,14 @@ mod tests {
             "          # H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}",
         );
         assert!(!assess_h1_workflow_source(&commented_identity).source_contract_ready());
+
+        let duplicate_job_scoped_identity = H1_WORKFLOW_TEMPLATE.replace(
+            "      H1_CANDIDATE_SHA: ${{ inputs.candidate_sha }}",
+            "      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n      H1_CANDIDATE_SHA: ${{ inputs.candidate_sha }}",
+        );
+        assert!(
+            !assess_h1_workflow_source(&duplicate_job_scoped_identity).runtime_identity_asserted
+        );
 
         let unbound_candidate = H1_WORKFLOW_TEMPLATE.replace(
             "$env:H1_CANDIDATE_SHA -cne $env:H1_EXPECTED_CANDIDATE_SHA",

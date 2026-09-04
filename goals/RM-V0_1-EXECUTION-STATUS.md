@@ -44,14 +44,14 @@ Evidence-scope flags are not top-level result dispositions:
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
-| Final autonomous closeout Master Goal | WAITING_FOR_OWNER | containing protected-main merge | #37, #38, containing ledger reconciliation PR | Phase 0 authority accepted on healthy protected main; historical P0 retry remains exhausted; fresh official H1 path changes target authority only | exact-plan `AUTHORIZE_MASTER_FRESH_H1_TARGET` |
+| Final autonomous closeout Master Goal | PREPARING | accepted fresh-target authority; containing workflow correction merge | #37-#41 | Phase 0 and the exact fresh-target Owner transaction are complete; initial H1 dispatch was rejected before mutation and its authorization was invalidated | merge correction, recollect live readiness, then request a fresh exact-plan H1 authorization |
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
 | Roadmap v3 governance truth | ACCEPTED | `af0c14e63f070409c7c31f92c986aca5214ac379` | #29 | accepted health-audit conclusions; parallel source lane plus H1 merge gate | follow the eight execution blocks |
-| Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S remain private evidence, not active transaction variants | P0 supervised restore only |
+| Historical G11 qualification | SUPERSEDED | N/A | N/A | V3/V4/V4R/V4S remain private evidence; their v0.1 qualification authority was retired by the Owner | none |
 | PR #17 bounded executor | SUPERSEDED | `a8a028e472ff1271003ee161b7307c3e70818b40` | #17 closed | exact-scope/no-signal evidence preserved by ADR 0004 and accepted G11R; run-once path obsolete | none |
-| P0 supervised baseline restore | BLOCKED_EXTERNAL | `9501376ad1cddd3f0a29c9350f603bb5e9b8a60f` | N/A | F1's one fresh retry stopped at independent Auditor child-process admission; no live target observation or host mutation started; `P0_HISTORICAL_TARGET_RETRY_EXHAUSTED=true` | explicit Owner decision on a fresh official H1 qualification target; never automatically register or replace a runner |
+| P0 supervised baseline restore | SUPERSEDED | `9501376ad1cddd3f0a29c9350f603bb5e9b8a60f` | N/A | its one fresh retry remains exhausted; no live target observation or mutation started; the Owner retired this historical target from v0.1 authority | none |
 | Independent Auditor admission | PREPARED | containing protected-main merge | containing implementation PR | read-only/never profile plus one-child admission preflight; packaged-shell resolution is scoped to the child environment; admission is not audit acceptance | reuse for bounded independent reviews; grant only the exact evidence scope each audit requires |
 | GOV1 governance reset | ACCEPTED | PR #20 accepted | #20 | public ledger and PR-only governance foundation | none |
 | Fast Lane v2 CI/audit automation | ACCEPTED | `03d2a1c64ccbe0c113d5cd6acd4127cd208dda2f` | #26 | conservative classification, deterministic audit, stable `CI Gate`, hosted Windows/Ubuntu coverage | keep full post-merge code main CI |
@@ -159,14 +159,15 @@ binding, rollback, recovery, or Owner evidence fails closed.
 ## Remaining security debt
 
 ```text
-PRIVATE_EVIDENCE_ACL_HARDENING=REQUIRED_BEFORE_H1_LIVE_ARTIFACTS_OR_OWNER_GATE
+PRIVATE_EVIDENCE_ACL_HARDENING=PASS
 ACTIONS_CHECKOUT_IMMUTABLE_PINNING=RESOLVED_AT_H1_SOURCE
 ACTIONS_CHECKOUT_PIN=3d3c42e5aac5ba805825da76410c181273ba90b1
 NAMED_PIPE_EXPLICIT_DACL=REQUIRED_BEFORE_RELEASE
 ```
 
-The ACL change and real credential/workflow/runner configuration are separate
-Owner actions. Public docs and fixtures contain no private identities.
+The authorized private evidence ACL and fresh-target bindings are established;
+their identities remain outside this public repository. Public docs and
+fixtures contain no private identities.
 
 ## Update rule
 
