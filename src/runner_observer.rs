@@ -1,7 +1,7 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(any(windows, test))]
+use std::fs;
 
 #[cfg(windows)]
 use serde::Deserialize;
