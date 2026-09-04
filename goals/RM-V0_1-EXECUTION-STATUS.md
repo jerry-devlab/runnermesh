@@ -44,7 +44,7 @@ Evidence-scope flags are not top-level result dispositions:
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
-| Final autonomous closeout Master Goal | PREPARING | H1 accepted against authoritative `5a7205ed8fc2e20b64fb3157792800c113e7e502` | #37-#41, #33 | Phase 0, fresh-target establishment, live H1 qualification, and independent restoration verification are complete | accept the coherent G12-G15 productization candidate through PR #33 |
+| Final autonomous closeout Master Goal | PREPARING | productization accepted on authoritative `4ec66407486c78e0278c470ee6808850a7e01d78` | #37-#41, #33 | Phase 0, fresh-target establishment, H1 qualification/restore, and G12-G15 acceptance are complete | produce and sandbox-qualify the immutable G15R candidate |
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
@@ -61,11 +61,11 @@ Evidence-scope flags are not top-level result dispositions:
 | G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
 | H1 live adapters/readiness source | ACCEPTED_SOURCE | containing protected-main merge | #30 + containing H1 preparation correction PR | fixed-authority transport, strict read-only private-artifact binding verification, frozen candidate/transaction workflow identities, step-scoped server-valid runner-context assertion, workflow/routing/readiness collectors, and privacy-safe ACL reset round-trip proof; exact-head CI Gate, focused trust review, and post-merge full main CI required; tests remain synthetic-only | Owner configuration and fresh live readiness |
 | H1 one-shot qualification | PASS | authoritative `5a7205ed8fc2e20b64fb3157792800c113e7e502`; private evidence retained outside the public repository | #41 | fresh official target authority accepted; live readiness passed 11/11; the bounded advertise/route/preserve/withdraw/absence/drain/re-advertise/reconnect transaction passed; independent baseline restoration passed; no Worker was signaled and the historical P0 target remained untouched | G12-G15 productization acceptance |
-| G12 autostart | ACCEPTED | containing protected-main merge | #33 | current-user Startup backend targets the stable installed entry with create-new and exact-handle conditional removal; sandbox ownership and unrelated-content preservation coverage | integrated G15R sandbox proof |
-| G13 versioned install | ACCEPTED | containing protected-main merge | #33 | immutable explicit-root versioned install, fail-closed path/reparse validation, and durable interruption reconciliation for slot and activation changes | integrated G15R sandbox proof |
-| G14 update + rollback | ACCEPTED | containing protected-main merge | #33 | staged update, active-job deferral, second payload-digest binding, activation rollback, and recovered provenance source accepted | integrated G15R sandbox proof |
-| G15 packaging + doctor | ACCEPTED | containing protected-main merge | #33 | explicit-input package uses one verified byte stream for contents and SHA-256, exact full commit provenance, bounded archive safety, and isolated doctor source | integrated G15R sandbox proof |
-| G15R integrated pre-H2 RC | TODO | N/A | N/A | exactly one authoritative-main sandbox-qualified RC | G12-G15 accepted |
+| G12 autostart | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | current-user Startup backend targets the stable installed entry with create-new and exact-handle conditional removal; sandbox ownership and unrelated-content preservation coverage | integrated G15R sandbox proof |
+| G13 versioned install | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | immutable explicit-root versioned install, fail-closed path/reparse validation, and durable interruption reconciliation for slot and activation changes | integrated G15R sandbox proof |
+| G14 update + rollback | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | staged update, active-job deferral, second payload-digest binding, activation rollback, and recovered provenance source accepted | integrated G15R sandbox proof |
+| G15 packaging + doctor | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | explicit-input package uses one verified byte stream for contents and SHA-256, exact full commit provenance, bounded archive safety, and isolated doctor source | integrated G15R sandbox proof |
+| G15R integrated pre-H2 RC | PREPARING | starts from `4ec66407486c78e0278c470ee6808850a7e01d78` | containing F3 PR | focused Named Pipe DACL, release-build provenance, immutable packaging workflow, and exact sandbox chain | protected merge, authoritative-main package, and focused security acceptance |
 | H2/G16-A real cutover | TODO | N/A | N/A | immutable RC only | G15R `H2_RC_READY=true` + Owner gate |
 | H2/G16-B sustained dogfood | TODO | N/A | N/A | minimum 24h ordinary-use window | successful cutover |
 | G17 RC closeout | TODO | N/A | N/A | exact candidate/evidence/docs/release closeout | sustained dogfood PASS |
@@ -141,7 +141,7 @@ H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_LIVE_ADAPTER_SOURCE_READY=true
 H1_NON_MUTATING_READINESS=PASS_11_OF_11
 H1_OWNER_BUNDLE_SOURCE_PREPARED=true
-MASTER_GOAL_PHASE=F2_PRODUCTIZATION_ACCEPTANCE
+MASTER_GOAL_PHASE=F3_RC_RELEASE_HARDENING
 MASTER_GOAL_STATE=PREPARING
 P0_HISTORICAL_TARGET_RETRY_EXHAUSTED=true
 HISTORICAL_P0_V0_1_AUTHORITY=RETIRED_BY_OWNER
@@ -164,7 +164,7 @@ binding, rollback, recovery, or Owner evidence fails closed.
 PRIVATE_EVIDENCE_ACL_HARDENING=PASS
 ACTIONS_CHECKOUT_IMMUTABLE_PINNING=RESOLVED_AT_H1_SOURCE
 ACTIONS_CHECKOUT_PIN=3d3c42e5aac5ba805825da76410c181273ba90b1
-NAMED_PIPE_EXPLICIT_DACL=REQUIRED_BEFORE_RELEASE
+NAMED_PIPE_EXPLICIT_DACL=IN_PROGRESS_F3
 ```
 
 The authorized private evidence ACL and fresh-target bindings are established;

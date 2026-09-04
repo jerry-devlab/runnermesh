@@ -17,6 +17,16 @@ fn main() {
                 "provenance": manifest.provenance,
             })
         }),
+        [command, archive, destination] if command == "extract" => {
+            PackageVerifier::extract_runtime(&PathBuf::from(archive), &PathBuf::from(destination))
+                .map(|manifest| {
+                    serde_json::json!({
+                        "result": "extracted",
+                        "destination": destination,
+                        "provenance": manifest.provenance,
+                    })
+                })
+        }
         [command, output, version, commit, channel, cli, agent, manifest]
             if command == "create" =>
         {
@@ -45,7 +55,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: runnermesh-package create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive>"
+                "usage: runnermesh-package create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive> | extract <absolute-archive> <new-absolute-sandbox-directory>"
             );
             process::exit(2);
         }

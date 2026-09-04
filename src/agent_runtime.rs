@@ -128,9 +128,9 @@ pub fn run_development_agent(
 fn build_provenance() -> BuildProvenance {
     BuildProvenance {
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        commit: "development".to_owned(),
-        channel: "development-test".to_owned(),
-        target: "windows-user-session".to_owned(),
+        commit: env!("RUNNERMESH_BUILD_COMMIT").to_owned(),
+        channel: env!("RUNNERMESH_BUILD_CHANNEL").to_owned(),
+        target: env!("RUNNERMESH_BUILD_TARGET").to_owned(),
     }
 }
 

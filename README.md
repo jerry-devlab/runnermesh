@@ -29,17 +29,17 @@ Teams often have capable workstations with intermittent spare capacity, but thos
 
 ## Project status
 
-RunnerMesh is **pre-v0.1 / active development**. The accepted foundation already includes the domain/runtime contracts, Agent Core, local Named Pipe IPC, CLI, native Windows tray, User Activity/Steam/Process List probes, conservative Auto Lite, host observation, official-runner observation, supervisor foundations, persistent ordinary-user development runtime, and the Windows native process snapshot used by observation/probes.
+RunnerMesh is **pre-v0.1 / release hardening**. H1 has accepted the
+GitHub-native dynamic admission-label lifecycle and its independent baseline
+restoration. The productized autostart, immutable install, staged update,
+rollback, package, provenance, and doctor foundations are also accepted.
 
-The remaining v0.1 work is concentrated in live Owner-gated qualification of
-the accepted GitHub-native dynamic admission-label lifecycle, productized
-install/autostart/update/rollback/package flows, real workstation dogfood, and
-release closeout. Roadmap v3 preserves the accepted G11R architecture, permits
-safe source preparation while the Owner lane is pending, and keeps H1 plus
-baseline restoration as the productization merge/acceptance gate. The project
-is not yet an installable stable product.
+The remaining v0.1 work is the immutable integrated release candidate, the
+Owner-gated real workstation cutover, at least 24 hours of ordinary-use
+dogfood, release closeout, and Owner-authorized publication. The project is not
+yet an installable stable product.
 
-See [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md) for the durable current execution ledger.
+See [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md) for the durable current execution ledger and [the v0.1 release operations](docs/v0.1-release-operations.md) for the immutable artifact and Owner-gate boundaries.
 
 ## Core concepts
 

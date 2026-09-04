@@ -413,6 +413,77 @@ impl Drop for InstanceGuard {
     }
 }
 
+/// Owns the LocalAlloc-backed descriptor for exactly one CreateNamedPipeW
+/// call. The descriptor contains a protected DACL with one allow ACE for the
+/// current user SID; the post-connect token comparison remains defense in
+/// depth.
+#[cfg(windows)]
+struct CurrentUserPipeSecurity(windows_sys::Win32::Security::PSECURITY_DESCRIPTOR);
+
+#[cfg(windows)]
+impl CurrentUserPipeSecurity {
+    fn new() -> Result<Self, IpcTransportError> {
+        use windows_sys::Win32::Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            PSECURITY_DESCRIPTOR,
+        };
+
+        let sddl = pipe_security_sddl(&current_user_sid()?)?;
+        let sddl = to_wide(&sddl);
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(IpcTransportError::Io(io::Error::last_os_error()));
+        }
+        Ok(Self(descriptor))
+    }
+
+    fn attributes(&mut self) -> windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+        windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>()
+                as u32,
+            lpSecurityDescriptor: self.0,
+            bInheritHandle: 0,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for CurrentUserPipeSecurity {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::LocalFree(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn pipe_security_sddl(sid: &str) -> Result<String, IpcTransportError> {
+    let mut parts = sid.split('-');
+    if sid.len() > 256
+        || parts.next() != Some("S")
+        || parts.clone().count() < 2
+        || parts.any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(IpcTransportError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "current user SID is not canonical",
+        )));
+    }
+    Ok(format!("D:P(A;;GA;;;{sid})"))
+}
+
 #[cfg(windows)]
 fn create_server_pipe(
     endpoint: &IpcEndpoint,
@@ -427,6 +498,8 @@ fn create_server_pipe(
     };
 
     let name = to_wide(&endpoint.pipe_name());
+    let mut security = CurrentUserPipeSecurity::new()?;
+    let attributes = security.attributes();
     let handle = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
@@ -436,7 +509,7 @@ fn create_server_pipe(
             MAX_FRAME_BYTES as u32,
             MAX_FRAME_BYTES as u32,
             0,
-            std::ptr::null(),
+            &attributes,
         )
     };
     if handle == INVALID_HANDLE_VALUE {
@@ -770,6 +843,75 @@ mod tests {
                 assert!(matches!(response.body, IpcResponseBody::Success(_)));
             });
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_dacl_is_current_user_only_and_denies_anonymous_open() {
+        use std::time::Duration;
+
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE},
+            Security::{ImpersonateAnonymousToken, RevertToSelf},
+            System::Threading::GetCurrentThread,
+        };
+
+        struct PipeHandle(HANDLE);
+        impl Drop for PipeHandle {
+            fn drop(&mut self) {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+
+        struct AnonymousImpersonation(bool);
+        impl AnonymousImpersonation {
+            fn begin() -> std::io::Result<Self> {
+                if unsafe { ImpersonateAnonymousToken(GetCurrentThread()) } == 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(Self(true))
+                }
+            }
+
+            fn revert(mut self) -> std::io::Result<()> {
+                let result = if unsafe { RevertToSelf() } == 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                };
+                self.0 = false;
+                result
+            }
+        }
+        impl Drop for AnonymousImpersonation {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe {
+                        RevertToSelf();
+                    }
+                }
+            }
+        }
+
+        let synthetic = super::pipe_security_sddl("S-1-5-21-1-2-3-1001").unwrap();
+        assert_eq!(synthetic, "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)");
+        assert!(!synthetic.contains(";;;WD"));
+        assert!(!synthetic.contains(";;;AN"));
+        assert!(!synthetic.contains(";;;AU"));
+        assert!(!synthetic.contains(";;;BU"));
+
+        let endpoint = test_endpoint();
+        let _pipe = PipeHandle(super::create_server_pipe(&endpoint).unwrap());
+        let impersonation = AnonymousImpersonation::begin().unwrap();
+        let result = super::connect_pipe(&endpoint, Duration::from_millis(250));
+        impersonation.revert().unwrap();
+        assert!(matches!(
+            result,
+            Err(IpcTransportError::Io(ref error))
+                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+        ));
     }
 
     #[cfg(windows)]
