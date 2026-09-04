@@ -44,7 +44,7 @@ Evidence-scope flags are not top-level result dispositions:
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
-| Final autonomous closeout Master Goal | PREPARING | accepted fresh-target authority; containing workflow correction merge | #37-#41 | Phase 0 and the exact fresh-target Owner transaction are complete; initial H1 dispatch was rejected before mutation and its authorization was invalidated | merge correction, recollect live readiness, then request a fresh exact-plan H1 authorization |
+| Final autonomous closeout Master Goal | PREPARING | H1 accepted against authoritative `5a7205ed8fc2e20b64fb3157792800c113e7e502` | #37-#41, #33 | Phase 0, fresh-target establishment, live H1 qualification, and independent restoration verification are complete | accept the coherent G12-G15 productization candidate through PR #33 |
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
@@ -60,11 +60,11 @@ Evidence-scope flags are not top-level result dispositions:
 | G11R-B lifecycle implementation | ACCEPTED | `0c76e10f67d563f2dadc4914b5eefaa29a73d858` | #24 | exact-scope REST seam, desired/achieved state, drift refusal, no normal Worker signal | H1 live adapter source |
 | G11R-C qualification contracts | ACCEPTED_SOURCE | accepted label-specific package | #25 | eleven-gate fail-closed verifier, inert workflow template, one H1 transaction family, synthetic restore proof | live adapters and Owner prerequisites |
 | H1 live adapters/readiness source | ACCEPTED_SOURCE | containing protected-main merge | #30 + containing H1 preparation correction PR | fixed-authority transport, strict read-only private-artifact binding verification, frozen candidate/transaction workflow identities, step-scoped server-valid runner-context assertion, workflow/routing/readiness collectors, and privacy-safe ACL reset round-trip proof; exact-head CI Gate, focused trust review, and post-merge full main CI required; tests remain synthetic-only | Owner configuration and fresh live readiness |
-| H1 one-shot qualification | PREPARING | accepted fresh-target authority; containing workflow correction merge | containing focused correction PR | dedicated private repository-scoped user-session target established; initial workflow dispatch was rejected before any H1 run or selector mutation because the runner context was placed at job scope; baseline independently remained advertised/online/idle, and the historical P0 target remains untouched | merge correction, recollect live readiness, and request fresh exact-plan `AUTHORIZE_MASTER_H1_QUALIFICATION` |
-| G12 autostart | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS + target authority ACCEPTED |
-| G13 versioned install | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #14 draft | selective extraction allowed; acceptance/merge held | H1 qualification PASS + restore PASS + target authority ACCEPTED |
-| G14 update + rollback | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #15 draft | selective extraction allowed; acceptance/merge held | accepted G13 after H1 |
-| G15 packaging + doctor | SALVAGE / SOURCE_PREP_ALLOWED | draft asset | #16 draft | selective extraction allowed; acceptance/merge held | accepted G14 after H1 |
+| H1 one-shot qualification | PASS | authoritative `5a7205ed8fc2e20b64fb3157792800c113e7e502`; private evidence retained outside the public repository | #41 | fresh official target authority accepted; live readiness passed 11/11; the bounded advertise/route/preserve/withdraw/absence/drain/re-advertise/reconnect transaction passed; independent baseline restoration passed; no Worker was signaled and the historical P0 target remained untouched | G12-G15 productization acceptance |
+| G12 autostart | ACCEPTED | containing protected-main merge | #33 | user-session autostart source targets the stable installed entry; sandbox ownership and unrelated-content preservation coverage | integrated G15R sandbox proof |
+| G13 versioned install | ACCEPTED | containing protected-main merge | #33 | immutable explicit-root versioned install, active-version selection, durable intent/receipt, and rollback source accepted | integrated G15R sandbox proof |
+| G14 update + rollback | ACCEPTED | containing protected-main merge | #33 | staged update, active-job deferral, activation rollback, and interruption reconciliation source accepted | integrated G15R sandbox proof |
+| G15 packaging + doctor | ACCEPTED | containing protected-main merge | #33 | explicit-input package, checksum/provenance, archive safety, and isolated doctor source accepted | integrated G15R sandbox proof |
 | G15R integrated pre-H2 RC | TODO | N/A | N/A | exactly one authoritative-main sandbox-qualified RC | G12-G15 accepted |
 | H2/G16-A real cutover | TODO | N/A | N/A | immutable RC only | G15R `H2_RC_READY=true` + Owner gate |
 | H2/G16-B sustained dogfood | TODO | N/A | N/A | minimum 24h ordinary-use window | successful cutover |
@@ -139,9 +139,9 @@ G11R_B=ACCEPTED
 G11R_C=ACCEPTED_SOURCE
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_LIVE_ADAPTER_SOURCE_READY=true
-H1_NON_MUTATING_READINESS=INVALIDATED_PENDING_WORKFLOW_CORRECTION
+H1_NON_MUTATING_READINESS=PASS_11_OF_11
 H1_OWNER_BUNDLE_SOURCE_PREPARED=true
-MASTER_GOAL_PHASE=H1_WORKFLOW_CORRECTION
+MASTER_GOAL_PHASE=F2_PRODUCTIZATION_ACCEPTANCE
 MASTER_GOAL_STATE=PREPARING
 P0_HISTORICAL_TARGET_RETRY_EXHAUSTED=true
 HISTORICAL_P0_V0_1_AUTHORITY=RETIRED_BY_OWNER
@@ -149,8 +149,10 @@ FRESH_OFFICIAL_H1_TARGET_SELECTED=true
 H1_TARGET_AUTHORITY=ACCEPTED
 H1_MUTATION_ALLOWED=false
 LIVE_READINESS_EXECUTED=true
-H1_LIVE_READINESS=INVALIDATED_BY_WORKFLOW_SERVICE_VALIDATION
-H1_EXECUTED=false
+H1_LIVE_READINESS=PASS_11_OF_11
+H1_EXECUTED=true
+H1_QUALIFICATION=PASS
+H1_RESTORE=PASS
 ```
 
 Unknown identity, selector ownership, routing, workflow, credential, local
