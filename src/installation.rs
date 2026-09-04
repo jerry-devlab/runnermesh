@@ -11,9 +11,12 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +32,9 @@ const LOGS_DIR: &str = "logs";
 const STABLE_AGENT_ENTRY: &str = "runnermesh-agent.cmd";
 const INSTALL_TRANSACTION_FILE: &str = "installation-transaction.json";
 const INSTALL_TRANSACTION_SCHEMA_VERSION: u32 = 1;
+const UNINSTALL_TRANSACTION_FILE: &str = "uninstall-transaction.json";
+const UNINSTALL_RECEIPT_FILE: &str = "uninstall-receipt.json";
+const UNINSTALL_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const AUTOSTART_OWNER: &str = "runnermesh-v01";
 const AUTOSTART_VALUE: &str = "RunnerMesh";
 static SANDBOX_AUTOSTART_LOCK: Mutex<()> = Mutex::new(());
@@ -81,10 +87,14 @@ impl Installation {
         payload: &Path,
         expected_payload_sha256: Option<&str>,
     ) -> Result<InstallReceipt, InstallError> {
+        let ancestor_guards = guard_existing_directories(&self.root)?;
+        ancestor_guards.verify()?;
         validate_version(version)?;
         self.assert_runtime_root_safe()?;
         self.assert_payload_safe(payload)?;
         let mut state = self.open_or_initialize()?;
+        let owned_guards = self.guard_owned_directories()?;
+        owned_guards.verify()?;
         self.verify_state(&state)?;
         let manifest = manifest_for_payload(payload)?;
         let payload_sha256 = manifest_payload_sha256(&manifest);
@@ -139,6 +149,7 @@ impl Installation {
             verify_manifest(&staging, &manifest)?;
             transaction.phase = InstallationTransactionPhase::SlotReady;
             self.write_transaction(&transaction)?;
+            owned_guards.verify()?;
             fs::rename(&staging, &destination).map_err(InstallError::io)?;
             transaction.phase = InstallationTransactionPhase::SlotCommitted;
             self.write_transaction(&transaction)?;
@@ -161,6 +172,8 @@ impl Installation {
 
     /// Selects a pre-existing immutable slot. It never modifies a slot.
     pub fn select_active(&self, version: &str) -> Result<(), InstallError> {
+        let owned_guards = self.guard_owned_directories()?;
+        owned_guards.verify()?;
         let mut state = self.open_existing()?;
         self.verify_state(&state)?;
         if !state.versions.contains_key(version) {
@@ -191,6 +204,8 @@ impl Installation {
     }
 
     pub fn state(&self) -> Result<InstallationState, InstallError> {
+        let owned_guards = self.guard_owned_directories()?;
+        owned_guards.verify()?;
         let state = self.open_existing()?;
         self.verify_state(&state)?;
         Ok(state)
@@ -207,6 +222,14 @@ impl Installation {
             return Err(InstallError::OwnershipDrift(path));
         }
         Ok(path)
+    }
+
+    pub(crate) fn installed_payload_sha256(
+        &self,
+        version: &str,
+    ) -> Result<Option<String>, InstallError> {
+        let state = self.state()?;
+        Ok(state.versions.get(version).map(manifest_payload_sha256))
     }
 
     /// Enables exactly the RunnerMesh named autostart value, and only when it
@@ -237,28 +260,55 @@ impl Installation {
         &self,
         backend: &impl AutostartBackend,
     ) -> Result<UninstallReceipt, InstallError> {
-        let state = self.open_existing()?;
-        self.verify_state(&state)?;
-        let _ = self.disable_autostart(backend)?;
-        fs::remove_dir_all(self.versions_dir()).map_err(InstallError::io)?;
-        fs::remove_dir_all(self.root.join(BIN_DIR)).map_err(InstallError::io)?;
-        remove_owned_file(&self.root.join(CURRENT_FILE))?;
-        remove_owned_file(&self.root.join(LEDGER_FILE))?;
-        for directory in [CONFIG_DIR, STATE_DIR, LOGS_DIR] {
-            let directory = self.root.join(directory);
-            if is_empty_dir(&directory)? {
-                fs::remove_dir(&directory).map_err(InstallError::io)?;
+        if !self.root.exists() {
+            return Ok(UninstallReceipt {
+                removed_versions: 0,
+                root_removed: true,
+                foreign_content_preserved: false,
+            });
+        }
+        if is_empty_dir(&self.root)? {
+            fs::remove_dir(&self.root).map_err(InstallError::io)?;
+            return Ok(UninstallReceipt {
+                removed_versions: 0,
+                root_removed: true,
+                foreign_content_preserved: false,
+            });
+        }
+        let existing_transaction = self.read_uninstall_transaction()?;
+        if existing_transaction.is_none() {
+            if let Some(receipt) = self.read_uninstall_receipt()? {
+                return Ok(UninstallReceipt {
+                    removed_versions: receipt.removed_versions,
+                    root_removed: false,
+                    foreign_content_preserved: true,
+                });
             }
         }
-        let root_removed = is_empty_dir(&self.root)?;
-        if root_removed {
-            fs::remove_dir(&self.root).map_err(InstallError::io)?;
-        }
-        Ok(UninstallReceipt {
-            removed_versions: state.versions.len(),
-            root_removed,
-            foreign_content_preserved: !root_removed,
-        })
+        let mut transaction = {
+            let _root_guards = guard_existing_directories(&self.state_dir())?;
+            match existing_transaction {
+                Some(transaction) => transaction,
+                None => {
+                    let state = self.open_existing()?;
+                    self.verify_state(&state)?;
+                    let transaction = UninstallTransaction {
+                        schema_version: UNINSTALL_TRANSACTION_SCHEMA_VERSION,
+                        transaction_id: format!("uninstall-{:032x}", unique_suffix()),
+                        state,
+                        phase: UninstallPhase::Intent,
+                    };
+                    durable_create_new(
+                        &self.uninstall_transaction_path(),
+                        &serde_json::to_vec_pretty(&transaction)
+                            .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?,
+                    )
+                    .map_err(InstallError::io)?;
+                    transaction
+                }
+            }
+        };
+        self.resume_uninstall(backend, &mut transaction)
     }
 
     pub(crate) fn expected_autostart_entry(&self) -> AutostartEntry {
@@ -297,9 +347,47 @@ impl Installation {
     }
 
     fn open_or_initialize(&self) -> Result<InstallationState, InstallError> {
+        self.assert_runtime_root_safe()?;
         if !self.root.exists() {
-            fs::create_dir_all(&self.root).map_err(InstallError::io)?;
-            self.assert_runtime_root_safe()?;
+            let parent = self
+                .root
+                .parent()
+                .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
+            let parent_guards = guard_existing_directories(parent)?;
+            parent_guards.verify()?;
+            if !parent.is_dir() || is_reparse_point(parent)? {
+                return Err(InstallError::OwnershipDrift(parent.to_path_buf()));
+            }
+            let leaf = self
+                .root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
+            let staging = parent.join(format!(".{leaf}.runnermesh-init-{:032x}", unique_suffix()));
+            fs::create_dir(&staging)
+                .map_err(|error| InstallError::Io(format!("create init staging: {error}")))?;
+            let result = (|| {
+                for directory in [VERSIONS_DIR, BIN_DIR, CONFIG_DIR, STATE_DIR, LOGS_DIR] {
+                    fs::create_dir(staging.join(directory)).map_err(|error| {
+                        InstallError::Io(format!("create init directory {directory}: {error}"))
+                    })?;
+                }
+                let state = initial_installation_state();
+                atomic_write(
+                    &staging.join(LEDGER_FILE),
+                    &serde_json::to_vec_pretty(&state)
+                        .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?,
+                )
+                .map_err(|error| InstallError::Io(format!("write init ledger: {error}")))?;
+                parent_guards.verify()?;
+                fs::rename(&staging, &self.root)
+                    .map_err(|error| InstallError::Io(format!("commit init root: {error}")))?;
+                Ok::<_, InstallError>(state)
+            })();
+            if result.is_err() && staging.exists() && !is_reparse_point(&staging)? {
+                let _ = fs::remove_dir_all(&staging);
+            }
+            return result;
         }
         let ledger = self.root.join(LEDGER_FILE);
         if ledger.exists() {
@@ -312,22 +400,195 @@ impl Installation {
         {
             return Err(InstallError::ForeignContent(self.root.clone()));
         }
-        for directory in [VERSIONS_DIR, BIN_DIR, CONFIG_DIR, STATE_DIR, LOGS_DIR] {
-            fs::create_dir(self.root.join(directory)).map_err(InstallError::io)?;
-        }
-        let state = InstallationState {
-            schema_version: INSTALLATION_SCHEMA_VERSION,
-            active_version: None,
-            versions: BTreeMap::new(),
-        };
-        self.write_state(&state)?;
-        Ok(state)
+        Err(InstallError::ForeignContent(self.root.clone()))
     }
 
     fn open_existing(&self) -> Result<InstallationState, InstallError> {
         self.assert_runtime_root_safe()?;
+        if self.read_uninstall_transaction()?.is_some() {
+            return Err(InstallError::UninstallInProgress);
+        }
         self.recover_pending_transaction()?;
         self.read_state_file()
+    }
+
+    fn guard_owned_directories(&self) -> Result<ExistingDirectoryGuards, InstallError> {
+        let mut guards = guard_existing_directories(&self.root)?;
+        for directory in [VERSIONS_DIR, BIN_DIR, CONFIG_DIR, STATE_DIR, LOGS_DIR] {
+            guards.extend(guard_existing_directories(&self.root.join(directory))?);
+        }
+        Ok(guards)
+    }
+
+    fn uninstall_transaction_path(&self) -> PathBuf {
+        self.state_dir().join(UNINSTALL_TRANSACTION_FILE)
+    }
+
+    fn uninstall_receipt_path(&self) -> PathBuf {
+        self.state_dir().join(UNINSTALL_RECEIPT_FILE)
+    }
+
+    fn read_uninstall_transaction(&self) -> Result<Option<UninstallTransaction>, InstallError> {
+        let path = self.uninstall_transaction_path();
+        let Some(bytes) = read_optional_owned_file(&path)? else {
+            return Ok(None);
+        };
+        let transaction = serde_json::from_slice::<UninstallTransaction>(&bytes)
+            .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
+        validate_uninstall_transaction(&transaction)?;
+        Ok(Some(transaction))
+    }
+
+    fn read_uninstall_receipt(&self) -> Result<Option<DurableUninstallReceipt>, InstallError> {
+        let path = self.uninstall_receipt_path();
+        let Some(bytes) = read_optional_owned_file(&path)? else {
+            return Ok(None);
+        };
+        let receipt = serde_json::from_slice::<DurableUninstallReceipt>(&bytes)
+            .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
+        if receipt.schema_version != UNINSTALL_TRANSACTION_SCHEMA_VERSION
+            || self.root.join(LEDGER_FILE).exists()
+            || self.root.join(CURRENT_FILE).exists()
+            || self.versions_dir().exists()
+            || self.root.join(BIN_DIR).exists()
+        {
+            return Err(InstallError::DamagedMetadata(
+                "invalid uninstall completion receipt".to_owned(),
+            ));
+        }
+        Ok(Some(receipt))
+    }
+
+    fn write_uninstall_transaction(
+        &self,
+        transaction: &UninstallTransaction,
+    ) -> Result<(), InstallError> {
+        validate_uninstall_transaction(transaction)?;
+        atomic_write(
+            &self.uninstall_transaction_path(),
+            &serde_json::to_vec_pretty(transaction)
+                .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?,
+        )
+        .map_err(InstallError::io)
+    }
+
+    fn resume_uninstall(
+        &self,
+        backend: &impl AutostartBackend,
+        transaction: &mut UninstallTransaction,
+    ) -> Result<UninstallReceipt, InstallError> {
+        let root_guards = guard_existing_directories(&self.state_dir())?;
+        root_guards.verify()?;
+        validate_uninstall_transaction(transaction)?;
+        if transaction.phase == UninstallPhase::Intent {
+            let _ = self.disable_autostart(backend)?;
+            transaction.phase = UninstallPhase::AutostartRemoved;
+            self.write_uninstall_transaction(transaction)?;
+        }
+        if transaction.phase == UninstallPhase::AutostartRemoved {
+            root_guards.verify()?;
+            self.quarantine_uninstall_content(transaction)?;
+            transaction.phase = UninstallPhase::Quarantined;
+            self.write_uninstall_transaction(transaction)?;
+        }
+        if transaction.phase == UninstallPhase::Quarantined {
+            root_guards.verify()?;
+            self.cleanup_uninstall_quarantine(transaction)?;
+            transaction.phase = UninstallPhase::Cleaned;
+            self.write_uninstall_transaction(transaction)?;
+        }
+
+        let removed_versions = transaction.state.versions.len();
+        atomic_write(
+            &self.uninstall_receipt_path(),
+            &serde_json::to_vec_pretty(&DurableUninstallReceipt {
+                schema_version: UNINSTALL_TRANSACTION_SCHEMA_VERSION,
+                removed_versions,
+            })
+            .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?,
+        )
+        .map_err(InstallError::io)?;
+        remove_owned_file(&self.uninstall_transaction_path())?;
+        drop(root_guards);
+        for directory in [CONFIG_DIR, LOGS_DIR] {
+            let directory = self.root.join(directory);
+            if directory.exists() && is_empty_dir(&directory)? {
+                fs::remove_dir(&directory).map_err(InstallError::io)?;
+            }
+        }
+
+        let state_entries = fs::read_dir(self.state_dir())
+            .map_err(InstallError::io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(InstallError::io)?;
+        let only_receipt = state_entries.len() == 1
+            && state_entries[0].file_name().to_string_lossy() == UNINSTALL_RECEIPT_FILE;
+        let root_entries = fs::read_dir(&self.root)
+            .map_err(InstallError::io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(InstallError::io)?;
+        let only_state =
+            root_entries.len() == 1 && root_entries[0].file_name().to_string_lossy() == STATE_DIR;
+        let root_removed = only_receipt && only_state;
+        if root_removed {
+            remove_owned_file(&self.uninstall_receipt_path())?;
+            fs::remove_dir(self.state_dir()).map_err(InstallError::io)?;
+            fs::remove_dir(&self.root).map_err(InstallError::io)?;
+        }
+        Ok(UninstallReceipt {
+            removed_versions,
+            root_removed,
+            foreign_content_preserved: !root_removed,
+        })
+    }
+
+    fn quarantine_uninstall_content(
+        &self,
+        transaction: &UninstallTransaction,
+    ) -> Result<(), InstallError> {
+        let quarantine = uninstall_quarantine_paths(self, transaction);
+        quarantine_versions(
+            &self.versions_dir(),
+            &quarantine.versions,
+            &transaction.state,
+        )?;
+        quarantine_bin(
+            &self.root.join(BIN_DIR),
+            &quarantine.bin,
+            &transaction.state,
+        )?;
+        quarantine_file(
+            &self.root.join(CURRENT_FILE),
+            &quarantine.current,
+            &activation_artifacts(&transaction.state)?
+                .ok_or(InstallError::NoActiveVersion)?
+                .0,
+        )?;
+        quarantine_file(
+            &self.root.join(LEDGER_FILE),
+            &quarantine.ledger,
+            &serde_json::to_vec_pretty(&transaction.state)
+                .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?,
+        )
+    }
+
+    fn cleanup_uninstall_quarantine(
+        &self,
+        transaction: &UninstallTransaction,
+    ) -> Result<(), InstallError> {
+        let quarantine = uninstall_quarantine_paths(self, transaction);
+        for directory in [quarantine.versions, quarantine.bin] {
+            if directory.exists() {
+                if !directory.is_dir() || is_reparse_point(&directory)? {
+                    return Err(InstallError::OwnershipDrift(directory));
+                }
+                fs::remove_dir_all(&directory).map_err(InstallError::io)?;
+            }
+        }
+        for file in [quarantine.current, quarantine.ledger] {
+            remove_owned_file(&file)?;
+        }
+        Ok(())
     }
 
     fn read_state_file(&self) -> Result<InstallationState, InstallError> {
@@ -344,11 +605,7 @@ impl Installation {
         })?;
         let state = serde_json::from_slice::<InstallationState>(&bytes)
             .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
-        if state.schema_version != INSTALLATION_SCHEMA_VERSION {
-            return Err(InstallError::DamagedMetadata(
-                "unsupported installation schema".to_owned(),
-            ));
-        }
+        validate_installation_state_contract(&state)?;
         Ok(state)
     }
 
@@ -369,14 +626,14 @@ impl Installation {
         let transaction = serde_json::from_slice::<InstallationTransaction>(&bytes)
             .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
         if transaction.schema_version != INSTALL_TRANSACTION_SCHEMA_VERSION
-            || transaction.previous.schema_version != INSTALLATION_SCHEMA_VERSION
-            || transaction.desired.schema_version != INSTALLATION_SCHEMA_VERSION
             || transaction.desired.active_version.is_none()
         {
             return Err(InstallError::DamagedMetadata(
                 "invalid installation transaction".to_owned(),
             ));
         }
+        validate_installation_state_contract(&transaction.previous)?;
+        validate_installation_state_contract(&transaction.desired)?;
         Ok(Some(transaction))
     }
 
@@ -698,6 +955,38 @@ struct InstallationTransaction {
     phase: InstallationTransactionPhase,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum UninstallPhase {
+    Intent,
+    AutostartRemoved,
+    Quarantined,
+    Cleaned,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UninstallTransaction {
+    schema_version: u32,
+    transaction_id: String,
+    state: InstallationState,
+    phase: UninstallPhase,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableUninstallReceipt {
+    schema_version: u32,
+    removed_versions: usize,
+}
+
+struct UninstallQuarantinePaths {
+    versions: PathBuf,
+    bin: PathBuf,
+    current: PathBuf,
+    ledger: PathBuf,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UninstallReceipt {
     pub removed_versions: usize,
@@ -904,34 +1193,56 @@ impl AutostartBackend for WindowsUserStartupBackend {
             .lock()
             .map_err(|_| io::Error::other("autostart lock poisoned"))?;
         self.validate_path()?;
+        let directory_guards = guard_existing_directories(&self.path)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        directory_guards
+            .verify()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let bytes = windows_startup_entry_bytes(entry)?;
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-        };
-        let opened = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&self.path);
-        let mut file = match opened {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return match self.read_unlocked() {
-                    Ok(Some(actual)) if actual == *entry => Ok(AutostartChange::Unchanged),
-                    Ok(_) => Ok(AutostartChange::Drift),
-                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                        Ok(AutostartChange::Drift)
-                    }
-                    Err(error) => Err(error),
-                };
+        match self.read_unlocked() {
+            Ok(Some(actual)) if actual == *entry => return Ok(AutostartChange::Unchanged),
+            Ok(Some(_)) => return Ok(AutostartChange::Drift),
+            Ok(None) => {}
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                return Ok(AutostartChange::Drift);
             }
             Err(error) => return Err(error),
-        };
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        Ok(AutostartChange::Changed)
+        }
+        let parent = self.path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "startup path has no parent")
+        })?;
+        let staging = parent.join(format!(".RunnerMesh.{:032x}.tmp", unique_suffix()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        let write_result = file.write_all(&bytes).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&staging);
+            return Err(error);
+        }
+        directory_guards
+            .verify()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        match fs::rename(&staging, &self.path) {
+            Ok(()) => match self.read_unlocked()? {
+                Some(actual) if actual == *entry => Ok(AutostartChange::Changed),
+                _ => Ok(AutostartChange::Drift),
+            },
+            Err(error) => {
+                let _ = fs::remove_file(&staging);
+                match self.read_unlocked() {
+                    Ok(Some(actual)) if actual == *entry => Ok(AutostartChange::Unchanged),
+                    Ok(Some(_)) => Ok(AutostartChange::Drift),
+                    Ok(None) => Err(error),
+                    Err(read_error) if read_error.kind() == io::ErrorKind::InvalidData => {
+                        Ok(AutostartChange::Drift)
+                    }
+                    Err(read_error) => Err(read_error),
+                }
+            }
+        }
     }
 
     fn remove_exact(&self, expected: &AutostartEntry) -> io::Result<AutostartChange> {
@@ -940,6 +1251,11 @@ impl AutostartBackend for WindowsUserStartupBackend {
             .lock()
             .map_err(|_| io::Error::other("autostart lock poisoned"))?;
         self.validate_path()?;
+        let directory_guards = guard_existing_directories(&self.path)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        directory_guards
+            .verify()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         delete_windows_startup_file_if_exact(&self.path, &windows_startup_entry_bytes(expected)?)
     }
 }
@@ -1089,6 +1405,7 @@ pub enum InstallError {
     NoActiveVersion,
     AutostartDrift,
     UnreconciledTransaction,
+    UninstallInProgress,
     PayloadChecksumMismatch { expected: String, actual: String },
     RecoveryFailed(String),
 }
@@ -1129,6 +1446,9 @@ impl fmt::Display for InstallError {
             Self::UnreconciledTransaction => {
                 formatter.write_str("installation transaction requires reconciliation")
             }
+            Self::UninstallInProgress => {
+                formatter.write_str("uninstall transaction requires reconciliation")
+            }
             Self::PayloadChecksumMismatch { expected, actual } => write!(
                 formatter,
                 "payload checksum mismatch: expected {expected}, got {actual}"
@@ -1141,6 +1461,214 @@ impl fmt::Display for InstallError {
 }
 
 impl std::error::Error for InstallError {}
+
+fn initial_installation_state() -> InstallationState {
+    InstallationState {
+        schema_version: INSTALLATION_SCHEMA_VERSION,
+        active_version: None,
+        versions: BTreeMap::new(),
+    }
+}
+
+fn validate_installation_state_contract(state: &InstallationState) -> Result<(), InstallError> {
+    if state.schema_version != INSTALLATION_SCHEMA_VERSION {
+        return Err(InstallError::DamagedMetadata(
+            "unsupported installation schema".to_owned(),
+        ));
+    }
+    if state.versions.is_empty() != state.active_version.is_none() {
+        return Err(InstallError::DamagedMetadata(
+            "installation active-version contract is inconsistent".to_owned(),
+        ));
+    }
+    for (version, manifest) in &state.versions {
+        validate_version(version)?;
+        if manifest.files.is_empty() || !manifest.files.contains_key("runnermesh-agent.exe") {
+            return Err(InstallError::DamagedMetadata(
+                "installation manifest is incomplete".to_owned(),
+            ));
+        }
+        for (path, digest) in &manifest.files {
+            safe_relative(path)?;
+            if !is_lower_hex_digest(digest, 64) {
+                return Err(InstallError::DamagedMetadata(
+                    "installation manifest digest is invalid".to_owned(),
+                ));
+            }
+        }
+    }
+    if let Some(active) = &state.active_version {
+        validate_version(active)?;
+        if !state.versions.contains_key(active) {
+            return Err(InstallError::DamagedMetadata(
+                "active version is absent from installation state".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_uninstall_transaction(transaction: &UninstallTransaction) -> Result<(), InstallError> {
+    if transaction.schema_version != UNINSTALL_TRANSACTION_SCHEMA_VERSION
+        || transaction.transaction_id.len() != 42
+        || !transaction.transaction_id.starts_with("uninstall-")
+        || !transaction.transaction_id[10..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || transaction.state.active_version.is_none()
+    {
+        return Err(InstallError::DamagedMetadata(
+            "invalid uninstall transaction contract".to_owned(),
+        ));
+    }
+    validate_installation_state_contract(&transaction.state)?;
+    for (version, manifest) in &transaction.state.versions {
+        validate_version(version)?;
+        if manifest.files.is_empty()
+            || !manifest
+                .files
+                .values()
+                .all(|digest| is_lower_hex_digest(digest, 64))
+        {
+            return Err(InstallError::DamagedMetadata(
+                "invalid uninstall manifest".to_owned(),
+            ));
+        }
+    }
+    let active = transaction
+        .state
+        .active_version
+        .as_deref()
+        .unwrap_or_default();
+    if !transaction.state.versions.contains_key(active) {
+        return Err(InstallError::DamagedMetadata(
+            "uninstall active version is absent".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_lower_hex_digest(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn read_optional_owned_file(path: &Path) -> Result<Option<Vec<u8>>, InstallError> {
+    if is_reparse_point(path)? {
+        return Err(InstallError::OwnershipDrift(path.to_path_buf()));
+    }
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(InstallError::io(error)),
+    }
+}
+
+fn uninstall_quarantine_paths(
+    installation: &Installation,
+    transaction: &UninstallTransaction,
+) -> UninstallQuarantinePaths {
+    let prefix = format!(".{}", transaction.transaction_id);
+    UninstallQuarantinePaths {
+        versions: installation.state_dir().join(format!("{prefix}-versions")),
+        bin: installation.state_dir().join(format!("{prefix}-bin")),
+        current: installation
+            .state_dir()
+            .join(format!("{prefix}-current.json")),
+        ledger: installation
+            .state_dir()
+            .join(format!("{prefix}-ledger.json")),
+    }
+}
+
+fn quarantine_versions(
+    source: &Path,
+    destination: &Path,
+    state: &InstallationState,
+) -> Result<(), InstallError> {
+    match (source.exists(), destination.exists()) {
+        (true, true) => return Err(InstallError::OwnershipDrift(destination.to_path_buf())),
+        (false, false) => {
+            return Err(InstallError::OwnershipDrift(source.to_path_buf()));
+        }
+        (true, false) => {
+            verify_versions_root(source, state)?;
+            fs::rename(source, destination).map_err(InstallError::io)?;
+        }
+        (false, true) => {}
+    }
+    verify_versions_root(destination, state)
+}
+
+fn verify_versions_root(root: &Path, state: &InstallationState) -> Result<(), InstallError> {
+    if !root.is_dir() || is_reparse_point(root)? {
+        return Err(InstallError::OwnershipDrift(root.to_path_buf()));
+    }
+    for (version, manifest) in &state.versions {
+        verify_manifest(&root.join(version), manifest)?;
+    }
+    let expected = state.versions.keys().cloned().collect::<BTreeSet<_>>();
+    if directory_names(root)? != expected {
+        return Err(InstallError::OwnershipDrift(root.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn quarantine_bin(
+    source: &Path,
+    destination: &Path,
+    state: &InstallationState,
+) -> Result<(), InstallError> {
+    match (source.exists(), destination.exists()) {
+        (true, true) => return Err(InstallError::OwnershipDrift(destination.to_path_buf())),
+        (false, false) => return Err(InstallError::OwnershipDrift(source.to_path_buf())),
+        (true, false) => {
+            verify_bin_root(source, state)?;
+            fs::rename(source, destination).map_err(InstallError::io)?;
+        }
+        (false, true) => {}
+    }
+    verify_bin_root(destination, state)
+}
+
+fn verify_bin_root(root: &Path, state: &InstallationState) -> Result<(), InstallError> {
+    if !root.is_dir() || is_reparse_point(root)? {
+        return Err(InstallError::OwnershipDrift(root.to_path_buf()));
+    }
+    if file_names(root)? != BTreeSet::from([STABLE_AGENT_ENTRY.to_owned()]) {
+        return Err(InstallError::OwnershipDrift(root.to_path_buf()));
+    }
+    let active = state
+        .active_version
+        .as_deref()
+        .ok_or(InstallError::NoActiveVersion)?;
+    if fs::read_to_string(root.join(STABLE_AGENT_ENTRY)).map_err(InstallError::io)?
+        != stable_entry_contents(active)
+    {
+        return Err(InstallError::OwnershipDrift(root.join(STABLE_AGENT_ENTRY)));
+    }
+    Ok(())
+}
+
+fn quarantine_file(source: &Path, destination: &Path, expected: &[u8]) -> Result<(), InstallError> {
+    match (source.exists(), destination.exists()) {
+        (true, true) => return Err(InstallError::OwnershipDrift(destination.to_path_buf())),
+        (false, false) => return Err(InstallError::OwnershipDrift(source.to_path_buf())),
+        (true, false) => {
+            if read_optional_owned_file(source)?.as_deref() != Some(expected) {
+                return Err(InstallError::OwnershipDrift(source.to_path_buf()));
+            }
+            fs::rename(source, destination).map_err(InstallError::io)?;
+        }
+        (false, true) => {}
+    }
+    if read_optional_owned_file(destination)?.as_deref() != Some(expected) {
+        return Err(InstallError::OwnershipDrift(destination.to_path_buf()));
+    }
+    Ok(())
+}
 
 fn validate_version(version: &str) -> Result<(), InstallError> {
     if version.is_empty()
@@ -1345,6 +1873,8 @@ fn activation_artifacts(
 /// Windows uses a write-through replace operation because `rename` cannot
 /// safely replace an existing destination there.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let directory_guards = guard_existing_directories(path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
@@ -1373,6 +1903,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
+        directory_guards
+            .verify()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         replace_file(&temporary, path)
     })();
     if result.is_err() && temporary.exists() {
@@ -1382,10 +1915,15 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn durable_create_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let directory_guards = guard_existing_directories(path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
     fs::create_dir_all(parent)?;
+    directory_guards
+        .verify()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
@@ -1398,6 +1936,10 @@ fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
+    let temporary = validate_explicit_path(temporary)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let destination = validate_explicit_path(destination)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination: Vec<u16> = destination
         .as_os_str()
@@ -1442,6 +1984,133 @@ pub(crate) fn is_reparse_point(path: &Path) -> Result<bool, InstallError> {
     }
 }
 
+pub(crate) struct ExistingDirectoryGuards {
+    #[cfg(windows)]
+    handles: Vec<GuardedDirectory>,
+}
+
+impl ExistingDirectoryGuards {
+    fn empty() -> Self {
+        Self {
+            #[cfg(windows)]
+            handles: Vec::new(),
+        }
+    }
+
+    fn extend(&mut self, other: Self) {
+        #[cfg(windows)]
+        self.handles.extend(other.handles);
+        #[cfg(not(windows))]
+        let _ = other;
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), InstallError> {
+        #[cfg(windows)]
+        for guarded in &self.handles {
+            let observed = open_guarded_directory(&guarded.path)?;
+            if guarded.identity != observed.identity {
+                return Err(InstallError::OwnershipDrift(guarded.path.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct GuardedDirectory {
+    path: PathBuf,
+    identity: (u32, u32, u32),
+    _file: File,
+}
+
+/// Retain an identity handle for every currently existing directory in a path.
+/// Mutation boundaries re-open and compare those identities so a renamed or
+/// junction-replaced ancestor fails closed. This narrow primitive is used only
+/// by install/package ownership operations.
+pub(crate) fn guard_existing_directories(
+    path: &Path,
+) -> Result<ExistingDirectoryGuards, InstallError> {
+    let normalized = validate_explicit_path(path)?;
+    #[cfg(windows)]
+    {
+        let mut guards = ExistingDirectoryGuards::empty();
+        let mut directories = normalized
+            .ancestors()
+            .filter(|candidate| candidate.is_dir())
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        directories.reverse();
+        directories.dedup();
+        for directory in directories {
+            guards.handles.push(open_guarded_directory(&directory)?);
+        }
+        Ok(guards)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = normalized;
+        Ok(ExistingDirectoryGuards::empty())
+    }
+}
+
+#[cfg(windows)]
+fn open_guarded_directory(path: &Path) -> Result<GuardedDirectory, InstallError> {
+    use std::os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle},
+    };
+    use windows_sys::Win32::{
+        Foundation::INVALID_HANDLE_VALUE,
+        Storage::FileSystem::{
+            CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // SAFETY: `wide` is a live nul-terminated UTF-16 path. Omitting
+    // FILE_SHARE_DELETE denies ordinary delete-sharing while the retained
+    // handle also supplies a stable identity for explicit boundary readback.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(InstallError::io(io::Error::last_os_error()));
+    }
+    // SAFETY: the valid handle is transferred exactly once into `File`.
+    let file = unsafe { File::from_raw_handle(handle) };
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: `information` is a correctly sized writable output buffer.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(InstallError::io(io::Error::last_os_error()));
+    }
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(InstallError::OwnershipDrift(path.to_path_buf()));
+    }
+    Ok(GuardedDirectory {
+        path: path.to_path_buf(),
+        identity: (
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ),
+        _file: file,
+    })
+}
+
 pub(crate) fn validate_explicit_path(path: &Path) -> Result<PathBuf, InstallError> {
     if !path.is_absolute()
         || path.components().any(|component| match component {
@@ -1469,7 +2138,11 @@ pub(crate) fn validate_explicit_path(path: &Path) -> Result<PathBuf, InstallErro
     let suffix = path
         .strip_prefix(existing)
         .map_err(|_| InstallError::OwnershipDrift(path.to_path_buf()))?;
-    Ok(canonical.join(suffix))
+    if suffix.as_os_str().is_empty() {
+        Ok(canonical)
+    } else {
+        Ok(canonical.join(suffix))
+    }
 }
 
 fn remove_owned_file(path: &Path) -> Result<(), InstallError> {
@@ -1506,11 +2179,12 @@ mod tests {
     };
 
     #[cfg(windows)]
-    use super::WindowsUserStartupBackend;
+    use super::{guard_existing_directories, WindowsUserStartupBackend};
     use super::{
         manifest_for_payload, AutostartBackend, AutostartChange, AutostartEntry, InstallError,
         Installation, InstallationTransaction, InstallationTransactionPhase,
-        SandboxAutostartBackend, INSTALL_TRANSACTION_SCHEMA_VERSION,
+        SandboxAutostartBackend, UninstallPhase, UninstallTransaction,
+        INSTALL_TRANSACTION_SCHEMA_VERSION, UNINSTALL_TRANSACTION_SCHEMA_VERSION,
     };
 
     fn root(name: &str) -> PathBuf {
@@ -1639,6 +2313,52 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_initialization_debris_does_not_strand_the_exact_root() {
+        let root = root("initialization-interruption");
+        let installation_root = root.join("installed");
+        let debris = root.join(".installed.runnermesh-init-interrupted");
+        fs::create_dir(&debris).unwrap();
+        fs::write(debris.join("partial"), b"partial").unwrap();
+        let install = Installation::new(&installation_root);
+        assert_eq!(
+            install.open_or_initialize().unwrap(),
+            super::initial_installation_state()
+        );
+        install.install("0.1.0", &payload(&root, "one")).unwrap();
+        assert_eq!(
+            install.state().unwrap().active_version.as_deref(),
+            Some("0.1.0")
+        );
+        assert!(debris.is_dir());
+    }
+
+    #[test]
+    fn interrupted_uninstall_resumes_from_verified_quarantine() {
+        let root = root("uninstall-interruption");
+        let install = Installation::new(root.join("installed"));
+        install.install("0.1.0", &payload(&root, "one")).unwrap();
+        let backend = SandboxAutostartBackend::new(root.join("autostart.json"));
+        install.enable_autostart(&backend).unwrap();
+        let mut transaction = UninstallTransaction {
+            schema_version: UNINSTALL_TRANSACTION_SCHEMA_VERSION,
+            transaction_id: "uninstall-00000000000000000000000000000001".to_owned(),
+            state: install.state().unwrap(),
+            phase: UninstallPhase::Intent,
+        };
+        install.write_uninstall_transaction(&transaction).unwrap();
+        install.disable_autostart(&backend).unwrap();
+        transaction.phase = UninstallPhase::AutostartRemoved;
+        install.write_uninstall_transaction(&transaction).unwrap();
+        install.quarantine_uninstall_content(&transaction).unwrap();
+
+        let receipt = install.uninstall(&backend).unwrap();
+        assert_eq!(receipt.removed_versions, 1);
+        assert!(receipt.root_removed);
+        assert!(!install.root().exists());
+        assert_eq!(backend.read().unwrap(), None);
+    }
+
+    #[test]
     fn pending_activation_and_partial_slot_are_deterministically_recovered() {
         let root = root("transaction-recovery");
         let install = Installation::new(root.join("installed"));
@@ -1726,6 +2446,9 @@ mod tests {
         fs::write(startup.join("OtherApp.cmd"), b"keep").unwrap();
         let backend = WindowsUserStartupBackend::new(&startup);
 
+        let interrupted_staging = startup.join(".RunnerMesh.interrupted.tmp");
+        fs::write(&interrupted_staging, b"partial").unwrap();
+
         assert!(install.enable_autostart(&backend).unwrap());
         assert!(!install.enable_autostart(&backend).unwrap());
         assert_eq!(
@@ -1734,6 +2457,7 @@ mod tests {
         );
         assert!(install.disable_autostart(&backend).unwrap());
         assert!(startup.join("OtherApp.cmd").is_file());
+        assert_eq!(fs::read(&interrupted_staging).unwrap(), b"partial");
         assert!(!backend.path().exists());
 
         assert!(install.enable_autostart(&backend).unwrap());
@@ -1743,5 +2467,17 @@ mod tests {
             Err(InstallError::AutostartDrift)
         );
         assert_eq!(fs::read(backend.path()).unwrap(), b"foreign");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn guarded_directory_identity_drift_is_detected_before_mutation() {
+        let root = root("directory-guard");
+        let protected = root.join("protected");
+        fs::create_dir(&protected).unwrap();
+        let guard = guard_existing_directories(&protected.join("future")).unwrap();
+        let moved = root.join("moved");
+        fs::rename(&protected, &moved).unwrap();
+        assert!(matches!(guard.verify(), Err(InstallError::Io(_))));
     }
 }

@@ -85,6 +85,7 @@ pub enum UpdateOutcome {
     Committed,
     RolledBack,
     DeferredForActiveJob,
+    RecoveredStaged,
     RecoveredRollback,
 }
 
@@ -136,23 +137,41 @@ impl UpdateCoordinator {
     }
 
     pub fn transaction(&self) -> Result<Option<UpdateTransaction>, UpdateError> {
-        self.read_json(self.transaction_path())
+        let transaction = self.read_json(self.transaction_path())?;
+        if let Some(value) = &transaction {
+            validate_transaction(value)?;
+        }
+        Ok(transaction)
     }
 
     pub fn receipt(&self) -> Result<Option<UpdateReceipt>, UpdateError> {
-        self.read_json(self.receipt_path())
+        let receipt = self.read_json(self.receipt_path())?;
+        if let Some(value) = &receipt {
+            validate_receipt(value)?;
+        }
+        Ok(receipt)
     }
 
     /// `INTENT` is persisted before the immutable slot is written; only a
     /// verified slot advances the durable journal to `READY_TO_ACTIVATE`.
     pub fn stage(&self, request: &UpdateRequest) -> Result<UpdateTransaction, UpdateError> {
-        self.stage_with_verification_hook(request, || {})
+        self.stage_with_hooks(request, || {}, || Ok(()))
     }
 
+    #[cfg(test)]
     fn stage_with_verification_hook(
         &self,
         request: &UpdateRequest,
         after_first_digest: impl FnOnce(),
+    ) -> Result<UpdateTransaction, UpdateError> {
+        self.stage_with_hooks(request, after_first_digest, || Ok(()))
+    }
+
+    fn stage_with_hooks(
+        &self,
+        request: &UpdateRequest,
+        after_first_digest: impl FnOnce(),
+        after_install: impl FnOnce() -> Result<(), UpdateError>,
     ) -> Result<UpdateTransaction, UpdateError> {
         validate_update_version(&request.version)?;
         if !request.compatible {
@@ -171,10 +190,14 @@ impl UpdateCoordinator {
         if previous == request.version {
             return Err(UpdateError::SameVersion(request.version.clone()));
         }
-        if state.versions.contains_key(&request.version) {
-            return Err(UpdateError::VersionAlreadyInstalled(
-                request.version.clone(),
-            ));
+        if let Some(existing) = state.versions.get(&request.version) {
+            if crate::installation::manifest_payload_sha256(existing)
+                != request.expected_payload_sha256
+            {
+                return Err(UpdateError::VersionAlreadyInstalled(
+                    request.version.clone(),
+                ));
+            }
         }
         let mut transaction = UpdateTransaction {
             schema_version: UPDATE_SCHEMA_VERSION,
@@ -211,6 +234,7 @@ impl UpdateCoordinator {
             }
             Err(error) => return Err(error.into()),
         }
+        after_install()?;
         transaction.phase = UpdatePhase::ReadyToActivate;
         self.write_transaction(&transaction)?;
         Ok(transaction)
@@ -308,6 +332,27 @@ impl UpdateCoordinator {
                 actual: current,
             });
         }
+        if transaction.phase == UpdatePhase::Intent
+            && current == transaction.previous_version
+            && self
+                .installation
+                .installed_payload_sha256(&transaction.requested_version)?
+                .as_deref()
+                == Some(transaction.payload_sha256.as_str())
+        {
+            transaction.phase = UpdatePhase::ReadyToActivate;
+            self.write_transaction(&transaction)?;
+            self.write_receipt(
+                &transaction,
+                UpdateOutcome::RecoveredStaged,
+                &transaction.previous_version,
+            )?;
+            return Ok(ReconcileReceipt {
+                transaction_id: transaction.transaction_id,
+                outcome: UpdateOutcome::RecoveredStaged,
+                active_version: transaction.previous_version,
+            });
+        }
         if current != transaction.previous_version {
             self.installation
                 .select_active(&transaction.previous_version)?;
@@ -397,11 +442,7 @@ impl UpdateCoordinator {
     }
 
     fn write_transaction(&self, transaction: &UpdateTransaction) -> Result<(), UpdateError> {
-        if transaction.schema_version != UPDATE_SCHEMA_VERSION {
-            return Err(UpdateError::DamagedJournal(
-                "unsupported transaction schema".to_owned(),
-            ));
-        }
+        validate_transaction(transaction)?;
         self.write_json(self.transaction_path(), transaction)
     }
 
@@ -446,6 +487,49 @@ impl UpdateCoordinator {
             .map_err(|error| UpdateError::DamagedJournal(error.to_string()))?;
         atomic_write(&path, &bytes).map_err(UpdateError::io)
     }
+}
+
+fn validate_transaction(transaction: &UpdateTransaction) -> Result<(), UpdateError> {
+    if transaction.schema_version != UPDATE_SCHEMA_VERSION
+        || transaction.transaction_id.len() != 39
+        || !transaction.transaction_id.starts_with("update-")
+        || !transaction.transaction_id[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || validate_update_version(&transaction.previous_version).is_err()
+        || validate_update_version(&transaction.requested_version).is_err()
+        || transaction.previous_version == transaction.requested_version
+        || !is_sha256(&transaction.payload_sha256)
+    {
+        return Err(UpdateError::DamagedJournal(
+            "invalid update transaction contract".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_receipt(receipt: &UpdateReceipt) -> Result<(), UpdateError> {
+    if receipt.schema_version != UPDATE_SCHEMA_VERSION
+        || receipt.transaction_id.len() != 39
+        || !receipt.transaction_id.starts_with("update-")
+        || !receipt.transaction_id[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || validate_update_version(&receipt.active_version).is_err()
+        || !receipt.poststate_reconciled
+    {
+        return Err(UpdateError::DamagedJournal(
+            "invalid update receipt contract".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -726,6 +810,39 @@ mod tests {
             UpdateOutcome::RecoveredRollback
         );
         assert!(!raced.installation().versions_dir().join("0.2.0").exists());
+
+        let (_root, interrupted, interrupted_payload) = prepared("stage-interrupted");
+        let expected = payload_sha256(&interrupted_payload).unwrap();
+        assert!(matches!(
+            interrupted.stage_with_hooks(
+                &UpdateRequest::new("0.2.0", &interrupted_payload, &expected, true),
+                || {},
+                || Err(UpdateError::InvalidPayload(
+                    "injected interruption".to_owned()
+                ))
+            ),
+            Err(UpdateError::InvalidPayload(_))
+        ));
+        assert!(interrupted
+            .installation()
+            .versions_dir()
+            .join("0.2.0")
+            .is_dir());
+        assert_eq!(
+            interrupted.reconcile().unwrap().outcome,
+            UpdateOutcome::RecoveredStaged
+        );
+        assert_eq!(
+            interrupted.transaction().unwrap().unwrap().phase,
+            UpdatePhase::ReadyToActivate
+        );
+        assert_eq!(
+            interrupted
+                .activate(SafePointObservation::Idle, HealthObservation::Healthy)
+                .unwrap()
+                .outcome,
+            UpdateOutcome::Committed
+        );
     }
 
     #[test]
@@ -824,6 +941,43 @@ mod tests {
             update.reconcile(),
             Err(UpdateError::DamagedJournal(_))
         ));
+
+        let (_root, invalid, invalid_payload) = prepared("invalid-schema-before-mutation");
+        let invalid_active = invalid
+            .installation()
+            .state()
+            .unwrap()
+            .active_version
+            .unwrap();
+        let transaction = UpdateTransaction {
+            schema_version: UPDATE_SCHEMA_VERSION + 1,
+            transaction_id: "update-00000000000000000000000000000002".to_owned(),
+            previous_version: invalid_active.clone(),
+            requested_version: "0.2.0".to_owned(),
+            payload_sha256: payload_sha256(&invalid_payload).unwrap(),
+            phase: UpdatePhase::Switched,
+        };
+        fs::write(
+            invalid
+                .installation()
+                .state_dir()
+                .join("update-transaction.json"),
+            serde_json::to_vec(&transaction).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            invalid.reconcile(),
+            Err(UpdateError::DamagedJournal(_))
+        ));
+        assert_eq!(
+            invalid
+                .installation()
+                .state()
+                .unwrap()
+                .active_version
+                .as_deref(),
+            Some(invalid_active.as_str())
+        );
     }
 
     #[test]
@@ -831,7 +985,7 @@ mod tests {
         let (_root, update, candidate_payload) = prepared("interruption-phases");
         let intent = UpdateTransaction {
             schema_version: UPDATE_SCHEMA_VERSION,
-            transaction_id: "fixture-intent".to_owned(),
+            transaction_id: "update-00000000000000000000000000000001".to_owned(),
             previous_version: "0.1.0".to_owned(),
             requested_version: "0.2.0".to_owned(),
             payload_sha256: payload_sha256(&candidate_payload).unwrap(),

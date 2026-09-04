@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::{
-    installation::{is_reparse_point, sha256_bytes, sha256_file, validate_explicit_path},
+    installation::{
+        guard_existing_directories, is_reparse_point, sha256_bytes, sha256_file,
+        validate_explicit_path,
+    },
     AutostartBackend, Installation, UpdateCoordinator, UpdatePhase,
 };
 
@@ -81,6 +84,11 @@ impl PackageVerifier {
         input: &PackageInput,
         output_directory: &Path,
     ) -> Result<PackageReceipt, PackageError> {
+        let output_guards = guard_existing_directories(output_directory)
+            .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
+        output_guards
+            .verify()
+            .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
         validate_provenance(&input.provenance)?;
         let mut contents = BTreeMap::new();
         contents.insert(
@@ -123,7 +131,14 @@ impl PackageVerifier {
         {
             return Err(PackageError::ForeignOutput(output_directory.to_path_buf()));
         }
-        fs::create_dir_all(output_directory).map_err(PackageError::io)?;
+        if !output_directory.exists() {
+            fs::create_dir(output_directory).map_err(PackageError::io)?;
+        }
+        let created_output_guards = guard_existing_directories(output_directory)
+            .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
+        created_output_guards
+            .verify()
+            .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
         validate_explicit_path(output_directory)
             .map_err(|_| PackageError::ForeignOutput(output_directory.to_path_buf()))?;
         let archive = output_directory.join(format!(
@@ -236,6 +251,11 @@ impl PackageVerifier {
         archive: &Path,
         destination: &Path,
     ) -> Result<PackageManifest, PackageError> {
+        let destination_guards = guard_existing_directories(destination)
+            .map_err(|_| PackageError::ForeignOutput(destination.to_path_buf()))?;
+        destination_guards
+            .verify()
+            .map_err(|_| PackageError::ForeignOutput(destination.to_path_buf()))?;
         let verified = read_verified_archive(archive)?;
         validate_explicit_path(destination)
             .map_err(|_| PackageError::ForeignOutput(destination.to_path_buf()))?;
@@ -247,7 +267,12 @@ impl PackageVerifier {
             .ok_or_else(|| PackageError::ForeignOutput(destination.to_path_buf()))?;
         validate_explicit_path(parent)
             .map_err(|_| PackageError::ForeignOutput(parent.to_path_buf()))?;
-        fs::create_dir_all(parent).map_err(PackageError::io)?;
+        if !parent.is_dir()
+            || is_reparse_point(parent)
+                .map_err(|error| PackageError::MalformedManifest(error.to_string()))?
+        {
+            return Err(PackageError::ForeignOutput(parent.to_path_buf()));
+        }
         let staging = parent.join(format!(
             ".runnermesh-extract-{}",
             std::time::SystemTime::now()
@@ -276,6 +301,9 @@ impl PackageVerifier {
                 .map_err(PackageError::io)?;
                 file.sync_all().map_err(PackageError::io)?;
             }
+            destination_guards
+                .verify()
+                .map_err(|_| PackageError::ForeignOutput(destination.to_path_buf()))?;
             fs::rename(&staging, destination).map_err(PackageError::io)
         })();
         if result.is_err() && staging.exists() {
@@ -564,6 +592,8 @@ fn write_zip(path: &Path, contents: &BTreeMap<String, Vec<u8>>) -> Result<(), Pa
 }
 
 fn read_verified_archive(archive_path: &Path) -> Result<VerifiedArchive, PackageError> {
+    let _archive_guards = guard_existing_directories(archive_path)
+        .map_err(|_| PackageError::ForeignOutput(archive_path.to_path_buf()))?;
     validate_explicit_path(archive_path)
         .map_err(|_| PackageError::ForeignOutput(archive_path.to_path_buf()))?;
     let metadata = fs::symlink_metadata(archive_path).map_err(PackageError::io)?;
