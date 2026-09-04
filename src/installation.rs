@@ -404,10 +404,11 @@ impl Installation {
 
     fn assert_runtime_root_safe(&self) -> Result<(), InstallError> {
         let root = validate_explicit_path(&self.root)?;
-        let source = fs::canonicalize(env!("CARGO_MANIFEST_DIR")).map_err(InstallError::io)?;
-        let build = source.join("target");
-        if root.starts_with(&source) || root.starts_with(&build) {
-            return Err(InstallError::SourceRuntimeOverlap);
+        if let Some(source) = canonicalize_optional_source(Path::new(env!("CARGO_MANIFEST_DIR")))? {
+            let build = source.join("target");
+            if root.starts_with(&source) || root.starts_with(&build) {
+                return Err(InstallError::SourceRuntimeOverlap);
+            }
         }
         if self.root.exists() && (!self.root.is_dir() || is_reparse_point(&self.root)?) {
             return Err(InstallError::ForeignContent(self.root.clone()));
@@ -1040,6 +1041,18 @@ impl Installation {
         let bytes = serde_json::to_vec_pretty(state)
             .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
         atomic_write(&self.root.join(LEDGER_FILE), &bytes).map_err(InstallError::io)
+    }
+}
+
+fn canonicalize_optional_source(path: &Path) -> Result<Option<PathBuf>, InstallError> {
+    match fs::canonicalize(path) {
+        Ok(source) => Ok(Some(source)),
+        // An immutable release artifact normally runs on a machine where its
+        // build checkout does not exist. The absent historical build path
+        // cannot overlap the local runtime root; every observable path still
+        // passes the ordinary ownership and reparse-point checks below.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(InstallError::io(error)),
     }
 }
 
@@ -2349,14 +2362,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use super::{
+        canonicalize_optional_source, manifest_for_payload, sha256_bytes, AutostartBackend,
+        AutostartChange, AutostartEntry, InstallError, Installation, InstallationTransaction,
+        InstallationTransactionPhase, SandboxAutostartBackend, UninstallPhase,
+        UninstallTransaction, INSTALL_TRANSACTION_SCHEMA_VERSION,
+        UNINSTALL_TRANSACTION_SCHEMA_VERSION,
+    };
     #[cfg(windows)]
     use super::{guard_existing_directories, WindowsUserStartupBackend};
-    use super::{
-        manifest_for_payload, sha256_bytes, AutostartBackend, AutostartChange, AutostartEntry,
-        InstallError, Installation, InstallationTransaction, InstallationTransactionPhase,
-        SandboxAutostartBackend, UninstallPhase, UninstallTransaction,
-        INSTALL_TRANSACTION_SCHEMA_VERSION, UNINSTALL_TRANSACTION_SCHEMA_VERSION,
-    };
 
     fn root(name: &str) -> PathBuf {
         let value = std::env::temp_dir().join(format!(
@@ -2575,6 +2589,12 @@ mod tests {
             Installation::new(env!("CARGO_MANIFEST_DIR")).install("0.1.0", &payload(&root, "two")),
             Err(InstallError::SourceRuntimeOverlap)
         ));
+    }
+
+    #[test]
+    fn absent_build_checkout_is_not_required_by_an_installed_runtime() {
+        let missing = root("absent-build-checkout").join("never-created");
+        assert_eq!(canonicalize_optional_source(&missing).unwrap(), None);
     }
 
     #[test]
