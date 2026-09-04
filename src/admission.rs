@@ -567,7 +567,7 @@ impl fmt::Display for AdmissionBackendError {
 impl std::error::Error for AdmissionBackendError {}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RegistrationScope {
     Organization { organization: String },
     Repository { owner: String, repository: String },
@@ -679,6 +679,7 @@ pub trait CredentialProvider {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReservedLabelOwnership {
     pub scope: RegistrationScope,
     pub runner_id: u64,
