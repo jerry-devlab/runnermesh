@@ -3,7 +3,8 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
-    fs,
+    fs::OpenOptions,
+    io::Read,
     path::{Path, PathBuf},
     process,
     time::Duration,
@@ -12,7 +13,7 @@ use std::{
 use runnermesh::{
     AgentCommand, AgentResponse, AgentTransport, Installation, InstalledRuntimeBinding, IpcRequest,
     IpcResponseBody, LocalAgentTransport, PackageInput, PackageProvenance, PackageVerifier,
-    IPC_PROTOCOL_VERSION, WINDOWS_X64_TARGET,
+    VersionManifest, IPC_PROTOCOL_VERSION, WINDOWS_X64_TARGET,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -118,8 +119,11 @@ fn install_accepted_archive(
     )
     .map_err(|error| error.to_string())?;
     let installation = Installation::new(PathBuf::from(install_root));
+    let accepted_members = VersionManifest {
+        files: manifest.files.clone(),
+    };
     let receipt = installation
-        .install(&manifest.provenance.version, &staging)
+        .install_with_manifest(&manifest.provenance.version, &staging, &accepted_members)
         .map_err(|error| error.to_string())?;
     Ok(json!({
         "result": "installed",
@@ -138,11 +142,7 @@ fn bind_runtime(
 ) -> Result<Value, String> {
     let expected_hash = exact_sha256(expected_hash)?;
     let binding_path = PathBuf::from(binding_file);
-    require_ordinary_file(&binding_path)?;
-    let bytes = fs::read(&binding_path).map_err(|error| error.to_string())?;
-    if bytes.len() > 128 * 1024 {
-        return Err("runtime binding exceeds the bounded input size".to_owned());
-    }
+    let bytes = read_bounded_ordinary_file(&binding_path, 128 * 1024, "runtime binding")?;
     let actual_hash = sha256_bytes(&bytes);
     if actual_hash != expected_hash {
         return Err("runtime binding SHA-256 differs from the authorized input".to_owned());
@@ -187,18 +187,33 @@ fn configure_autostart(_action: &OsStr, _install_root: &OsStr) -> Result<Value, 
 }
 
 fn request_stop_after_drain() -> Result<Value, String> {
-    let _ = accepted_operator_provenance()?;
-    let response = LocalAgentTransport::new(Duration::from_secs(10))
+    let provenance = accepted_operator_provenance()?;
+    let transport = LocalAgentTransport::new(Duration::from_secs(10));
+    let observation = transport
         .call(IpcRequest {
             protocol_version: IPC_PROTOCOL_VERSION,
             request_id: 1,
+            command: AgentCommand::GetSnapshot,
+        })
+        .map_err(|error| error.to_string())?;
+    match observation.body {
+        IpcResponseBody::Success(response) if matches!(&*response, AgentResponse::Snapshot(snapshot) if snapshot_matches(snapshot, &provenance)) =>
+            {}
+        _ => {
+            return Err(
+                "active Agent provenance differs from the immutable operator helper".to_owned(),
+            )
+        }
+    }
+    let response = transport
+        .call(IpcRequest {
+            protocol_version: IPC_PROTOCOL_VERSION,
+            request_id: 2,
             command: AgentCommand::ExitAfterDrain,
         })
         .map_err(|error| error.to_string())?;
     match response.body {
-        IpcResponseBody::Success(response)
-            if matches!(*response, AgentResponse::Accepted { .. }) =>
-        {
+        IpcResponseBody::Success(response) if matches!(&*response, AgentResponse::Accepted { snapshot } if snapshot_matches(snapshot, &provenance)) => {
             Ok(json!({ "result": "stop-after-drain-accepted" }))
         }
         IpcResponseBody::Failure(error) => {
@@ -272,22 +287,55 @@ fn token(value: &OsStr, name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{name} must be Unicode"))
 }
 
-fn require_ordinary_file(path: &Path) -> Result<(), String> {
+fn read_bounded_ordinary_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, String> {
     if !path.is_absolute() {
-        return Err("runtime binding must be an absolute file path".to_owned());
+        return Err(format!("{label} must be an absolute file path"));
     }
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("runtime binding must be an ordinary file".to_owned());
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return Err(format!("{label} must be a bounded ordinary file"));
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         if metadata.file_attributes() & 0x400 != 0 {
-            return Err("runtime binding cannot be reparse-backed".to_owned());
+            return Err(format!("{label} cannot be reparse-backed"));
         }
     }
-    Ok(())
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > maximum {
+        return Err(format!("{label} exceeds the bounded input size"));
+    }
+    Ok(bytes)
+}
+
+fn snapshot_matches(snapshot: &runnermesh::AgentSnapshot, provenance: &PackageProvenance) -> bool {
+    snapshot.build.version == provenance.version
+        && snapshot.build.commit == provenance.commit
+        && snapshot.build.channel == provenance.channel
+        && snapshot.build.target == provenance.target
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -333,6 +381,28 @@ mod tests {
         ])
         .unwrap_err()
         .contains("SHA-256 differs"));
+        assert!(!root.join("installed").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_binding_refuses_before_installation_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "runnermesh-package-binding-size-refusal-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let binding = root.join("binding.json");
+        let bytes = vec![b'x'; 128 * 1024 + 1];
+        fs::write(&binding, &bytes).unwrap();
+        let hash = sha256_bytes(&bytes);
+        assert!(run(&[
+            OsString::from("bind"),
+            root.join("installed").into_os_string(),
+            binding.into_os_string(),
+            OsString::from(hash),
+        ])
+        .is_err());
         assert!(!root.join("installed").exists());
         fs::remove_dir_all(root).unwrap();
     }

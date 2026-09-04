@@ -86,7 +86,19 @@ impl Installation {
     /// Copy a verified payload into an immutable slot. Repeating identical
     /// bytes is idempotent; a version collision with different bytes refuses.
     pub fn install(&self, version: &str, payload: &Path) -> Result<InstallReceipt, InstallError> {
-        self.install_expected(version, payload, None)
+        self.install_expected(version, payload, None, None)
+    }
+
+    /// Installs only when the caller-provided, previously verified member
+    /// manifest still matches the complete payload directory. The immutable
+    /// slot is verified against the same manifest after copying.
+    pub fn install_with_manifest(
+        &self,
+        version: &str,
+        payload: &Path,
+        expected_manifest: &VersionManifest,
+    ) -> Result<InstallReceipt, InstallError> {
+        self.install_expected(version, payload, Some(expected_manifest), None)
     }
 
     pub(crate) fn install_with_payload_sha256(
@@ -95,13 +107,14 @@ impl Installation {
         payload: &Path,
         expected_payload_sha256: &str,
     ) -> Result<InstallReceipt, InstallError> {
-        self.install_expected(version, payload, Some(expected_payload_sha256))
+        self.install_expected(version, payload, None, Some(expected_payload_sha256))
     }
 
     fn install_expected(
         &self,
         version: &str,
         payload: &Path,
+        expected_manifest: Option<&VersionManifest>,
         expected_payload_sha256: Option<&str>,
     ) -> Result<InstallReceipt, InstallError> {
         let ancestor_guards = guard_existing_directories(&self.root)?;
@@ -109,11 +122,11 @@ impl Installation {
         validate_version(version)?;
         self.assert_runtime_root_safe()?;
         self.assert_payload_safe(payload)?;
-        let mut state = self.open_or_initialize()?;
-        let owned_guards = self.guard_owned_directories()?;
-        owned_guards.verify()?;
-        self.verify_state(&state)?;
         let manifest = manifest_for_payload(payload)?;
+        validate_install_manifest(&manifest)?;
+        if expected_manifest.is_some_and(|expected| expected != &manifest) {
+            return Err(InstallError::PayloadManifestMismatch);
+        }
         let payload_sha256 = manifest_payload_sha256(&manifest);
         if let Some(expected) = expected_payload_sha256 {
             if payload_sha256 != expected {
@@ -123,11 +136,10 @@ impl Installation {
                 });
             }
         }
-        if !manifest.files.contains_key("runnermesh-agent.exe") {
-            return Err(InstallError::InvalidPayload(
-                "payload must contain runnermesh-agent.exe".to_owned(),
-            ));
-        }
+        let mut state = self.open_or_initialize()?;
+        let owned_guards = self.guard_owned_directories()?;
+        owned_guards.verify()?;
+        self.verify_state(&state)?;
 
         if let Some(existing) = state.versions.get(version) {
             if existing == &manifest {
@@ -346,11 +358,18 @@ impl Installation {
         backend: &impl AutostartBackend,
     ) -> Result<UninstallReceipt, InstallError> {
         if !self.root.exists() {
+            if let Some(receipt) = self.cleanup_detached_uninstall()? {
+                return Ok(receipt);
+            }
             return Ok(UninstallReceipt {
                 removed_versions: 0,
                 root_removed: true,
                 foreign_content_preserved: false,
             });
+        }
+        let detached = self.detached_uninstall_path()?;
+        if detached.exists() {
+            return Err(InstallError::ForeignContent(detached));
         }
         if is_empty_dir(&self.root)? {
             fs::remove_dir(&self.root).map_err(InstallError::io)?;
@@ -627,34 +646,90 @@ impl Installation {
             root_entries.len() == 1 && root_entries[0].file_name().to_string_lossy() == STATE_DIR;
         let root_removed = only_receipt && only_state;
         if root_removed {
-            let parent = self
-                .root
-                .parent()
-                .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
-            let leaf = self
-                .root
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
-            let detached = parent.join(format!(
-                ".{leaf}.runnermesh-uninstall-{}",
-                transaction.transaction_id
-            ));
+            let detached = self.detached_uninstall_path()?;
             if detached.exists() {
                 return Err(InstallError::ForeignContent(detached));
             }
             fs::rename(&self.root, &detached).map_err(InstallError::io)?;
             after_root_detached()?;
-            if !detached.is_dir() || is_reparse_point(&detached)? {
-                return Err(InstallError::OwnershipDrift(detached));
+            let recovered = self
+                .cleanup_detached_uninstall()?
+                .ok_or(InstallError::OwnershipDrift(detached))?;
+            if recovered.removed_versions != removed_versions {
+                return Err(InstallError::DamagedMetadata(
+                    "detached uninstall receipt changed".to_owned(),
+                ));
             }
-            fs::remove_dir_all(&detached).map_err(InstallError::io)?;
         }
         Ok(UninstallReceipt {
             removed_versions,
             root_removed,
             foreign_content_preserved: !root_removed,
         })
+    }
+
+    fn detached_uninstall_path(&self) -> Result<PathBuf, InstallError> {
+        let parent = self
+            .root
+            .parent()
+            .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
+        let leaf = self
+            .root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
+        Ok(parent.join(format!(".{leaf}.runnermesh-uninstall-detached")))
+    }
+
+    fn cleanup_detached_uninstall(&self) -> Result<Option<UninstallReceipt>, InstallError> {
+        self.assert_runtime_root_safe()?;
+        let detached = self.detached_uninstall_path()?;
+        if !detached.exists() {
+            return Ok(None);
+        }
+        let parent_guards = guard_existing_directories(&detached)?;
+        parent_guards.verify()?;
+        if !detached.is_dir() || is_reparse_point(&detached)? {
+            return Err(InstallError::OwnershipDrift(detached));
+        }
+        let root_entries = fs::read_dir(&detached)
+            .map_err(InstallError::io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(InstallError::io)?;
+        if root_entries.len() != 1 || root_entries[0].file_name().to_string_lossy() != STATE_DIR {
+            return Err(InstallError::OwnershipDrift(detached));
+        }
+        let state = detached.join(STATE_DIR);
+        if !state.is_dir() || is_reparse_point(&state)? {
+            return Err(InstallError::OwnershipDrift(state));
+        }
+        let state_entries = fs::read_dir(&state)
+            .map_err(InstallError::io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(InstallError::io)?;
+        if state_entries.len() != 1
+            || state_entries[0].file_name().to_string_lossy() != UNINSTALL_RECEIPT_FILE
+        {
+            return Err(InstallError::OwnershipDrift(state));
+        }
+        let receipt_path = state.join(UNINSTALL_RECEIPT_FILE);
+        let bytes = read_optional_owned_file(&receipt_path)?
+            .ok_or_else(|| InstallError::OwnershipDrift(receipt_path.clone()))?;
+        let receipt = serde_json::from_slice::<DurableUninstallReceipt>(&bytes)
+            .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
+        if receipt.schema_version != UNINSTALL_TRANSACTION_SCHEMA_VERSION {
+            return Err(InstallError::DamagedMetadata(
+                "invalid detached uninstall completion receipt".to_owned(),
+            ));
+        }
+        parent_guards.verify()?;
+        drop(parent_guards);
+        fs::remove_dir_all(&detached).map_err(InstallError::io)?;
+        Ok(Some(UninstallReceipt {
+            removed_versions: receipt.removed_versions,
+            root_removed: true,
+            foreign_content_preserved: false,
+        }))
     }
 
     fn quarantine_uninstall_content(
@@ -1567,6 +1642,7 @@ pub enum InstallError {
     UnreconciledTransaction,
     UninstallInProgress,
     PayloadChecksumMismatch { expected: String, actual: String },
+    PayloadManifestMismatch,
     DamagedRuntimeBinding,
     RuntimeBindingDrift,
     RecoveryFailed(String),
@@ -1615,6 +1691,9 @@ impl fmt::Display for InstallError {
                 formatter,
                 "payload checksum mismatch: expected {expected}, got {actual}"
             ),
+            Self::PayloadManifestMismatch => {
+                formatter.write_str("payload members differ from the accepted manifest")
+            }
             Self::DamagedRuntimeBinding => {
                 formatter.write_str("installed runtime binding is damaged or invalid")
             }
@@ -1898,6 +1977,23 @@ fn manifest_for_payload(payload: &Path) -> Result<VersionManifest, InstallError>
         return Err(InstallError::InvalidPayload("payload is empty".to_owned()));
     }
     Ok(VersionManifest { files })
+}
+
+fn validate_install_manifest(manifest: &VersionManifest) -> Result<(), InstallError> {
+    if manifest.files.is_empty() || !manifest.files.contains_key("runnermesh-agent.exe") {
+        return Err(InstallError::InvalidPayload(
+            "payload must contain runnermesh-agent.exe".to_owned(),
+        ));
+    }
+    for (path, digest) in &manifest.files {
+        safe_relative(path)?;
+        if !is_lower_hex_digest(digest, 64) {
+            return Err(InstallError::InvalidPayload(
+                "payload manifest digest is invalid".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn manifest_payload_sha256(manifest: &VersionManifest) -> String {
@@ -2717,7 +2813,23 @@ mod tests {
             Err(InstallError::Io(_))
         ));
         assert!(!install.root().exists());
+        assert!(install.detached_uninstall_path().unwrap().exists());
         assert!(install.uninstall(&backend).unwrap().root_removed);
+        assert!(!install.detached_uninstall_path().unwrap().exists());
+    }
+
+    #[test]
+    fn accepted_manifest_refuses_staging_tamper_before_installation_mutation() {
+        let root = root("accepted-manifest-tamper");
+        let source = payload(&root, "one");
+        let expected = manifest_for_payload(&source).unwrap();
+        fs::write(source.join("runnermesh-agent.exe"), b"changed").unwrap();
+        let install = Installation::new(root.join("installed"));
+        assert_eq!(
+            install.install_with_manifest("0.1.0", &source, &expected),
+            Err(InstallError::PayloadManifestMismatch)
+        );
+        assert!(!install.root().exists());
     }
 
     #[test]

@@ -452,6 +452,7 @@ name = "runnermesh"
 version = "0.1.0"
 dependencies = [
  "embed-resource",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

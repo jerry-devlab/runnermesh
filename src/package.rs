@@ -16,8 +16,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::{
     installation::{
-        guard_existing_directories, is_reparse_point, sha256_bytes, sha256_file,
-        validate_explicit_path,
+        guard_existing_directories, is_reparse_point, sha256_bytes, validate_explicit_path,
     },
     AutostartBackend, Installation, UpdateCoordinator, UpdatePhase,
 };
@@ -235,14 +234,7 @@ impl PackageVerifier {
     }
 
     pub fn archive_sha256(archive: &Path) -> Result<String, PackageError> {
-        validate_explicit_path(archive)
-            .map_err(|_| PackageError::ForeignOutput(archive.to_path_buf()))?;
-        if is_reparse_point(archive)
-            .map_err(|error| PackageError::MalformedManifest(error.to_string()))?
-        {
-            return Err(PackageError::ForeignOutput(archive.to_path_buf()));
-        }
-        sha256_file(archive).map_err(PackageError::io)
+        read_bounded_ordinary_file(archive, MAX_PACKAGE_BYTES).map(|bytes| sha256_bytes(&bytes))
     }
 
     /// Writes only verified runtime members into an explicit, empty sandbox
@@ -494,16 +486,62 @@ impl fmt::Display for PackageError {
 impl std::error::Error for PackageError {}
 
 fn read_required_file(path: &Path) -> Result<Vec<u8>, PackageError> {
+    read_bounded_ordinary_file(path, MAX_MEMBER_BYTES)
+}
+
+fn read_bounded_ordinary_file(path: &Path, maximum: u64) -> Result<Vec<u8>, PackageError> {
     validate_explicit_path(path).map_err(|_| PackageError::ForeignOutput(path.to_path_buf()))?;
-    let metadata = fs::symlink_metadata(path).map_err(PackageError::io)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || is_reparse_point(path)
-            .map_err(|error| PackageError::MalformedManifest(error.to_string()))?
+    let guards = guard_existing_directories(path)
+        .map_err(|_| PackageError::ForeignOutput(path.to_path_buf()))?;
+    guards
+        .verify()
+        .map_err(|_| PackageError::ForeignOutput(path.to_path_buf()))?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
     {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+        options
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).map_err(PackageError::io)?;
+    guards
+        .verify()
+        .map_err(|_| PackageError::ForeignOutput(path.to_path_buf()))?;
+    let metadata = file.metadata().map_err(PackageError::io)?;
+    if !metadata.is_file() || metadata.len() > maximum || handle_is_reparse_point(&metadata) {
         return Err(PackageError::ForeignOutput(path.to_path_buf()));
     }
-    fs::read(path).map_err(PackageError::io)
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .map_err(PackageError::io)?;
+    if bytes.len() as u64 > maximum {
+        return Err(PackageError::ForeignOutput(path.to_path_buf()));
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn handle_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn handle_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn validate_provenance(provenance: &PackageProvenance) -> Result<(), PackageError> {
@@ -632,19 +670,7 @@ fn write_zip(path: &Path, contents: &BTreeMap<String, Vec<u8>>) -> Result<(), Pa
 }
 
 fn read_verified_archive(archive_path: &Path) -> Result<VerifiedArchive, PackageError> {
-    let _archive_guards = guard_existing_directories(archive_path)
-        .map_err(|_| PackageError::ForeignOutput(archive_path.to_path_buf()))?;
-    validate_explicit_path(archive_path)
-        .map_err(|_| PackageError::ForeignOutput(archive_path.to_path_buf()))?;
-    let metadata = fs::symlink_metadata(archive_path).map_err(PackageError::io)?;
-    if !metadata.is_file()
-        || metadata.len() > MAX_PACKAGE_BYTES
-        || is_reparse_point(archive_path)
-            .map_err(|error| PackageError::MalformedManifest(error.to_string()))?
-    {
-        return Err(PackageError::ForeignOutput(archive_path.to_path_buf()));
-    }
-    let bytes = fs::read(archive_path).map_err(PackageError::io)?;
+    let bytes = read_bounded_ordinary_file(archive_path, MAX_PACKAGE_BYTES)?;
     let archive_sha256 = sha256_bytes(&bytes);
     let mut archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| PackageError::MalformedManifest(error.to_string()))?;
