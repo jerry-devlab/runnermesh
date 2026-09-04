@@ -53,6 +53,21 @@ class CiPolicyTests(unittest.TestCase):
         self.assertIn("name: CI Gate", workflow)
         self.assertIn("fail-fast: true", workflow)
 
+    def test_hosted_release_binaries_receive_installed_runtime_smoke(self) -> None:
+        ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        rc_workflow = Path(".github/workflows/rc-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        for workflow in (ci_workflow, rc_workflow):
+            self.assertIn("cargo run --locked --example g15r-rc-smoke", workflow)
+            self.assertIn("runnermesh-agent.exe", workflow)
+            self.assertIn("runnermesh.exe", workflow)
+        self.assertIn("if: matrix.os == 'windows-latest'", ci_workflow)
+        self.assertLess(
+            rc_workflow.index("Execute the installed RC runtime before packaging"),
+            rc_workflow.index("Create and independently read back the immutable package"),
+        )
+
     def test_only_pull_request_updates_cancel_in_progress(self) -> None:
         workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn(

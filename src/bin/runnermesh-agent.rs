@@ -15,11 +15,11 @@ fn main() {
             "--runner-home" => runner_home = arguments.next().map(Into::into),
             "--process-probe-executable" => {
                 let Some(name) = arguments.next() else {
-                    std::process::exit(2);
+                    exit_with_error("process probe executable value is missing");
                 };
                 process_probe_names.push(name.to_string_lossy().into_owned());
             }
-            _ => std::process::exit(2),
+            _ => exit_with_error("unsupported argument"),
         }
     }
 
@@ -44,9 +44,20 @@ fn main() {
         }
         _ => Err("exactly one Agent runtime profile is required".to_owned()),
     };
-    if result.is_err() {
+    if let Err(error) = result {
+        // The Windows-subsystem binary has no console of its own, but a
+        // supervised launch can still redirect stderr. Keep startup failures
+        // observable without opening a window or persisting sensitive runtime
+        // details into the public installation contract.
+        eprintln!("runnermesh-agent: {error}");
         std::process::exit(2);
     }
+}
+
+#[cfg(windows)]
+fn exit_with_error(error: &str) -> ! {
+    eprintln!("runnermesh-agent: {error}");
+    std::process::exit(2)
 }
 
 #[cfg(not(windows))]

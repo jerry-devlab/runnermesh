@@ -112,6 +112,26 @@ jobs:
         run: echo "CARGO_CACHE_HIT=${{ steps.cargo-cache.outputs.cache-hit }}"
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Build and execute installed Windows release smoke
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          RUNNERMESH_BUILD_COMMIT: ${{ needs.classify.outputs.head_sha }}
+          RUNNERMESH_BUILD_CHANNEL: ci
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+          if ($LASTEXITCODE -ne 0) { throw 'release build failed' }
+          $binaryRoot = Join-Path $PWD 'target\x86_64-pc-windows-msvc\release'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP ("runnermesh-ci-smoke-" + [guid]::NewGuid().ToString('N'))
+          cargo run --locked --example g15r-rc-smoke -- `
+            (Join-Path $binaryRoot 'runnermesh-agent.exe') `
+            (Join-Path $binaryRoot 'runnermesh.exe') `
+            (Join-Path $PWD 'resources\runnermesh-agent.manifest') `
+            $smokeRoot `
+            '${{ needs.classify.outputs.head_sha }}' `
+            'ci'
+          if ($LASTEXITCODE -ne 0) { throw 'installed Windows release smoke failed' }
 
   gate:
     name: CI Gate
