@@ -18,14 +18,16 @@ fn main() {
             })
         }),
         [command, archive, destination] if command == "extract" => {
-            PackageVerifier::extract_runtime(&PathBuf::from(archive), &PathBuf::from(destination))
-                .map(|manifest| {
+            let destination = PathBuf::from(destination);
+            PackageVerifier::extract_runtime(&PathBuf::from(archive), &destination).map(
+                |manifest| {
                     serde_json::json!({
                         "result": "extracted",
                         "destination": destination,
                         "provenance": manifest.provenance,
                     })
-                })
+                },
+            )
         }
         [command, output, version, commit, channel, cli, agent, manifest]
             if command == "create" =>
