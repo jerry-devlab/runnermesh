@@ -247,8 +247,11 @@ copied into public code, PRs, logs, or the execution ledger.
 ## Current live disposition
 
 The accepted source can establish a synthetic proof, ready adapter layer, and
-ready source transaction family, but the unclosed P0 baseline prerequisite and
-absent Owner trust configuration keep live H1 fail-closed:
+ready source transaction family. H1 entry authority is satisfied either by an
+accepted P0 PASS or by the Owner explicitly retiring the exhausted historical
+P0 target from v0.1 qualification authority and selecting a fresh official H1
+target. Until one of those paths is accepted, and until the exact Owner trust
+configuration exists, live H1 remains fail-closed:
 
 ```text
 H1_READINESS_VERIFIER=PASS_SYNTHETIC
@@ -272,10 +275,12 @@ LIVE_READINESS_EXECUTED=false
 H1_EXECUTED=false
 ```
 
-P0 recovery and H1 preparation remain separate future Owner transactions. This
-Goal does not start/stop a service, invoke a recovery helper, touch the real
-qualification workspace, change a runner label/group/registration, create a
-credential, or dispatch H1.
+Historical P0 recovery is not a prerequisite for the accepted fresh-target
+path and the exhausted historical target must not be retried, repaired for
+v0.1, or used as H1 evidence. Fresh-target establishment and H1 qualification
+remain separate explicit Owner gates. Source preparation does not start/stop a
+service, invoke a recovery helper, touch the real qualification workspace,
+change a runner label/group/registration, create a credential, or dispatch H1.
 
 `WAITING_FOR_OWNER` and `OWNER_CANCELED` remain outer control states, not H1
 implementation failures. A later attempt must collect fresh live evidence and
