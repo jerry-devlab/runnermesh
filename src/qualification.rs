@@ -963,15 +963,16 @@ mod tests {
     #[test]
     fn inert_workflow_template_has_the_label_identity_and_trigger_contract() {
         let assessment = assess_h1_workflow_template();
+        let normalized_template = normalize_workflow_source(H1_WORKFLOW_TEMPLATE);
         assert!(assessment.source_contract_ready());
         assert!(assessment.candidate_identity_asserted);
         assert!(assessment.transaction_identity_asserted);
-        assert!(H1_WORKFLOW_TEMPLATE.contains("workflow_dispatch"));
-        assert!(!H1_WORKFLOW_TEMPLATE.contains("pull_request"));
-        assert!(H1_WORKFLOW_TEMPLATE.contains(
+        assert!(normalized_template.contains("workflow_dispatch"));
+        assert!(!normalized_template.contains("pull_request"));
+        assert!(normalized_template.contains(
             "      - name: Assert immutable envelope and runtime identity\n        env:\n          H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n        shell: pwsh",
         ));
-        assert!(!H1_WORKFLOW_TEMPLATE.contains(
+        assert!(!normalized_template.contains(
             "      H1_OBSERVED_RUNNER_NAME: ${{ runner.name }}\n      H1_TRANSACTION_ID",
         ));
     }
