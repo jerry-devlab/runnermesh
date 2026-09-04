@@ -196,6 +196,9 @@ fn request_stop_after_drain() -> Result<Value, String> {
             command: AgentCommand::GetSnapshot,
         })
         .map_err(|error| error.to_string())?;
+    if observation.request_id != 1 {
+        return Err("Agent returned a mismatched snapshot response identifier".to_owned());
+    }
     match observation.body {
         IpcResponseBody::Success(response) if matches!(&*response, AgentResponse::Snapshot(snapshot) if snapshot_matches(snapshot, &provenance)) =>
             {}
@@ -212,6 +215,9 @@ fn request_stop_after_drain() -> Result<Value, String> {
             command: AgentCommand::ExitAfterDrain,
         })
         .map_err(|error| error.to_string())?;
+    if response.request_id != 2 {
+        return Err("Agent returned a mismatched stop-after-drain response identifier".to_owned());
+    }
     match response.body {
         IpcResponseBody::Success(response) if matches!(&*response, AgentResponse::Accepted { snapshot } if snapshot_matches(snapshot, &provenance)) => {
             Ok(json!({ "result": "stop-after-drain-accepted" }))

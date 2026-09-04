@@ -687,43 +687,46 @@ impl Installation {
         if !detached.exists() {
             return Ok(None);
         }
-        let parent_guards = guard_existing_directories(&detached)?;
-        parent_guards.verify()?;
-        if !detached.is_dir() || is_reparse_point(&detached)? {
-            return Err(InstallError::OwnershipDrift(detached));
-        }
-        let root_entries = fs::read_dir(&detached)
-            .map_err(InstallError::io)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(InstallError::io)?;
-        if root_entries.len() != 1 || root_entries[0].file_name().to_string_lossy() != STATE_DIR {
-            return Err(InstallError::OwnershipDrift(detached));
-        }
-        let state = detached.join(STATE_DIR);
-        if !state.is_dir() || is_reparse_point(&state)? {
-            return Err(InstallError::OwnershipDrift(state));
-        }
-        let state_entries = fs::read_dir(&state)
-            .map_err(InstallError::io)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(InstallError::io)?;
-        if state_entries.len() != 1
-            || state_entries[0].file_name().to_string_lossy() != UNINSTALL_RECEIPT_FILE
-        {
-            return Err(InstallError::OwnershipDrift(state));
-        }
-        let receipt_path = state.join(UNINSTALL_RECEIPT_FILE);
-        let bytes = read_optional_owned_file(&receipt_path)?
-            .ok_or_else(|| InstallError::OwnershipDrift(receipt_path.clone()))?;
-        let receipt = serde_json::from_slice::<DurableUninstallReceipt>(&bytes)
-            .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
-        if receipt.schema_version != UNINSTALL_TRANSACTION_SCHEMA_VERSION {
-            return Err(InstallError::DamagedMetadata(
-                "invalid detached uninstall completion receipt".to_owned(),
-            ));
-        }
-        parent_guards.verify()?;
-        drop(parent_guards);
+        let receipt = {
+            let parent_guards = guard_existing_directories(&detached)?;
+            parent_guards.verify()?;
+            if !detached.is_dir() || is_reparse_point(&detached)? {
+                return Err(InstallError::OwnershipDrift(detached));
+            }
+            let root_entries = fs::read_dir(&detached)
+                .map_err(InstallError::io)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(InstallError::io)?;
+            if root_entries.len() != 1 || root_entries[0].file_name().to_string_lossy() != STATE_DIR
+            {
+                return Err(InstallError::OwnershipDrift(detached));
+            }
+            let state = detached.join(STATE_DIR);
+            if !state.is_dir() || is_reparse_point(&state)? {
+                return Err(InstallError::OwnershipDrift(state));
+            }
+            let state_entries = fs::read_dir(&state)
+                .map_err(InstallError::io)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(InstallError::io)?;
+            if state_entries.len() != 1
+                || state_entries[0].file_name().to_string_lossy() != UNINSTALL_RECEIPT_FILE
+            {
+                return Err(InstallError::OwnershipDrift(state));
+            }
+            let receipt_path = state.join(UNINSTALL_RECEIPT_FILE);
+            let bytes = read_optional_owned_file(&receipt_path)?
+                .ok_or_else(|| InstallError::OwnershipDrift(receipt_path.clone()))?;
+            let receipt = serde_json::from_slice::<DurableUninstallReceipt>(&bytes)
+                .map_err(|error| InstallError::DamagedMetadata(error.to_string()))?;
+            if receipt.schema_version != UNINSTALL_TRANSACTION_SCHEMA_VERSION {
+                return Err(InstallError::DamagedMetadata(
+                    "invalid detached uninstall completion receipt".to_owned(),
+                ));
+            }
+            parent_guards.verify()?;
+            receipt
+        };
         fs::remove_dir_all(&detached).map_err(InstallError::io)?;
         Ok(Some(UninstallReceipt {
             removed_versions: receipt.removed_versions,
