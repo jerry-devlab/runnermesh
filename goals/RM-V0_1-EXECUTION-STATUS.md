@@ -44,7 +44,7 @@ Evidence-scope flags are not top-level result dispositions:
 
 | Goal / phase | State | Accepted head / candidate | PR | Durable evidence / note | Next prerequisite |
 |---|---|---|---|---|---|
-| Final autonomous closeout Master Goal | PREPARING | starts from authoritative `a92d05e0100bc1c9450ccc1a87dcdd2af37172d4` | #37-#46, #33 | H1 and G12-G15 remain accepted; final cutover planning found that the immutable operator entry point was not present in the RC artifact | complete bounded G15R operator repair and replacement RC acceptance |
+| Final autonomous closeout Master Goal | WAITING_FOR_OWNER | authoritative `cdacba62d47dd281968fb4cb365687218a10d7e5` through accepted G15R | #33, #37-#47 | H1, G12-G15, and the replacement immutable G15R RC are accepted; production remains unchanged | `AUTHORIZE_MASTER_H2_CUTOVER` for the displayed exact transaction |
 | G01-G10 + G06R + G10R | ACCEPTED | historical accepted main | #1-#13 | frozen domain/runtime/product foundation | none |
 | Windows no-tasklist hotfix | ACCEPTED | `b6dfdf92dae4e9ba20a2a4abc4e6ee26a356ab1b` | #18 | native ToolHelp process snapshot; console-flash regression closed | none |
 | Roadmap v2 | SUPERSEDED | `2621548d685fde4a9910b675192de39ee791649f` | #19 | retained historical reset; Roadmap v3 governs remaining execution | Roadmap v3 |
@@ -65,8 +65,8 @@ Evidence-scope flags are not top-level result dispositions:
 | G13 versioned install | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | immutable explicit-root versioned install, fail-closed path/reparse validation, and durable interruption reconciliation for slot and activation changes | integrated G15R sandbox proof |
 | G14 update + rollback | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | staged update, active-job deferral, second payload-digest binding, activation rollback, and recovered provenance source accepted | integrated G15R sandbox proof |
 | G15 packaging + doctor | ACCEPTED | `4ec66407486c78e0278c470ee6808850a7e01d78` | #33 | explicit-input package uses one verified byte stream for contents and SHA-256, exact full commit provenance, bounded archive safety, and isolated doctor source | integrated G15R sandbox proof |
-| G15R integrated pre-H2 RC | PREPARING | supersedes candidate `8d8051ecc8bf556d30e632dd8b09985fc653c905` | #42-#46 + bounded repair PR | prior archive/runtime/DACL evidence passed, but H2 planning found no immutable artifact-delivered entry point for the accepted typed install/bind/autostart/uninstall path | protected repair merge, replacement immutable RC, exact operator smoke, and focused acceptance |
-| H2/G16-A real cutover | TODO | N/A | N/A | immutable RC only; no production mutation has occurred | replacement G15R `H2_RC_READY=true` + Owner gate |
+| G15R integrated pre-H2 RC | PASS | `cdacba62d47dd281968fb4cb365687218a10d7e5`; archive `1c96607e067f97ccb0a174ee6602f7306067b86b016b60640dd93e75226ca6af`; operator `8147f38380eb9dc8087de324b420fd5fd108a733e25417a007b95fbe4421ed29` | #42-#47 | one authoritative-main Windows x64 artifact; exact provenance/member hashes; installed Agent/Tray/CLI/IPC/doctor; immutable operator; update/rollback/uninstall; explicit Named Pipe DACL; final independent acceptance PASS | H2 Owner gate |
+| H2/G16-A real cutover | WAITING_FOR_OWNER | accepted immutable G15R RC | N/A | no production mutation has occurred; exact cutover and rollback plan must be displayed before authorization | `AUTHORIZE_MASTER_H2_CUTOVER` |
 | H2/G16-B sustained dogfood | TODO | N/A | N/A | minimum 24h ordinary-use window | successful cutover |
 | G17 RC closeout | TODO | N/A | N/A | exact candidate/evidence/docs/release closeout | sustained dogfood PASS |
 | H3/G18 v0.1.0 release | TODO | N/A | N/A | stable publication requires Owner authorization | G17 PASS |
@@ -141,8 +141,8 @@ H1_READINESS_VERIFIER=PASS_SYNTHETIC
 H1_LIVE_ADAPTER_SOURCE_READY=true
 H1_NON_MUTATING_READINESS=PASS_11_OF_11
 H1_OWNER_BUNDLE_SOURCE_PREPARED=true
-MASTER_GOAL_PHASE=F3_RC_RELEASE_HARDENING
-MASTER_GOAL_STATE=PREPARING
+MASTER_GOAL_PHASE=F4_H2_CUTOVER_DOGFOOD
+MASTER_GOAL_STATE=WAITING_FOR_OWNER
 P0_HISTORICAL_TARGET_RETRY_EXHAUSTED=true
 HISTORICAL_P0_V0_1_AUTHORITY=RETIRED_BY_OWNER
 FRESH_OFFICIAL_H1_TARGET_SELECTED=true
@@ -153,11 +153,14 @@ H1_LIVE_READINESS=PASS_11_OF_11
 H1_EXECUTED=true
 H1_QUALIFICATION=PASS
 H1_RESTORE=PASS
-G15R=PREPARING
-H2_RC_READY=false
+G15R=PASS
+H2_RC_READY=true
 SUPERSEDED_RC_COMMIT=8d8051ecc8bf556d30e632dd8b09985fc653c905
 SUPERSEDED_RC_ARCHIVE_SHA256=3c556af60775d5217e67446a57c27d7967fe5e31176e41dced73cc197cb5417f
-RC_IDENTITY=PENDING_REPLACEMENT
+RC_COMMIT=cdacba62d47dd281968fb4cb365687218a10d7e5
+RC_ARCHIVE_SHA256=1c96607e067f97ccb0a174ee6602f7306067b86b016b60640dd93e75226ca6af
+RC_OPERATOR_HELPER_SHA256=8147f38380eb9dc8087de324b420fd5fd108a733e25417a007b95fbe4421ed29
+RC_IDENTITY=IMMUTABLE
 NAMED_PIPE_EXPLICIT_DACL=PASS
 RELEASE_SECURITY_DEBT_BLOCKING=0
 H2_CUTOVER_AUTHORIZED=false
