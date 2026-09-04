@@ -844,6 +844,20 @@ mod tests {
             .unwrap();
         assert_eq!(
             updates
+                .activate(
+                    SafePointObservation::ActiveBoundWork,
+                    HealthObservation::Healthy
+                )
+                .unwrap()
+                .outcome,
+            UpdateOutcome::DeferredForActiveJob
+        );
+        assert_eq!(
+            installation.state().unwrap().active_version.as_deref(),
+            Some("0.1.0")
+        );
+        assert_eq!(
+            updates
                 .activate(SafePointObservation::Idle, HealthObservation::Healthy)
                 .unwrap()
                 .outcome,
