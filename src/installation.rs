@@ -477,6 +477,15 @@ impl Installation {
         backend: &impl AutostartBackend,
         transaction: &mut UninstallTransaction,
     ) -> Result<UninstallReceipt, InstallError> {
+        self.resume_uninstall_with_hook(backend, transaction, || Ok(()))
+    }
+
+    fn resume_uninstall_with_hook(
+        &self,
+        backend: &impl AutostartBackend,
+        transaction: &mut UninstallTransaction,
+        after_root_detached: impl FnOnce() -> Result<(), InstallError>,
+    ) -> Result<UninstallReceipt, InstallError> {
         let root_guards = guard_existing_directories(&self.state_dir())?;
         root_guards.verify()?;
         validate_uninstall_transaction(transaction)?;
@@ -531,9 +540,28 @@ impl Installation {
             root_entries.len() == 1 && root_entries[0].file_name().to_string_lossy() == STATE_DIR;
         let root_removed = only_receipt && only_state;
         if root_removed {
-            remove_owned_file(&self.uninstall_receipt_path())?;
-            fs::remove_dir(self.state_dir()).map_err(InstallError::io)?;
-            fs::remove_dir(&self.root).map_err(InstallError::io)?;
+            let parent = self
+                .root
+                .parent()
+                .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
+            let leaf = self
+                .root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| InstallError::OwnershipDrift(self.root.clone()))?;
+            let detached = parent.join(format!(
+                ".{leaf}.runnermesh-uninstall-{}",
+                transaction.transaction_id
+            ));
+            if detached.exists() {
+                return Err(InstallError::ForeignContent(detached));
+            }
+            fs::rename(&self.root, &detached).map_err(InstallError::io)?;
+            after_root_detached()?;
+            if !detached.is_dir() || is_reparse_point(&detached)? {
+                return Err(InstallError::OwnershipDrift(detached));
+            }
+            fs::remove_dir_all(&detached).map_err(InstallError::io)?;
         }
         Ok(UninstallReceipt {
             removed_versions,
@@ -557,13 +585,11 @@ impl Installation {
             &quarantine.bin,
             &transaction.state,
         )?;
-        quarantine_file(
-            &self.root.join(CURRENT_FILE),
-            &quarantine.current,
-            &activation_artifacts(&transaction.state)?
-                .ok_or(InstallError::NoActiveVersion)?
-                .0,
-        )?;
+        if let Some((current, _)) = activation_artifacts(&transaction.state)? {
+            quarantine_file(&self.root.join(CURRENT_FILE), &quarantine.current, &current)?;
+        } else if self.root.join(CURRENT_FILE).exists() || quarantine.current.exists() {
+            return Err(InstallError::OwnershipDrift(self.root.join(CURRENT_FILE)));
+        }
         quarantine_file(
             &self.root.join(LEDGER_FILE),
             &quarantine.ledger,
@@ -1515,7 +1541,6 @@ fn validate_uninstall_transaction(transaction: &UninstallTransaction) -> Result<
         || !transaction.transaction_id[10..]
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        || transaction.state.active_version.is_none()
     {
         return Err(InstallError::DamagedMetadata(
             "invalid uninstall transaction contract".to_owned(),
@@ -1535,15 +1560,12 @@ fn validate_uninstall_transaction(transaction: &UninstallTransaction) -> Result<
             ));
         }
     }
-    let active = transaction
-        .state
-        .active_version
-        .as_deref()
-        .unwrap_or_default();
-    if !transaction.state.versions.contains_key(active) {
-        return Err(InstallError::DamagedMetadata(
-            "uninstall active version is absent".to_owned(),
-        ));
+    if let Some(active) = transaction.state.active_version.as_deref() {
+        if !transaction.state.versions.contains_key(active) {
+            return Err(InstallError::DamagedMetadata(
+                "uninstall active version is absent".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1637,17 +1659,20 @@ fn verify_bin_root(root: &Path, state: &InstallationState) -> Result<(), Install
     if !root.is_dir() || is_reparse_point(root)? {
         return Err(InstallError::OwnershipDrift(root.to_path_buf()));
     }
-    if file_names(root)? != BTreeSet::from([STABLE_AGENT_ENTRY.to_owned()]) {
+    let expected_files = if state.active_version.is_some() {
+        BTreeSet::from([STABLE_AGENT_ENTRY.to_owned()])
+    } else {
+        BTreeSet::new()
+    };
+    if file_names(root)? != expected_files {
         return Err(InstallError::OwnershipDrift(root.to_path_buf()));
     }
-    let active = state
-        .active_version
-        .as_deref()
-        .ok_or(InstallError::NoActiveVersion)?;
-    if fs::read_to_string(root.join(STABLE_AGENT_ENTRY)).map_err(InstallError::io)?
-        != stable_entry_contents(active)
-    {
-        return Err(InstallError::OwnershipDrift(root.join(STABLE_AGENT_ENTRY)));
+    if let Some(active) = state.active_version.as_deref() {
+        if fs::read_to_string(root.join(STABLE_AGENT_ENTRY)).map_err(InstallError::io)?
+            != stable_entry_contents(active)
+        {
+            return Err(InstallError::OwnershipDrift(root.join(STABLE_AGENT_ENTRY)));
+        }
     }
     Ok(())
 }
@@ -2356,6 +2381,44 @@ mod tests {
         assert!(receipt.root_removed);
         assert!(!install.root().exists());
         assert_eq!(backend.read().unwrap(), None);
+    }
+
+    #[test]
+    fn empty_install_and_final_detach_window_remain_recoverable() {
+        let empty_root = root("uninstall-empty");
+        let empty = Installation::new(empty_root.join("installed"));
+        assert_eq!(
+            empty.open_or_initialize().unwrap(),
+            super::initial_installation_state()
+        );
+        let empty_receipt = empty
+            .uninstall(&SandboxAutostartBackend::new(
+                empty_root.join("autostart.json"),
+            ))
+            .unwrap();
+        assert_eq!(empty_receipt.removed_versions, 0);
+        assert!(empty_receipt.root_removed);
+        assert!(!empty.root().exists());
+
+        let root = root("uninstall-final-detach");
+        let install = Installation::new(root.join("installed"));
+        install.install("0.1.0", &payload(&root, "one")).unwrap();
+        let backend = SandboxAutostartBackend::new(root.join("autostart.json"));
+        let mut transaction = UninstallTransaction {
+            schema_version: UNINSTALL_TRANSACTION_SCHEMA_VERSION,
+            transaction_id: "uninstall-00000000000000000000000000000002".to_owned(),
+            state: install.state().unwrap(),
+            phase: UninstallPhase::Intent,
+        };
+        install.write_uninstall_transaction(&transaction).unwrap();
+        assert!(matches!(
+            install.resume_uninstall_with_hook(&backend, &mut transaction, || Err(
+                InstallError::Io("injected after root detach".to_owned())
+            )),
+            Err(InstallError::Io(_))
+        ));
+        assert!(!install.root().exists());
+        assert!(install.uninstall(&backend).unwrap().root_removed);
     }
 
     #[test]
