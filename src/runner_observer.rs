@@ -276,7 +276,11 @@ fn observe_bound_metadata(
     if std::io::Read::read_to_end(&mut file, &mut bytes).is_err() {
         return BoundMetadataObservation::Unknown;
     }
-    let Ok(metadata) = serde_json::from_slice::<OfficialRunnerMetadata>(&bytes) else {
+    // The official Windows runner writes its `.runner` metadata as UTF-8 and
+    // may include the standard UTF-8 BOM. Accept only that exact prefix;
+    // all JSON schema, identity, scope, and work-root checks remain strict.
+    let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    let Ok(metadata) = serde_json::from_slice::<OfficialRunnerMetadata>(json) else {
         return BoundMetadataObservation::Unknown;
     };
     if metadata.agent_id != binding.admission.runner_id
@@ -707,6 +711,20 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        fs::write(
+            runner_home.join(".runner"),
+            b"\xEF\xBB\xBF{\"agentId\":42,\"agentName\":\"fixture-runner\",\"gitHubUrl\":\"https://github.com/fixture-owner/fixture-repository\",\"workFolder\":\"_work\"}",
+        )
+        .unwrap();
+        let bound = super::ExactRuntimeBinding {
+            work_root: local.work_root.clone(),
+            execution_identity_ref: local.execution_identity_ref.clone(),
+            admission: admission.clone(),
+        };
+        assert_eq!(
+            super::observe_bound_metadata(&runner_home, &bound),
+            super::BoundMetadataObservation::Verified
+        );
         let observed = super::WindowsRunnerSource::for_exact_binding(&local, &admission).collect();
         // Hosted Windows temporary roots can inherit an Administrators owner.
         // Both known outcomes prove that the ACL owner was classified; Unknown
