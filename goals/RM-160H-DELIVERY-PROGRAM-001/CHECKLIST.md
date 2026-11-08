@@ -1,6 +1,6 @@
 # RM-160H-DELIVERY-PROGRAM-001 — Goal checklist and acceptance ledger
 
-This is a **pre-execution work checklist**, not evidence of completion. Main on planning: `ca1dd96e75a606b80d1978f83e973bd2586d36e4`. Code tip on planning: PR #63 `8cd996acfee23e5f2006e7801139c70d0d67551d`. The owner has accepted HUX-0 development Tray experience; no full click screenshots were supplied. ZenBook14 HUX-1 zero is truthful but **ZenBookDuo is PENDING**.
+This is a **pre-execution work checklist**, not evidence of completion. Main on planning: `ca1dd96e75a606b80d1978f83e973bd2586d36e4`. Code tip on planning: PR #63 `8cd996acfee23e5f2006e7801139c70d0d67551d`. The owner has accepted HUX-0 development Tray experience; no full click screenshots were supplied. the development host HUX-1 zero is truthful but **ZenBookDuo is PENDING**.
 
 Read [ROADMAP.md](ROADMAP.md), `goals/RM-V0_1-EXECUTION-STATUS.md`, `dev_governance_files/QUALITY_GATES.md`, `dev_governance_files/AUTONOMOUS_TRAINS.md` and ADRs 0004/0005 before any implementation.
 
@@ -8,7 +8,7 @@ Read [ROADMAP.md](ROADMAP.md), `goals/RM-V0_1-EXECUTION-STATUS.md`, `dev_governa
 
 - [ ] P00-01 Re-fetch main, PR #51–#63 exact heads, their target base chain, active CI, v0.1 ledger and the latest sealed candidate; report SHA drift rather than assuming this document is fresh.
 - [ ] P00-02 Preserve `HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED` as Owner-supplied evidence only; do not rerun without changed UX risk.
-- [ ] P00-03 Run `runnermesh-hux-sandbox discover-readonly` on the **actual ZenBookDuo**, not `laptop-zenbook14`. Collect only `candidate_count,observed_only_count,refused_count,identity_complete_count,service_enumeration,session_enumeration,process_observation,incomplete`.
+- [ ] P00-03 Run `runnermesh-hux-sandbox discover-readonly` on the **actual ZenBookDuo**, not `the non-target development Windows host`. Collect only `candidate_count,observed_only_count,refused_count,identity_complete_count,service_enumeration,session_enumeration,process_observation,incomplete`.
 - [ ] P00-04 Cross-check *counts* of `actions.runner.*` services and `Runner.Listener.exe`/`Runner.Worker.exe`/`RunnerService.exe` processes. Do not publish exact IDs, paths, services or private topology.
 - [ ] P00-05 Diagnose session-vs-service when `candidate_count=0`; do not convert an empty target into nonempty PASS and do not register/install a real runner without exact Owner scope.
 - [ ] P00-06 Reconcile the latest PR #63 branch QA/CI and status; independent security still pending.
