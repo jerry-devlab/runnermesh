@@ -7,7 +7,8 @@ TRAIN_ID=RM-LONG-TRAIN-LRM-RUNTIME-001
 START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 LRM_BASE=#59@ed68ba7
 BRANCH=feat/lrm-runtime-integration
-WORKTREE=C:\Dev\src\runnermesh-lrm-runtime
+PR=61
+HEAD=c9409db (pre-CI-fix)
 BUDGET_HOURS=8-12
 LOCAL_GATE=PASS (cargo test --lib 220; clippy -D warnings)
 ```
@@ -28,4 +29,4 @@ No real Service/label/credential/autostart/H2/v0.1.0; no AGY; Cursor self-review
 
 ## Recovery
 
-`goals/RM-CONTINUOUS-TRAIN-CHECKPOINT.md` + this file + worktree `runnermesh-lrm-runtime`.
+`goals/RM-CONTINUOUS-TRAIN-CHECKPOINT.md` + this file + isolated worktree on `feat/lrm-runtime-integration`.

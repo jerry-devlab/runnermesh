@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     DiscoveredLifecycle, DiscoveryIdentityFilter, DiscoveryReport, EmptyUnsupportedDiscoverySource,
-    OpaqueIdentityReference, RegistrationScope, RunnerDiscoveryInventory, ServiceCandidateFact,
-    ServiceDiscoverySource, SessionCandidateFact, SessionDiscoverySource,
+    RegistrationScope, RunnerDiscoveryInventory, ServiceCandidateFact, ServiceDiscoverySource,
+    SessionCandidateFact, SessionDiscoverySource,
 };
 
 /// Runs the pure inventory over live Service enumeration plus optional session homes.
@@ -25,6 +25,7 @@ pub fn discover_local_runners_read_only(session_homes: Vec<PathBuf>) -> Discover
     inventory.discover()
 }
 
+#[cfg(windows)]
 const ACTIONS_RUNNER_PREFIX: &str = "actions.runner.";
 
 /// Builds a discovery inventory that uses live Windows Service enumeration when
@@ -301,7 +302,7 @@ fn service_fact_from_scm(
                 registration_scope: None,
                 runner_id: None,
                 expected_runner_name: None,
-                execution_identity_ref: None as Option<OpaqueIdentityReference>,
+                execution_identity_ref: None,
                 state: DiscoveredLifecycle::Unknown,
             });
         }
