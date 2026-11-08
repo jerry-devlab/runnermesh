@@ -622,4 +622,80 @@ mod tests {
         assert!(disabled.applied);
         assert!(!editor.registry().get("key-a").unwrap().desired_enabled);
     }
+
+    #[test]
+    fn batch_item_outcomes_mark_partial_failure_without_claiming_full_success() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut discovery = discovery_report();
+        let mut second = discovery.candidates[0].clone();
+        second.local_discovery_key = "key-b".to_owned();
+        second.identity.runner_id = Some(8);
+        second.identity.expected_runner_name = Some("fixture-8".to_owned());
+        second.identity.runner_home = PathBuf::from(r"C:\fixture\runners\b");
+        second.identity.work_root = Some(PathBuf::from(r"C:\fixture\runners\b\_work"));
+        second.identity.registration_scope = Some(RegistrationScope::Repository {
+            owner: "fixture-owner".to_owned(),
+            repository: "repo-b".to_owned(),
+        });
+        discovery.candidates.push(second);
+
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-a".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-b".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+
+        let report = RunnerCommandReport::from_registry(
+            editor.registry(),
+            false,
+            false,
+            true,
+            None,
+            Vec::new(),
+            0,
+        )
+        .with_item_outcome("key-a", true, None)
+        .with_item_outcome(
+            "key-b",
+            false,
+            Some(ReasonCode::new("runners-item-failed".to_owned()).unwrap()),
+        );
+        assert!(report.partial_failure);
+        assert_eq!(
+            report.reason_code.as_ref().map(|code| code.as_str()),
+            Some("runners-partial-failure")
+        );
+        let a = report
+            .records
+            .iter()
+            .find(|item| item.local_runner_key == "key-a")
+            .unwrap();
+        let b = report
+            .records
+            .iter()
+            .find(|item| item.local_runner_key == "key-b")
+            .unwrap();
+        assert_eq!(a.item_applied, Some(true));
+        assert_eq!(b.item_applied, Some(false));
+        assert_eq!(
+            b.item_reason_code.as_ref().map(|code| code.as_str()),
+            Some("runners-item-failed")
+        );
+        // Optimistic batch apply flag must not erase per-item failure evidence.
+        assert!(report.applied);
+        assert!(report.partial_failure);
+    }
 }
