@@ -981,6 +981,13 @@ mod tests {
             Err(ConfigStoreError::IncompatibleSchema { .. })
         ));
 
+        // Corrupt durable bytes must fail closed rather than inventing defaults.
+        fs::write(&path, b"{not-json").unwrap();
+        assert!(matches!(store.load(), Err(ConfigStoreError::Json(_))));
+        // Residue beside the durable file must not resurrect a valid load.
+        fs::write(root.join("config.json.tmp"), b"{\"schema_version\":1}").unwrap();
+        assert!(matches!(store.load(), Err(ConfigStoreError::Json(_))));
+
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -499,6 +499,28 @@ mod tests {
     }
 
     #[test]
+    fn restart_refuses_unowned_work_root_without_destructive_adoption() {
+        let mut foreign_root = runner(RunnerPhase::Listening);
+        foreign_root.work_root = OwnershipEvidence::NotOwned;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: foreign_root,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::WorkRootNotOwned)
+        );
+        assert_ne!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Adopt
+        );
+    }
+
+    #[test]
     fn resume_refuses_ambiguous_home_and_interruption_only_directs_reconnect() {
         let source = QueueRecoverySource::new(vec![
             RecoveryObservation {
