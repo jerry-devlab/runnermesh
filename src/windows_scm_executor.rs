@@ -1652,6 +1652,27 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_grant_cannot_mutate_gated_windows_backend() {
+        // Forgeable synthetic grants open mock/synthetic gates only. The gated
+        // Windows adapter remains mutation-inert regardless of grant kind.
+        let gate = open_synthetic_gate();
+        assert!(gate.is_synthetic_test_only());
+        let backend = GatedWindowsScmBackend;
+        assert!(matches!(
+            backend.start("fixture.scm.a"),
+            Err(ScmApiError::GateClosed)
+        ));
+        assert!(matches!(
+            backend.stop("fixture.scm.a"),
+            Err(ScmApiError::GateClosed)
+        ));
+        assert!(matches!(
+            backend.change_start_mode("fixture.scm.a", ServiceStartMode::Manual),
+            Err(ScmApiError::GateClosed)
+        ));
+    }
+
+    #[test]
     fn closed_gate_refuses_stop_without_mutation() {
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
