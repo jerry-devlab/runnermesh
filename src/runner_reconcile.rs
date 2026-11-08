@@ -862,7 +862,8 @@ mod tests {
     }
 
     #[test]
-    fn selector_removal_alone_is_not_job_assignment_barrier_and_achieved_drained_requires_no_worker() {
+    fn selector_removal_alone_is_not_job_assignment_barrier_and_achieved_drained_requires_no_worker(
+    ) {
         let registry = build_registry(vec![record("runner-1", "repo-a", 1, true, false)]);
 
         // Case 1: Work policy drain requested, selector is already absent from GitHub,
@@ -881,7 +882,10 @@ mod tests {
         );
         let r1_busy = &report_busy.results[0];
         assert_eq!(r1_busy.desired, PerRunnerDesired::Drained);
-        assert_eq!(r1_busy.admission_lifecycle, AdmissionLifecycleState::DrainPending);
+        assert_eq!(
+            r1_busy.admission_lifecycle,
+            AdmissionLifecycleState::DrainPending
+        );
         assert_eq!(r1_busy.achieved, PerRunnerAchieved::Transitional);
         assert_ne!(r1_busy.achieved, PerRunnerAchieved::Drained);
         assert_eq!(r1_busy.plan, PerRunnerPlan::HoldBusy);
@@ -901,12 +905,18 @@ mod tests {
         );
         let r1_drained = &report_drained.results[0];
         assert_eq!(r1_drained.desired, PerRunnerDesired::Drained);
-        assert_eq!(r1_drained.admission_lifecycle, AdmissionLifecycleState::Drained);
+        assert_eq!(
+            r1_drained.admission_lifecycle,
+            AdmissionLifecycleState::Drained
+        );
         assert_eq!(r1_drained.achieved, PerRunnerAchieved::Drained);
         assert_eq!(r1_drained.plan, PerRunnerPlan::Noop);
 
         // Case 3: DRAINED does NOT require Listener to be Stopped (ADR 0004 Work mode).
-        assert_eq!(r1_drained.observed_lifecycle, DiscoveredLifecycle::Listening);
+        assert_eq!(
+            r1_drained.observed_lifecycle,
+            DiscoveredLifecycle::Listening
+        );
 
         // Case 4: Zen/Offline policy requires Listener Stopped before achieved OFFLINE is asserted.
         let report_offline_listening = reconcile_multi_runners(
@@ -917,7 +927,10 @@ mod tests {
         let r1_zen_listening = &report_offline_listening.results[0];
         assert_eq!(r1_zen_listening.desired, PerRunnerDesired::Offline);
         assert_eq!(r1_zen_listening.achieved, PerRunnerAchieved::Transitional);
-        assert_eq!(r1_zen_listening.reason_code.as_str(), "runners-listener-stop-unproven");
+        assert_eq!(
+            r1_zen_listening.reason_code.as_str(),
+            "runners-listener-stop-unproven"
+        );
 
         let obs_stopped = vec![obs(
             "runner-1",
@@ -953,7 +966,12 @@ mod tests {
         for tick in 1..=3 {
             let observations = vec![
                 obs("svc-runner", DiscoveredLifecycle::Busy, true, Some(false)),
-                obs("sess-runner", DiscoveredLifecycle::Listening, false, Some(true)),
+                obs(
+                    "sess-runner",
+                    DiscoveredLifecycle::Listening,
+                    false,
+                    Some(true),
+                ),
             ];
             let report = reconcile_multi_runners(
                 &registry,
