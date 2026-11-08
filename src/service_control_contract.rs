@@ -40,6 +40,9 @@ pub enum AchievedServiceControl {
 }
 
 /// Prestate capture required before any Owner-authorized mutation.
+///
+/// Binds the exact service, image token, execution identity, and transaction so
+/// a restore plan cannot be applied to a drifted identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePrestateCapture {
@@ -50,6 +53,12 @@ pub struct ServicePrestateCapture {
     pub ownership_verified: bool,
     pub worker_busy: bool,
     pub admission_selector_absent: bool,
+    /// Opaque image fingerprint (never a raw private path in public receipts).
+    pub image_token: String,
+    /// Opaque execution-identity fingerprint for the bound service account.
+    pub execution_identity_token: String,
+    /// Stable id shared by prestate and the derived restore plan.
+    pub transaction_id: String,
 }
 
 /// Restore plan derived from prestate. Execution remains Owner-gated.
@@ -60,6 +69,10 @@ pub struct ServiceRestorePlan {
     pub restore_start_mode: ServiceStartMode,
     pub restore_running: bool,
     pub requires_owner_gate: bool,
+    pub image_token: String,
+    pub execution_identity_token: String,
+    pub transaction_id: String,
+    pub admission_selector_absent: bool,
 }
 
 /// One step in the prepare-only control state machine.
@@ -166,6 +179,10 @@ pub fn capture_restore_plan(prestate: &ServicePrestateCapture) -> ServiceRestore
             DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
         ),
         requires_owner_gate: true,
+        image_token: prestate.image_token.clone(),
+        execution_identity_token: prestate.execution_identity_token.clone(),
+        transaction_id: prestate.transaction_id.clone(),
+        admission_selector_absent: prestate.admission_selector_absent,
     }
 }
 
@@ -292,11 +309,20 @@ mod tests {
             ownership_verified: true,
             worker_busy: false,
             admission_selector_absent: false,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            transaction_id: "tx-restore-1".to_owned(),
         };
         let plan = capture_restore_plan(&prestate);
         assert!(plan.requires_owner_gate);
         assert!(plan.restore_running);
         assert_eq!(plan.restore_start_mode, ServiceStartMode::Automatic);
+        assert_eq!(plan.transaction_id, prestate.transaction_id);
+        assert_eq!(plan.image_token, prestate.image_token);
+        assert_eq!(
+            plan.execution_identity_token,
+            prestate.execution_identity_token
+        );
     }
 
     #[test]

@@ -22,7 +22,9 @@ and independent security review.
    - registration scope + server runner ID
    - start mode + running state
 5. No active Worker on the test Runner (`Busy` → abort).
-6. `LiveScmExecutionGate` remains CLOSED until the Owner token is issued for the window.
+6. `LiveScmExecutionGate` remains CLOSED until a sealed
+   `OwnerScmAuthorizationProof` for the exact service name + image token +
+   rights is issued for the window. Public bool construction cannot open the gate.
 
 ## Authorized mutation scope (when Owner token granted)
 

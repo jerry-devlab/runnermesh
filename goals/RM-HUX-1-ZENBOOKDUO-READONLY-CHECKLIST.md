@@ -22,6 +22,39 @@ represent ZenBookDuo or any other multi-runner workstation.
 5. Do not start/stop Services, change start mode, touch labels, or open credential files.
 6. File private notes offline; public checkpoint may store counts only.
 
+## Owner command card (ZenBookDuo)
+
+```text
+cargo build -p runnermesh --bin runnermesh-hux-sandbox
+.\target\debug\runnermesh-hux-sandbox.exe discover-readonly
+```
+
+Expected privacy-safe stdout keys only. Paste counts into private notes; public
+checkpoint may record `candidate_count` / `identity_complete_count` /
+enumeration statuses.
+
+Incomplete identity must stay refused / non-enrollable (covered by discovery
+unit tests). Do not “fix” empty inventories.
+
+## Implementer host RO sample (not ZenBookDuo)
+
+Observed on the Implementer Windows workstation during
+`RM-LRM-HUX2-READINESS-001` (read-only; no Service mutation):
+
+```text
+candidate_count=0
+observed_only_count=0
+refused_count=0
+identity_complete_count=0
+service_enumeration=Ok
+session_enumeration=Ok
+process_observation=Ok
+incomplete=false
+```
+
+Disposition: local empty inventory with honest Ok channels.
+`HUX1_NONEMPTY_ZENBOOKDUO=UNPROVEN` until ZenBookDuo itself is observed.
+
 ## Disposition mapping
 
 | Result | Disposition |
@@ -29,3 +62,4 @@ represent ZenBookDuo or any other multi-runner workstation.
 | Counts > 0 with Ok/Incomplete honestly reported | HUX_1_NONEMPTY=PASS (host-specific) |
 | candidate_count=0 with Ok | host has no runners; still not proof for other hosts |
 | Unavailable disguised as Ok empty | FAIL |
+| ZenBookDuo not reachable this Train | HUX1_NONEMPTY_ZENBOOKDUO=UNPROVEN |

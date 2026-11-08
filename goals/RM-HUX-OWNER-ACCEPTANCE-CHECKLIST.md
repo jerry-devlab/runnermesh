@@ -39,7 +39,21 @@ runnermesh-hux-sandbox discover-readonly
 Record privacy-safe counts only (candidate_count, identity_complete_count,
 enumeration statuses). Do not paste private paths/names into the public repo.
 
+## Automated Tray/CLI consistency (Implementer)
+
+Covered by unit contracts (not a substitute for human clicks):
+
+```text
+cargo test --lib tray::
+cargo test --lib cli::
+cargo test --lib hux_sandbox
+```
+
+```text
+HUMAN_TRAY_VISUAL=PENDING_OWNER
+```
+
 ## HUX-2
 
-Blocked until independent security review PASS + Owner token. See
-`RM-HUX-2-OWNER-SERVICE-GATE-PLAN.md`.
+Blocked until independent security review PASS + sealed Owner proof. See
+`RM-HUX-2-OWNER-SERVICE-GATE-PLAN.md` and `RM-HUX-2-READINESS-PACKAGE.md`.

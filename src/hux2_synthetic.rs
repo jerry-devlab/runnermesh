@@ -5,8 +5,8 @@
 
 use crate::{
     AchievedServiceControl, DesiredServiceLifecycle, DiscoveredLifecycle, LiveScmExecutionGate,
-    MockScmBackend, MockServiceRecord, ScmApiError, ScmControlExecutor, ScmTransactionStage,
-    ServiceObservation, ServiceStartMode,
+    MockScmBackend, MockServiceRecord, OwnerScmAuthorizationProof, ScmApiError, ScmControlExecutor,
+    ScmTransactionStage, ServiceObservation, ServiceStartMode,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,27 +25,67 @@ pub struct Hux2SyntheticReceipt {
     pub notes: Vec<&'static str>,
 }
 
-/// Runs the canonical synthetic lifecycle with an open mock gate.
-pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
-    let mock = MockScmBackend::new();
-    mock.insert(MockServiceRecord {
+fn fixture_record(
+    name: &str,
+    state: DiscoveredLifecycle,
+    start_mode: ServiceStartMode,
+    busy: bool,
+) -> MockServiceRecord {
+    MockServiceRecord {
         observation: ServiceObservation {
-            service_name: "fixture.scm.hux2".to_owned(),
-            state: DiscoveredLifecycle::Listening,
-            start_mode: ServiceStartMode::Automatic,
+            service_name: name.to_owned(),
+            state,
+            start_mode,
             image_path_matches: true,
             ownership_verified: true,
         },
-        worker_busy: false,
-        expected_image_token: "hux2-image".to_owned(),
-    });
-    let gate = LiveScmExecutionGate {
-        allow_start: true,
-        allow_stop: true,
-        allow_change_config: true,
-    };
-    let executor =
-        ScmControlExecutor::new(mock.clone(), "fixture.scm.hux2", "hux2-image", true, gate);
+        worker_busy: busy,
+        image_token: "hux2-image".to_owned(),
+        execution_identity_token: "hux2-identity".to_owned(),
+    }
+}
+
+fn sealed_gate(
+    allow_start: bool,
+    allow_stop: bool,
+    allow_change_config: bool,
+) -> LiveScmExecutionGate {
+    LiveScmExecutionGate::from_owner_authorization(
+        &OwnerScmAuthorizationProof::synthetic_for_tests(
+            "fixture.scm.hux2",
+            "hux2-image",
+            allow_start,
+            allow_stop,
+            allow_change_config,
+        ),
+    )
+    .expect("synthetic seal")
+}
+
+fn executor(
+    mock: MockScmBackend,
+    gate: LiveScmExecutionGate,
+) -> ScmControlExecutor<MockScmBackend> {
+    ScmControlExecutor::new(
+        mock,
+        "fixture.scm.hux2",
+        "hux2-image",
+        "hux2-identity",
+        gate,
+    )
+}
+
+/// Runs the canonical synthetic lifecycle with an open mock gate.
+pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
+    let mock = MockScmBackend::new();
+    mock.insert(fixture_record(
+        "fixture.scm.hux2",
+        DiscoveredLifecycle::Listening,
+        ServiceStartMode::Automatic,
+        false,
+    ));
+    let gate = sealed_gate(true, true, true);
+    let executor = executor(mock.clone(), gate);
 
     // 1–2 prestate + identity
     let prestate = match executor.capture_prestate(false, false) {
@@ -119,14 +159,15 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
         };
     }
 
-    // 9–10 restore to original Automatic+Running
+    // 9–10 restore to original Automatic+Running with independent admission readback
     let plan = stop
         .restore
         .clone()
         .or(start.restore.clone())
         .expect("plan");
-    let restored = executor.restore(&plan);
-    let restore_ok = restored.stage == ScmTransactionStage::Completed
+    let restored = executor.restore(&plan, plan.admission_selector_absent);
+    let restore_ok = restored.restore_pass
+        && restored.stage == ScmTransactionStage::Completed
         && restored.achieved == AchievedServiceControl::Running;
 
     Hux2SyntheticReceipt {
@@ -149,29 +190,14 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
     // Access denied
     {
         let mock = MockScmBackend::new();
-        mock.insert(MockServiceRecord {
-            observation: ServiceObservation {
-                service_name: "fixture.scm.hux2".to_owned(),
-                state: DiscoveredLifecycle::Listening,
-                start_mode: ServiceStartMode::Manual,
-                image_path_matches: true,
-                ownership_verified: true,
-            },
-            worker_busy: false,
-            expected_image_token: "hux2-image".to_owned(),
-        });
-        mock.set_fail_next(ScmApiError::AccessDenied);
-        let executor = ScmControlExecutor::new(
-            mock,
+        mock.insert(fixture_record(
             "fixture.scm.hux2",
-            "hux2-image",
-            true,
-            LiveScmExecutionGate {
-                allow_stop: true,
-                allow_start: true,
-                allow_change_config: false,
-            },
-        );
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        mock.set_fail_next(ScmApiError::AccessDenied);
+        let executor = executor(mock, sealed_gate(true, true, false));
         let disposition = match executor.observe_verified() {
             Err(ScmApiError::AccessDenied) => SyntheticDisposition::Pass,
             _ => SyntheticDisposition::Fail,
@@ -182,28 +208,13 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
     // Busy worker sudden appearance blocks stop
     {
         let mock = MockScmBackend::new();
-        mock.insert(MockServiceRecord {
-            observation: ServiceObservation {
-                service_name: "fixture.scm.hux2".to_owned(),
-                state: DiscoveredLifecycle::Busy,
-                start_mode: ServiceStartMode::Manual,
-                image_path_matches: true,
-                ownership_verified: true,
-            },
-            worker_busy: true,
-            expected_image_token: "hux2-image".to_owned(),
-        });
-        let executor = ScmControlExecutor::new(
-            mock.clone(),
+        mock.insert(fixture_record(
             "fixture.scm.hux2",
-            "hux2-image",
+            DiscoveredLifecycle::Busy,
+            ServiceStartMode::Manual,
             true,
-            LiveScmExecutionGate {
-                allow_stop: true,
-                allow_start: false,
-                allow_change_config: false,
-            },
-        );
+        ));
+        let executor = executor(mock.clone(), sealed_gate(false, true, false));
         let prestate = executor.capture_prestate(true, true).unwrap();
         let receipt = executor.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -224,24 +235,13 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
     // Name drift
     {
         let mock = MockScmBackend::new();
-        mock.insert(MockServiceRecord {
-            observation: ServiceObservation {
-                service_name: "fixture.scm.other".to_owned(),
-                state: DiscoveredLifecycle::Listening,
-                start_mode: ServiceStartMode::Manual,
-                image_path_matches: true,
-                ownership_verified: true,
-            },
-            worker_busy: false,
-            expected_image_token: "hux2-image".to_owned(),
-        });
-        let executor = ScmControlExecutor::new(
-            mock,
-            "fixture.scm.hux2",
-            "hux2-image",
-            true,
-            LiveScmExecutionGate::CLOSED,
-        );
+        mock.insert(fixture_record(
+            "fixture.scm.other",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock, LiveScmExecutionGate::CLOSED);
         let disposition = match executor.observe_verified() {
             Err(ScmApiError::NotFound) => SyntheticDisposition::Pass,
             _ => SyntheticDisposition::Fail,
@@ -252,24 +252,13 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
     // Closed gate must not mutate even when phase wants stop
     {
         let mock = MockScmBackend::new();
-        mock.insert(MockServiceRecord {
-            observation: ServiceObservation {
-                service_name: "fixture.scm.hux2".to_owned(),
-                state: DiscoveredLifecycle::Listening,
-                start_mode: ServiceStartMode::Manual,
-                image_path_matches: true,
-                ownership_verified: true,
-            },
-            worker_busy: false,
-            expected_image_token: "hux2-image".to_owned(),
-        });
-        let executor = ScmControlExecutor::new(
-            mock.clone(),
+        mock.insert(fixture_record(
             "fixture.scm.hux2",
-            "hux2-image",
-            true,
-            LiveScmExecutionGate::CLOSED,
-        );
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock.clone(), LiveScmExecutionGate::CLOSED);
         let prestate = executor.capture_prestate(false, true).unwrap();
         let receipt = executor.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -280,12 +269,57 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         );
         let disposition = if receipt.reason.as_deref() == Some("scm.live-gate-closed")
             && mock.stop_calls() == 0
+            && !receipt.restore_pass
         {
             SyntheticDisposition::Pass
         } else {
             SyntheticDisposition::Fail
         };
         out.push(("closed-gate-no-mutation", disposition));
+    }
+
+    // Incomplete observation flags must not be overwritten into trust
+    {
+        let mock = MockScmBackend::new();
+        let mut record = fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        );
+        record.observation.image_path_matches = false;
+        mock.insert(record);
+        let executor = executor(mock, LiveScmExecutionGate::CLOSED);
+        let disposition = match executor.observe_verified() {
+            Err(ScmApiError::IdentityMismatch) => SyntheticDisposition::Pass,
+            _ => SyntheticDisposition::Fail,
+        };
+        out.push(("incomplete-image-flag-refused", disposition));
+    }
+
+    // Restore must not PASS when change-config fails mid-restore
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Automatic,
+            false,
+        ));
+        mock.set_fail_change(ScmApiError::Timeout);
+        let executor = executor(mock, sealed_gate(true, true, true));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        let plan = crate::capture_restore_plan(&prestate);
+        let receipt = executor.restore(&plan, true);
+        let disposition = if !receipt.restore_pass
+            && receipt.stage == ScmTransactionStage::RestoreFailed
+            && receipt.reason.as_deref() == Some("scm.timeout")
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("restore-change-config-fail", disposition));
     }
 
     out
