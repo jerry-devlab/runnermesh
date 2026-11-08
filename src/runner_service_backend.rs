@@ -4,6 +4,7 @@
 //! - models exact service identity/state contracts;
 //! - plans narrow start/stop/startup changes behind prepare receipts;
 //! - refuses wildcards, busy/unknown states, and foreign ownership.
+
 //! It never opens the Windows Service Control Manager.
 
 use serde::{Deserialize, Serialize};
