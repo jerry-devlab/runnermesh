@@ -43,9 +43,16 @@ H2_RC_READY=true
 SOURCE!=BUILD!=RELEASE!=INSTALLED!=ACTIVE
 PRIVATE_RUNTIME_BINDING_PREPARED=true
 ROLLBACK_PLAN_READY=true
-INDEPENDENT_SECURITY_ACCEPTANCE_FOR_H2=<PASS|explicit Owner waiver recorded>
+INDEPENDENT_SECURITY_ACCEPTANCE_FOR_H2=PASS
 PRODUCTION_BASELINE_CAPTURED=true
 ```
+
+`QUALITY_GATES.md` requires genuine independent acceptance for the H2 trust /
+production-mutation boundary. Cursor self-review and Owner convenience notes
+do **not** satisfy `INDEPENDENT_SECURITY_ACCEPTANCE_FOR_H2`. Keep
+`INDEPENDENT_ACCEPTANCE_PENDING=true` until an independent result is recorded;
+do not waive that gate in this plan.
+
 
 ## Rollback / restore actions
 
