@@ -1,23 +1,26 @@
 # RM-LONG-TRAIN-LRM-RUNTIME-001 — Master Train checklist
 
-Status: **ACTIVE** · `SOURCE_AND_SANDBOX_ONLY` · `PRODUCTION_MUTATION=false`
+Status: **T4_IN_PROGRESS** · `SOURCE_AND_SANDBOX_ONLY` · `PRODUCTION_MUTATION=false`
 
 ```text
 TRAIN_ID=RM-LONG-TRAIN-LRM-RUNTIME-001
 START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-LRM_BASE=#59@8fe1109
+LRM_BASE=#59@ed68ba7
+BRANCH=feat/lrm-runtime-integration
+WORKTREE=C:\Dev\src\runnermesh-lrm-runtime
 BUDGET_HOURS=8-12
+LOCAL_GATE=PASS (cargo test --lib 220; clippy -D warnings)
 ```
 
 ## Stages
 
-| Stage | Goal | Acceptance | Stop if |
+| Stage | Goal | Status | Evidence |
 |---|---|---|---|
-| T0 | DRAINED/OFFLINE matrix + #60 gate hygiene | ADR0004: DRAINED≠ListenerStopped; Offline still needs stop evidence; #60 no waiver-as-independent | unblockable ADR conflict |
-| T1 | Registry ↔ Agent persistence | sandbox two-runner intent survives restart | FileRegistry ownership fail-closed |
-| T2 | Windows read-only discovery | real SCM/session observation injectible + Linux build OK | needs privilege write |
-| T3 | Agent/CLI/Tray E2E | same snapshot; intent≠achieved; CN/EN | SCM/label write temptation |
-| T4 | Bounded integration + hosted CI | focused tests + one settled CI | 3 failed repair cycles |
+| T0 | DRAINED/OFFLINE matrix + #60 gate hygiene | PASS | ADR0004: DRAINED allows Listening; Offline still needs Stopped; #60 no independent-security waiver |
+| T1 | Registry ↔ Agent persistence | PASS | `AgentCore::with_registry_store` + FileRegistryStore; sandbox two-runner restart test |
+| T2 | Windows read-only discovery | PASS | `windows_runner_discovery.rs` SCM EnumServicesStatusEx; session homes; Linux EmptyService |
+| T3 | Agent/CLI/Tray E2E | PASS | runtime loads registry+discovery; Tray shows intent separately from presentation status |
+| T4 | Bounded integration + hosted CI | IN_PROGRESS | local gates PASS; Draft PR + hosted CI pending |
 
 ## Hard stops
 
@@ -25,4 +28,4 @@ No real Service/label/credential/autostart/H2/v0.1.0; no AGY; Cursor self-review
 
 ## Recovery
 
-`goals/RM-CONTINUOUS-TRAIN-CHECKPOINT.md` + this file.
+`goals/RM-CONTINUOUS-TRAIN-CHECKPOINT.md` + this file + worktree `runnermesh-lrm-runtime`.

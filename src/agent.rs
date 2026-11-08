@@ -16,8 +16,9 @@ use crate::{
     AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
     DesiredAdmissionState, DiscoveryReport, DoctorCheck, DoctorReport, DoctorStatus,
     ExecutionIdentityEvidence, HardSafetyState, LinkKind, LinkSnapshot, LinkState,
-    OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
-    RunnerRegistryEditor, SystemPreferences, UiPreferences, UserMode, ZenOverride,
+    MemoryRegistryStore, OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
+    RegistryError, RegistryStore, RunnerPhase, RunnerRegistry, RunnerRegistryEditor,
+    SystemPreferences, UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -250,6 +251,7 @@ pub struct AgentCore<O, R, S> {
     decision: AdmissionDecision,
     admission_control: AdmissionControlSnapshot,
     runner_registry: RunnerRegistryEditor,
+    registry_store: Box<dyn RegistryStore>,
     last_runner_discovery: Option<DiscoveryReport>,
 }
 
@@ -265,8 +267,32 @@ where
         store: S,
         build: BuildProvenance,
     ) -> Result<Self, AgentCoreError> {
+        Self::with_registry_store(
+            observer,
+            reconciler,
+            store,
+            build,
+            Box::new(MemoryRegistryStore::default()),
+        )
+    }
+
+    /// Constructs an Agent with an explicit RegistryStore (sandbox file or memory).
+    pub fn with_registry_store(
+        observer: O,
+        reconciler: R,
+        store: S,
+        build: BuildProvenance,
+        registry_store: Box<dyn RegistryStore>,
+    ) -> Result<Self, AgentCoreError> {
         let config = store.load()?.unwrap_or_default();
         validate_schema(&config)?;
+        let loaded = registry_store.load().map_err(AgentCoreError::Registry)?;
+        let runner_registry = match loaded {
+            Some(registry) => {
+                RunnerRegistryEditor::new(registry).map_err(AgentCoreError::Registry)?
+            }
+            None => RunnerRegistryEditor::empty(),
+        };
         let observation = AgentObservation::unobserved();
         let decision = decide(&config, &observation);
         let admission_control = observation
@@ -283,10 +309,8 @@ where
             observation,
             decision,
             admission_control,
-            // In-memory registry only. FileRegistryStore exists for LRM persistence
-            // fixtures; AgentCore does not yet wire durable cross-restart storage.
-            // Do not claim production-grade enable/disable persistence here.
-            runner_registry: RunnerRegistryEditor::empty(),
+            runner_registry,
+            registry_store,
             last_runner_discovery: None,
         })
     }
@@ -297,8 +321,41 @@ where
         self.last_runner_discovery = Some(report);
     }
 
-    pub fn runner_registry(&self) -> &crate::RunnerRegistry {
+    pub fn runner_registry(&self) -> &RunnerRegistry {
         self.runner_registry.registry()
+    }
+
+    /// Migrates the optional v0.1 single binding into the registry and persists.
+    pub fn migrate_v01_binding_if_needed(
+        &mut self,
+        binding: &crate::InstalledRuntimeBinding,
+        service_name: Option<&str>,
+    ) -> Result<Option<String>, AgentCoreError> {
+        if self
+            .runner_registry
+            .registry()
+            .legacy_v01_binding_key
+            .is_some()
+        {
+            return Ok(self
+                .runner_registry
+                .registry()
+                .legacy_v01_binding_key
+                .clone());
+        }
+        let record = self
+            .runner_registry
+            .migrate_v01_binding(binding, service_name)
+            .map_err(AgentCoreError::Registry)?;
+        let key = record.local_runner_key.clone();
+        self.persist_registry()?;
+        Ok(Some(key))
+    }
+
+    fn persist_registry(&mut self) -> Result<(), AgentCoreError> {
+        self.registry_store
+            .save(self.runner_registry.registry())
+            .map_err(AgentCoreError::Registry)
     }
 
     pub fn config(&self) -> &AgentConfig {
@@ -421,15 +478,16 @@ where
         command: AgentCommand,
     ) -> Result<AgentResponse, AgentCoreError> {
         if matches!(command, AgentCommand::RunnersDiscover) {
-            // Without an injected source inventory, discover remains honest:
-            // empty, read-only, and non-exhaustive.
-            if self.last_runner_discovery.is_none() {
-                self.last_runner_discovery = Some(DiscoveryReport {
-                    schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
-                    read_only: true,
-                    exhaustive: false,
-                    candidates: Vec::new(),
-                });
+            // Refresh from the host read-only adapter when no fixture was injected.
+            // Still non-exhaustive and never mutates Services/labels.
+            if self.last_runner_discovery.is_none()
+                || self
+                    .last_runner_discovery
+                    .as_ref()
+                    .is_some_and(|report| report.candidates.is_empty())
+            {
+                self.last_runner_discovery =
+                    Some(crate::discover_local_runners_read_only(Vec::new()));
             }
         }
         match handle_runners_command(
@@ -437,19 +495,22 @@ where
             self.last_runner_discovery.as_ref(),
             &command,
         ) {
-            Ok(report) => Ok(AgentResponse::Runners(report)),
-            Err(crate::RegistryError::NotFound) => Ok(AgentResponse::Rejected {
+            Ok(report) => {
+                if report.applied {
+                    self.persist_registry()?;
+                }
+                Ok(AgentResponse::Runners(report))
+            }
+            Err(RegistryError::NotFound) => Ok(AgentResponse::Rejected {
                 reason_code: static_reason("runners-not-found"),
             }),
-            Err(crate::RegistryError::NotEnrollmentEligible) => Ok(AgentResponse::Rejected {
+            Err(RegistryError::NotEnrollmentEligible) => Ok(AgentResponse::Rejected {
                 reason_code: static_reason("runners-not-enrollment-eligible"),
             }),
-            Err(crate::RegistryError::SameScopeManagedAdmissionCollision) => {
-                Ok(AgentResponse::Rejected {
-                    reason_code: static_reason("runners-same-scope-collision"),
-                })
-            }
-            Err(crate::RegistryError::Forgotten) => Ok(AgentResponse::Rejected {
+            Err(RegistryError::SameScopeManagedAdmissionCollision) => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("runners-same-scope-collision"),
+            }),
+            Err(RegistryError::Forgotten) => Ok(AgentResponse::Rejected {
                 reason_code: static_reason("runners-forgotten"),
             }),
             Err(_) => Ok(AgentResponse::Rejected {
@@ -512,6 +573,7 @@ where
 #[derive(Debug)]
 pub enum AgentCoreError {
     Config(ConfigStoreError),
+    Registry(RegistryError),
     Observer(String),
     Reconciler(String),
 }
@@ -520,6 +582,7 @@ impl fmt::Display for AgentCoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config(error) => write!(formatter, "{error}"),
+            Self::Registry(error) => write!(formatter, "runner registry failed: {error}"),
             Self::Observer(error) => write!(formatter, "observer failed: {error}"),
             Self::Reconciler(error) => write!(formatter, "reconciler failed: {error}"),
         }
@@ -530,6 +593,7 @@ impl std::error::Error for AgentCoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Config(error) => Some(error),
+            Self::Registry(error) => Some(error),
             Self::Observer(_) | Self::Reconciler(_) => None,
         }
     }
@@ -990,5 +1054,122 @@ mod tests {
         let root = std::env::temp_dir().join(format!("runnermesh-g03-{}-{id}", process::id()));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn runner_enable_disable_persists_across_agent_restart_in_sandbox() {
+        use crate::{
+            DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
+            DiscoveredServiceBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryReport,
+            EnrollmentState, FileRegistryStore, OpaqueIdentityReference, RegistrationScope,
+            RunnerBackendKind, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+        };
+
+        let root = temporary_root();
+        let registry_path = root.join("runners-registry.json");
+        let identity = OpaqueIdentityReference::new(
+            WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let candidate = |key: &str, repo: &str, id: u64| DiscoveredRunner {
+            local_discovery_key: key.to_owned(),
+            disposition: DiscoveryDisposition::ObservedOnly,
+            refusal: None,
+            backend: RunnerBackendKind::UserSession,
+            identity: DiscoveredRunnerIdentity {
+                registration_scope: Some(RegistrationScope::Repository {
+                    owner: "fixture-owner".to_owned(),
+                    repository: repo.to_owned(),
+                }),
+                runner_id: Some(id),
+                expected_runner_name: Some(format!("fixture-{id}")),
+                runner_home: root.join(key),
+                work_root: Some(root.join(key).join("_work")),
+                execution_identity_ref: Some(identity.clone()),
+            },
+            service: None as Option<DiscoveredServiceBinding>,
+            session: None,
+            capabilities: DiscoveryCapabilities {
+                service_control_contract: false,
+                user_session_control_contract: true,
+                enrollment_eligible: true,
+            },
+            same_scope_collision: false,
+            observed_lifecycle: DiscoveredLifecycle::Stopped,
+        };
+
+        {
+            let store = MemoryConfigStore::default();
+            let mut core = AgentCore::with_registry_store(
+                QueueObserver::new(vec![healthy_observation()]),
+                RecordingReconciler::default(),
+                store,
+                build(),
+                Box::new(FileRegistryStore::new(&registry_path)),
+            )
+            .unwrap();
+            core.set_runner_discovery(DiscoveryReport {
+                schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+                read_only: true,
+                exhaustive: false,
+                candidates: vec![
+                    candidate("runner-a", "repo-a", 1),
+                    candidate("runner-b", "repo-b", 2),
+                ],
+            });
+            for key in ["runner-a", "runner-b"] {
+                let response = core
+                    .handle_command(AgentCommand::RunnersEnroll {
+                        local_runner_key: key.to_owned(),
+                        prepare_only: false,
+                    })
+                    .unwrap();
+                assert!(matches!(response, AgentResponse::Runners(_)));
+            }
+            let disabled = core
+                .handle_command(AgentCommand::RunnersDisable {
+                    local_runner_key: "runner-a".to_owned(),
+                    when_idle: true,
+                    prepare_only: false,
+                })
+                .unwrap();
+            assert!(matches!(disabled, AgentResponse::Runners(_)));
+            // Force-CI must not overwrite persisted disable intent.
+            core.handle_command(AgentCommand::SetMode {
+                mode: UserMode::ForceCi,
+            })
+            .unwrap();
+            assert!(
+                !core
+                    .runner_registry()
+                    .get("runner-a")
+                    .unwrap()
+                    .desired_enabled
+            );
+            assert!(
+                core.runner_registry()
+                    .get("runner-b")
+                    .unwrap()
+                    .desired_enabled
+            );
+        }
+
+        let store = MemoryConfigStore::default();
+        let reloaded = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation()]),
+            RecordingReconciler::default(),
+            store,
+            build(),
+            Box::new(FileRegistryStore::new(&registry_path)),
+        )
+        .unwrap();
+        let a = reloaded.runner_registry().get("runner-a").unwrap();
+        let b = reloaded.runner_registry().get("runner-b").unwrap();
+        assert!(!a.desired_enabled);
+        assert!(b.desired_enabled);
+        assert_eq!(a.enrollment_state, EnrollmentState::Enrolled);
+        assert_eq!(b.enrollment_state, EnrollmentState::Enrolled);
+        let _ = fs::remove_dir_all(root);
     }
 }

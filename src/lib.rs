@@ -37,6 +37,7 @@ mod update;
 mod windows_github;
 #[cfg(windows)]
 pub mod windows_preferences;
+mod windows_runner_discovery;
 #[cfg(windows)]
 pub mod windows_supervisor;
 #[cfg(windows)]
@@ -189,6 +190,10 @@ pub use windows_github::{
     windows_github_admission_backend, windows_github_repository_access_client,
     windows_github_workflow_client, WindowsGithubAdmissionBackend,
     WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient,
+};
+pub use windows_runner_discovery::{
+    discover_local_runners_read_only, host_service_discovery_source,
+    ConfiguredSessionDiscoverySource, WindowsServiceDiscoverySource,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{

@@ -225,7 +225,7 @@ impl std::error::Error for RegistryError {
 }
 
 /// Registry persistence boundary.
-pub trait RegistryStore {
+pub trait RegistryStore: Send + Sync {
     fn load(&self) -> Result<Option<RunnerRegistry>, RegistryError>;
     fn save(&self, registry: &RunnerRegistry) -> Result<(), RegistryError>;
 }
@@ -295,26 +295,36 @@ impl RegistryStore for FileRegistryStore {
     }
 }
 
-/// In-memory store for deterministic tests.
+/// In-memory store for deterministic tests and Agent defaults.
 #[derive(Default)]
 pub struct MemoryRegistryStore {
-    registry: std::cell::RefCell<Option<RunnerRegistry>>,
+    registry: std::sync::Mutex<Option<RunnerRegistry>>,
 }
 
 impl MemoryRegistryStore {
     pub fn persisted(&self) -> Option<RunnerRegistry> {
-        self.registry.borrow().clone()
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
 impl RegistryStore for MemoryRegistryStore {
     fn load(&self) -> Result<Option<RunnerRegistry>, RegistryError> {
-        Ok(self.registry.borrow().clone())
+        Ok(self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone())
     }
 
     fn save(&self, registry: &RunnerRegistry) -> Result<(), RegistryError> {
         validate_registry(registry)?;
-        *self.registry.borrow_mut() = Some(registry.clone());
+        *self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(registry.clone());
         Ok(())
     }
 }
