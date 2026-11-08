@@ -490,6 +490,9 @@ where
                     Some(crate::discover_local_runners_read_only(Vec::new()));
             }
         }
+        // Snapshot intent before mutation so a failed disk write cannot leave
+        // memory pretending the change was durable.
+        let registry_before = self.runner_registry.clone();
         match handle_runners_command(
             &mut self.runner_registry,
             self.last_runner_discovery.as_ref(),
@@ -497,7 +500,10 @@ where
         ) {
             Ok(report) => {
                 if report.applied {
-                    self.persist_registry()?;
+                    if let Err(error) = self.persist_registry() {
+                        self.runner_registry = registry_before;
+                        return Err(error);
+                    }
                 }
                 Ok(AgentResponse::Runners(report))
             }

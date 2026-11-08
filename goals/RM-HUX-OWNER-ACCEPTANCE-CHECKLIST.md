@@ -1,0 +1,45 @@
+# HUX Owner Acceptance Checklist (manual)
+
+`PRODUCTION_MUTATION=false` · Does **not** authorize Service mutation or H2.
+
+Automated contracts cover IPC/CLI intent parity. This checklist is for Owner
+visual Tray validation and must not be marked PASS by Cursor alone.
+
+## HUX-0 / productization UX
+
+Prep:
+
+```text
+cargo build -p runnermesh --bins
+runnermesh-hux-sandbox prepare <absolute-sandbox-root>
+runnermesh-agent --development-root <absolute-sandbox-root>
+```
+
+| # | Check | Pass? |
+|---|---|---|
+| 1 | Tray shows both sandbox runners with distinct intent labels | |
+| 2 | EN and ZH menus show the same stable action IDs / behavior | |
+| 3 | Toggle disable on runner A does not change runner B intent | |
+| 4 | UI never equates “intent disabled” with “Service Stopped” | |
+| 5 | Busy / Draining / Unknown / Refused are visually distinct if injected | |
+| 6 | After Agent restart, disabled intent remains | |
+| 7 | CLI `runners status` matches Tray authority (same Agent) | |
+| 8 | Resource unknown never displays as “0 saved” | |
+| 9 | Incomplete discovery surfaces partial_failure / reason, not fake empty OK | |
+| 10 | No production install/Service/label change occurred | |
+
+## HUX-1 nonempty (other hosts)
+
+On a workstation that actually hosts `actions.runner.*` services (e.g. ZenBookDuo):
+
+```text
+runnermesh-hux-sandbox discover-readonly
+```
+
+Record privacy-safe counts only (candidate_count, identity_complete_count,
+enumeration statuses). Do not paste private paths/names into the public repo.
+
+## HUX-2
+
+Blocked until independent security review PASS + Owner token. See
+`RM-HUX-2-OWNER-SERVICE-GATE-PLAN.md`.

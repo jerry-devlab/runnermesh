@@ -1302,5 +1302,73 @@ mod tests {
         assert!(report.candidates.is_empty());
         assert!(report.read_only);
         assert!(!report.exhaustive);
+        assert_eq!(report.service_enumeration, DiscoveryEnumerationStatus::Ok);
+    }
+
+    #[test]
+    fn nonempty_synthetic_inventory_separates_two_candidates_and_collisions() {
+        let report = inventory(
+            vec![
+                service_fact(
+                    "actions.runner.a",
+                    r"C:\fixture\runners\a",
+                    repo_scope("fixture-owner", "repo-a"),
+                    1,
+                    DiscoveredLifecycle::Listening,
+                ),
+                service_fact(
+                    "actions.runner.b",
+                    r"C:\fixture\runners\b",
+                    repo_scope("fixture-owner", "repo-b"),
+                    2,
+                    DiscoveredLifecycle::Stopped,
+                ),
+            ],
+            vec![session_fact(
+                r"C:\fixture\runners\a",
+                repo_scope("fixture-owner", "repo-a"),
+                1,
+                true,
+                DiscoveredLifecycle::Unknown,
+            )],
+            Vec::new(),
+        )
+        .discover();
+        assert!(report.candidates.len() >= 2);
+        // Duplicate home between service+session must refuse at least one.
+        assert!(report.refused().count() >= 1);
+        // Service Listening must not imply Worker Busy without process evidence.
+        let listening = report.candidates.iter().find(|c| {
+            c.service
+                .as_ref()
+                .is_some_and(|s| s.state == DiscoveredLifecycle::Listening)
+        });
+        if let Some(candidate) = listening {
+            assert_ne!(candidate.observed_lifecycle, DiscoveredLifecycle::Busy);
+        }
+    }
+
+    #[test]
+    fn unavailable_service_enumeration_marks_incomplete_not_false_empty_success() {
+        #[derive(Clone, Default)]
+        struct UnavailableServices;
+        impl ServiceDiscoverySource for UnavailableServices {
+            fn list_service_candidates(&self) -> Vec<ServiceCandidateFact> {
+                Vec::new()
+            }
+            fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+                DiscoveryEnumerationStatus::Unavailable
+            }
+        }
+        let report = RunnerDiscoveryInventory::new(
+            UnavailableServices,
+            EmptySessionDiscoverySource,
+            EmptyUnsupportedDiscoverySource,
+            DiscoveryIdentityFilter::default(),
+        )
+        .discover();
+        assert!(report.candidates.is_empty());
+        assert!(report.is_incomplete());
+        assert!(report.is_false_empty_success());
     }
 }

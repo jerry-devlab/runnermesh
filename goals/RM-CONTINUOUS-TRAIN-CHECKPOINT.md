@@ -3,51 +3,54 @@
 Privacy-safe recoverable status for the Cursor Implementer continuous train.
 Does not grant production authority.
 
-Separate lanes:
+## Evidence classes (do not cross-promote)
 
 ```text
-LANE_A_V0_1=G15R_PASS / H2_WAITING_FOR_OWNER
-LANE_B_V0_2_LRM=HUX_FOUNDATION_CI_PASS_DRAFT
+SOURCE_IMPLEMENTED
+SYNTHETIC_TESTED
+WINDOWS_READ_ONLY_OBSERVED
+HUMAN_UX_TESTED
+LIVE_SERVICE_QUALIFIED
+PRODUCTION_RELEASE_ACCEPTED
 ```
 
 ```text
 TRAIN=SOURCE_AND_SANDBOX_ONLY
+TRAIN_ID=RM-LRM-PRODUCTIZATION-TRAIN-001
 PRODUCTION_MUTATION=false
 AUTHORITATIVE_MAIN=ca1dd96e75a606b80d1978f83e973bd2586d36e4
-NETWORK_STATUS=PROXY_OK_7890
-CURSOR_SELF_REVIEW=PASS_HUX_LOCAL_AND_HOSTED
+CURSOR_SELF_REVIEW=PASS_PRODUCTIZATION_LOCAL
 OWNER_GATE=required_for_h2_and_hux2_live_service
-BLOCKERS=H2_OWNER_TOKEN; INDEPENDENT_SECURITY_ACCEPTANCE_FOR_H2_PENDING; HUX2_LIVE_SERVICE_NOT_AUTHORIZED
-INDEPENDENT_REVIEW=INDEPENDENT_REVIEW_PENDING_FOR_H2_AND_HUX2
+INDEPENDENT_REVIEW=INDEPENDENT_REVIEW_PENDING
 
-# LRM lane
-PR_STACK=main<-#51..#59<-#61<-#62
-LRM_RUNTIME_PR=61 HEAD=9f7acb5 CI=PASS DRAFT
-HUX_PR=62 DRAFT
-HUX_HEAD=90d53373b20a4168ca1bc9d027b84bc60fc92ecb
-HUX_CI=PASS run=42460497752
-HUX_BASE=#61@9f7acb5
+# Exact heads
+LRM61_PR=61 HEAD=9f7acb57f95587d8b870e06fd5f831f0322aad5d CI=PASS DRAFT
+HUX62_PR=62 HEAD=729359f8ae44b2b56da0405da05ff4af3484249b CI=PASS DRAFT
+PRODUCT_BRANCH=feat/lrm-productization
+PRODUCT_BASE=#62@729359f
+PRODUCT_PR=PENDING_PUSH
 
-# Master train
-ACTIVE_GOAL=RM-LRM-HUMAN-EXPERIENCE-FOUNDATION-001
-HUX0=PASS live Agent+CLI two-runner sandbox; intent survived restart
-HUX1=PASS host discover-readonly candidate_count=0 service_enumeration=Ok incomplete=false
-HUX2_PREP=PASS service_control_contract + Owner plan
-REGISTRY_RECOVERY=PASS
-DISPOSITION=PASS_SOURCE_CANDIDATE
-TRAIN_COMPLETE=true
+# Stage dispositions
+T0=PASS evidence taxonomy + worktree
+T1=PASS SOURCE+SYNTHETIC nonempty inventory; HUX1_NONEMPTY=UNPROVEN on this host
+T2=PASS Owner checklist issued; auto CLI/Tray contracts remain; HUMAN_UX visual Tray=OWNER
+T3=PASS SCM executor+mock; live gate CLOSED; StayStopped admission fix
+T4=PASS StayStopped/Drain withdraw contract + existing reconcile isolation
+T5=PASS registry persist rollback on disk failure
+T6=PASS CLI partial_failure/reason; Owner UX checklist
+T7=PASS QUALIFICATION_SYNTHETIC+RESTORE_SYNTHETIC; LIVE=NOT_AUTHORIZED
+T8=PASS Owner gate pack + ADR0006 draft + ZenBookDuo RO checklist; INDEPENDENT_REVIEW_PENDING
+T9=IN_PROGRESS Draft PR + hosted CI
 
-# v0.1 lane
+HUX0_HUMAN_UX=PASS (prior Agent+CLI); Tray visual OWNER checklist pending
+HUX1_WINDOWS_READ_ONLY=PASS candidate_count=0
+HUX1_NONEMPTY=UNPROVEN
+HUX2_SYNTHETIC=PASS
+HUX2_LIVE=NOT_AUTHORIZED
 G15R=PASS
-H2_RC_READY=true
-RC_COMMIT=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-H2_CUTOVER=WAITING_FOR_OWNER
-PR60=MERGED_TO_MAIN ca1dd96
+H2=WAITING_FOR_OWNER
 
-NEXT_SAFE_GOAL=Owner_H2_review_with_independent_security_OR_HUX2_independent_security_then_Owner_token
-STOP_BEFORE=production install; Service mutation; runner registration/label/credential changes; H2 execution; v0.1.0 publish; live LRM mutation
-RECOVERY=branch feat/lrm-hux-foundation PR=#62; goals/RM-LRM-HUMAN-EXPERIENCE-FOUNDATION-001.md
+NEXT_SAFE_GOAL=hosted_CI_on_productization_PR_THEN_Owner_H2_or_HUX2_independent_review
+STOP_BEFORE=real SCM Start/Stop/ChangeConfig; UAC; label writes; H2; v0.1.0; merge into frozen v0.1
+RECOVERY=feat/lrm-productization from #62@729359f
 ```
-
-Update this file only when decision-relevant train state changes; prefer binding
-updates into the active implementation PR rather than opening a governance-only PR.

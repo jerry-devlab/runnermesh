@@ -80,11 +80,32 @@ pub enum ServiceControlPhase {
 }
 
 /// Evaluates the next prepare-only phase without touching SCM.
+///
+/// `managed_admission` forces StayStopped through the same withdraw→idle→stop
+/// sequence as DrainThenStop. A direct PrepareStop while a managed selector may
+/// still admit work is refused as an unsafe shortcut.
 pub fn next_control_phase(
     desired: DesiredServiceLifecycle,
     observed: &ServiceObservation,
     admission_selector_absent: bool,
     worker_busy: bool,
+) -> ServiceControlPhase {
+    next_control_phase_with_admission(
+        desired,
+        observed,
+        admission_selector_absent,
+        worker_busy,
+        true,
+    )
+}
+
+/// Same as [`next_control_phase`], with an explicit managed-admission flag.
+pub fn next_control_phase_with_admission(
+    desired: DesiredServiceLifecycle,
+    observed: &ServiceObservation,
+    admission_selector_absent: bool,
+    worker_busy: bool,
+    managed_admission: bool,
 ) -> ServiceControlPhase {
     if !observed.ownership_verified || !observed.image_path_matches {
         return ServiceControlPhase::Refused {
@@ -109,23 +130,24 @@ pub fn next_control_phase(
                 ServiceControlPhase::PrepareStart
             }
         }
-        DesiredServiceLifecycle::StayStopped => {
-            if matches!(observed.state, DiscoveredLifecycle::Stopped) {
-                ServiceControlPhase::Observe
-            } else if worker_busy {
-                ServiceControlPhase::Refused {
-                    reason: ServiceBackendRefusal::BusyWorker.as_str().to_owned(),
-                }
-            } else {
-                ServiceControlPhase::PrepareStop
+        DesiredServiceLifecycle::StayStopped | DesiredServiceLifecycle::DrainThenStop => {
+            // Managed admission must withdraw before any stop attempt. Unmanaged
+            // runners still refuse Busy Workers and Unknown states.
+            if managed_admission && !admission_selector_absent {
+                return ServiceControlPhase::WithdrawAdmission;
             }
-        }
-        DesiredServiceLifecycle::DrainThenStop => {
-            if !admission_selector_absent {
-                ServiceControlPhase::WithdrawAdmission
-            } else if worker_busy {
-                ServiceControlPhase::WaitIdle { worker_busy: true }
-            } else if matches!(observed.state, DiscoveredLifecycle::Stopped) {
+            if worker_busy {
+                return if matches!(desired, DesiredServiceLifecycle::DrainThenStop)
+                    || managed_admission
+                {
+                    ServiceControlPhase::WaitIdle { worker_busy: true }
+                } else {
+                    ServiceControlPhase::Refused {
+                        reason: ServiceBackendRefusal::BusyWorker.as_str().to_owned(),
+                    }
+                };
+            }
+            if matches!(observed.state, DiscoveredLifecycle::Stopped) {
                 ServiceControlPhase::Observe
             } else {
                 ServiceControlPhase::PrepareStop
@@ -225,9 +247,39 @@ mod tests {
             wait,
             ServiceControlPhase::WaitIdle { worker_busy: true }
         ));
-        let refused =
+        // Managed StayStopped must not skip Worker protection.
+        let wait_stay =
             next_control_phase(DesiredServiceLifecycle::StayStopped, &observed, true, true);
-        assert!(matches!(refused, ServiceControlPhase::Refused { .. }));
+        assert!(matches!(
+            wait_stay,
+            ServiceControlPhase::WaitIdle { worker_busy: true }
+        ));
+    }
+
+    #[test]
+    fn stay_stopped_with_managed_admission_withdraws_before_stop() {
+        let observed = observation(DiscoveredLifecycle::Listening, true);
+        let phase = next_control_phase_with_admission(
+            DesiredServiceLifecycle::StayStopped,
+            &observed,
+            false,
+            false,
+            true,
+        );
+        assert!(matches!(phase, ServiceControlPhase::WithdrawAdmission));
+    }
+
+    #[test]
+    fn unmanaged_stay_stopped_may_prepare_stop_when_idle() {
+        let observed = observation(DiscoveredLifecycle::Listening, true);
+        let phase = next_control_phase_with_admission(
+            DesiredServiceLifecycle::StayStopped,
+            &observed,
+            false,
+            false,
+            false,
+        );
+        assert!(matches!(phase, ServiceControlPhase::PrepareStop));
     }
 
     #[test]
