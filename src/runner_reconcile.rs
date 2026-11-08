@@ -624,6 +624,41 @@ mod tests {
     }
 
     #[test]
+    fn selector_readback_uncertainty_refuses_one_runner_without_mutating_sibling() {
+        let registry = build_registry(vec![
+            record("uncertain", "repo-a", 1, true, false),
+            record("stable", "repo-b", 2, true, false),
+        ]);
+        let mut uncertain = obs("uncertain", DiscoveredLifecycle::Listening, false, None);
+        uncertain.selector_observation_unknown = true;
+        let stable = obs("stable", DiscoveredLifecycle::Listening, false, Some(true));
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::ForceCi, ZenOverride::Disabled),
+            &[uncertain, stable],
+        );
+        let uncertain = report
+            .results
+            .iter()
+            .find(|item| item.local_runner_key == "uncertain")
+            .unwrap();
+        let stable = report
+            .results
+            .iter()
+            .find(|item| item.local_runner_key == "stable")
+            .unwrap();
+        assert_eq!(uncertain.plan, PerRunnerPlan::Refuse);
+        assert!(matches!(
+            uncertain.achieved,
+            PerRunnerAchieved::Unknown | PerRunnerAchieved::Refused
+        ));
+        assert_ne!(uncertain.achieved, PerRunnerAchieved::Full);
+        assert_eq!(stable.achieved, PerRunnerAchieved::Full);
+        assert_eq!(stable.plan, PerRunnerPlan::Noop);
+        assert!(registry.get("stable").unwrap().desired_enabled);
+    }
+
+    #[test]
     fn unknown_and_legacy_routing_refuse_without_achieved_success() {
         let registry = build_registry(vec![
             record("unknown", "repo-u", 3, true, false),
