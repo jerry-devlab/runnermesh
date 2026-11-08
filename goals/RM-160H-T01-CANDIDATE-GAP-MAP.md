@@ -25,11 +25,12 @@ Exact HEAD is the tip of that branch after hosted CI; do not self-embed SHA here
 | P02-05 registry enroll collisions / no auto-enroll | **PASS_SOURCE** | Registry + discover view enrollment_eligible=false on refuse |
 | P02-06 mixed-platform / nonempty RO host | **PENDING** | Ubuntu+Windows CI; ZenBookDuo nonempty still PENDING |
 
-## Remaining GT-01 executable work
+## Remaining GT-01 / early GT-02 executable work
 
-1. Finish any remaining P02-01 start-account / incomplete-enumeration unit cases.
-2. Keep HUX-1 ZenBookDuo collection entry ready; do not invent PASS.
-3. Refresh checkpoint; advance to GT-02 Owner-prep leaves that need no live gate.
+1. HUX-1 ZenBookDuo collection remains PENDING — do not invent PASS.
+2. P04-05 remaining: racing assignment + scope-drift FakeGithub cases.
+3. P05 controller wiring beyond current synthetic matrix (Owner-gated live still closed).
+4. Independent security review / Owner tokens remain external gates.
 
 ## Non-goals this map
 
