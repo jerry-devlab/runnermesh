@@ -495,6 +495,19 @@ mod tests {
         }
     }
 
+    fn globals_with_safety(
+        mode: UserMode,
+        zen: ZenOverride,
+        hard_safety: HardSafetyState,
+    ) -> GlobalPolicyInputs {
+        GlobalPolicyInputs {
+            user_mode: mode,
+            zen,
+            hard_safety,
+            probes: Vec::new(),
+        }
+    }
+
     #[test]
     fn manual_disable_outranks_force_ci_and_withdraws_busy_with_selector() {
         let registry = build_registry(vec![
@@ -760,6 +773,51 @@ mod tests {
         // Plans are independent intents — neither runner mutates the other.
         assert_eq!(busy.local_runner_key, "busy");
         assert_eq!(idle.local_runner_key, "idle");
+    }
+
+    #[test]
+    fn hard_safety_outranks_force_ci_without_mutating_disabled_intent() {
+        let registry = build_registry(vec![
+            record("enabled", "repo-a", 1, true, false),
+            record("disabled", "repo-b", 2, false, false),
+        ]);
+        let observations = vec![
+            obs("enabled", DiscoveredLifecycle::Listening, false, Some(true)),
+            obs(
+                "disabled",
+                DiscoveredLifecycle::Listening,
+                false,
+                Some(true),
+            ),
+        ];
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals_with_safety(
+                UserMode::ForceCi,
+                ZenOverride::Disabled,
+                HardSafetyState::Unsafe,
+            ),
+            &observations,
+        );
+        let enabled = report
+            .results
+            .iter()
+            .find(|item| item.local_runner_key == "enabled")
+            .unwrap();
+        let disabled = report
+            .results
+            .iter()
+            .find(|item| item.local_runner_key == "disabled")
+            .unwrap();
+        // Force-CI is ignored while hard safety is Unsafe: enabled runner drains.
+        assert_eq!(enabled.desired, PerRunnerDesired::Drained);
+        assert_eq!(enabled.plan, PerRunnerPlan::WithdrawSelector);
+        assert_ne!(enabled.desired, PerRunnerDesired::Full);
+        // Explicit disable still outranks for its own desired state, and the
+        // registry intent is never rewritten by reconcile.
+        assert_eq!(disabled.desired, PerRunnerDesired::Drained);
+        assert!(!registry.get("disabled").unwrap().desired_enabled);
+        assert!(registry.get("enabled").unwrap().desired_enabled);
     }
 
     #[test]

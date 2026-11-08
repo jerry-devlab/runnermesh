@@ -473,6 +473,10 @@ struct FakeGithubState {
     fail_next_restore: Option<ScmApiError>,
     disconnected: bool,
     stale_token: bool,
+    /// Opaque registration-scope token expected by the Agent binding.
+    expected_scope_token: Option<String>,
+    /// Opaque registration-scope token last observed from the fake API surface.
+    observed_scope_token: Option<String>,
     withdraw_calls: u32,
     restore_calls: u32,
     observe_calls: u32,
@@ -489,6 +493,8 @@ impl Default for FakeGithubState {
             fail_next_restore: None,
             disconnected: false,
             stale_token: false,
+            expected_scope_token: None,
+            observed_scope_token: None,
             withdraw_calls: 0,
             restore_calls: 0,
             observe_calls: 0,
@@ -552,6 +558,27 @@ impl FakeGithubAdmissionBackend {
             .eventual_visibility_lag = lag;
     }
 
+    /// Binds FakeGithub observations/mutations to an opaque registration scope.
+    /// When `observed` diverges from `expected`, the backend fails closed with
+    /// `IdentityMismatch` and does not rewrite selector presence.
+    pub fn set_scope_tokens(&self, expected: impl Into<String>, observed: impl Into<String>) {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard.expected_scope_token = Some(expected.into());
+        guard.observed_scope_token = Some(observed.into());
+    }
+
+    fn refuse_scope_drift(guard: &FakeGithubState) -> Result<(), ScmApiError> {
+        match (
+            guard.expected_scope_token.as_deref(),
+            guard.observed_scope_token.as_deref(),
+        ) {
+            (Some(expected), Some(observed)) if expected != observed => {
+                Err(ScmApiError::IdentityMismatch)
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn withdraw_capacity(&self) -> Result<(), ScmApiError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if guard.stale_token {
@@ -560,6 +587,7 @@ impl FakeGithubAdmissionBackend {
         if guard.disconnected {
             return Err(ScmApiError::Unavailable);
         }
+        Self::refuse_scope_drift(&guard)?;
         if let Some(error) = guard.fail_next_withdraw.take() {
             return Err(error);
         }
@@ -576,6 +604,7 @@ impl FakeGithubAdmissionBackend {
         if guard.disconnected {
             return Err(ScmApiError::Unavailable);
         }
+        Self::refuse_scope_drift(&guard)?;
         if let Some(error) = guard.fail_next_restore.take() {
             return Err(error);
         }
@@ -641,6 +670,7 @@ impl AdmissionSelectorObserver for FakeGithubAdmissionBackend {
         if guard.disconnected {
             return Err(ScmApiError::Unavailable);
         }
+        Self::refuse_scope_drift(&guard)?;
         Self::advance_eventual_visibility(&mut guard);
         Ok(!guard.selector_present)
     }
@@ -1911,5 +1941,48 @@ mod tests {
         assert!(!admission.observe_selector_absent().expect("still present"));
         // Only after remaining lag is consumed does absence become visible.
         assert!(admission.observe_selector_absent().expect("absent"));
+    }
+
+    #[test]
+    fn fake_github_scope_drift_refuses_mutation_and_observe_without_rewriting_presence() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.set_scope_tokens("scope-a", "scope-b");
+        assert!(matches!(
+            admission.withdraw_capacity(),
+            Err(ScmApiError::IdentityMismatch)
+        ));
+        assert_eq!(admission.withdraw_calls(), 0);
+        assert!(matches!(
+            admission.restore_capacity(),
+            Err(ScmApiError::IdentityMismatch)
+        ));
+        assert_eq!(admission.restore_calls(), 0);
+        assert!(matches!(
+            admission.observe_selector_absent(),
+            Err(ScmApiError::IdentityMismatch)
+        ));
+        // Presence was never rewritten by the refused mutations.
+        admission.set_scope_tokens("scope-a", "scope-a");
+        assert!(!admission.observe_selector_absent().expect("still present"));
+    }
+
+    #[test]
+    fn fake_github_racing_restore_during_withdraw_lag_keeps_latest_pending() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.set_eventual_visibility_lag(2);
+        admission.withdraw_capacity().expect("withdraw");
+        // First observe consumes one lag slot; selector still appears present.
+        assert!(!admission.observe_selector_absent().expect("lag1"));
+        // Racing restore overwrites the pending assignment to "present".
+        admission.restore_capacity().expect("restore during lag");
+        assert_eq!(admission.restore_calls(), 1);
+        // Remaining lag still hides the pending flip.
+        assert!(!admission.observe_selector_absent().expect("lag2"));
+        // After lag settles, the latest assignment (restore/present) wins —
+        // never a false absence claim from the superseded withdraw.
+        assert!(!admission
+            .observe_selector_absent()
+            .expect("restored present"));
+        assert_eq!(admission.observe_calls(), 3);
     }
 }
