@@ -11,37 +11,26 @@ Exact HEAD is the tip of that branch after hosted CI; do not self-embed SHA here
 | --- | --- | --- |
 | HUX-0 tray visual | `PASS_OWNER_ACCEPTED` | Owner accepted; no re-run |
 | HUX-1 development host RO | `EMPTY_OK` | Zero candidates, channels Ok |
-| HUX-1 ZenBookDuo RO | `PENDING` | Operator card ready; not observed here |
+| HUX-1 ZenBookDuo RO | `PENDING` | `operator-card-hux1` ready; not observed here |
 | HUX-2 / HUX-3 live | `NOT_AUTHORIZED` | Outside GT-01 |
 
-## P02 source gaps vs checklist
+## Source package status (GT-01 executable)
 
-| Leaf | Status | Evidence |
+| Area | Status | Notes |
 | --- | --- | --- |
-| P02-01 SCM config / ImagePath quoting / start-account hash | **PASS_SOURCE** | Path quoting + unit tests; QueryServiceConfigW aligned; missing account → no forged identity |
-| P02-02 path-boundary / bin layout / owner match | **PASS_SOURCE** | Sibling-prefix rejection + Listener/Worker bin suffix tests |
-| P02-03 Service vs Session vs scheduled-task | **PASS_SOURCE** | Inventory refusals + unsupported observation-only |
-| P02-04 owned Session prepare/adopt/stop plans | **PASS_SOURCE** | Synthetic backend refuses Busy/Unknown/foreign; live process I/O Owner-gated |
-| P02-05 registry enroll collisions / no auto-enroll | **PASS_SOURCE** | Registry + discover view enrollment_eligible=false on refuse |
-| P02-06 mixed-platform / nonempty RO host | **PENDING** | Ubuntu+Windows CI; ZenBookDuo nonempty still PENDING |
+| P02 identity / discovery | **PASS_SOURCE** | Service/Session identity, quoting, enrollment |
+| P04-05 FakeGithub matrix | **PASS_SOURCE** | lag/stale/permission/link-loss/race/scope-drift/racing-assignment |
+| P05 multi-runner policy | **PASS_SOURCE** | hard-safety/Zen/Force-CI; A/B; restart refuse; stale PID |
+| P06 UX/privacy/packaging | **PASS_SOURCE** | partial-batch, Tray i18n, CLI privacy, install/update sandbox |
+| P01 G15R reverify | **PASS_READ_ONLY** | `fdd9fe6b…` + run `42452639359` still PASS; no rebuild |
+| P03 synthetic≠live | **PASS_SOURCE** | forgeable grant cannot mutate gated Windows; Interrupted≠restore PASS |
+| P04 scoped selector proposal | **PASS_SOURCE** | proposed namespaced selectors stay unapproved |
 
-## P04–P06 source progress
+## Remaining (Owner / external)
 
-| Leaf | Status | Evidence |
-| --- | --- | --- |
-| P04-05 FakeGithub lag/stale/permission/link-loss/race | **PASS_SOURCE** | Unit matrix on FakeGithubAdmissionBackend |
-| P04-05 scope-drift + racing assignment | **PASS_SOURCE** | Scope token refuse; restore-during-withdraw-lag keeps latest pending |
-| P05 hard-safety / Zen / manual / Force-CI precedence | **PASS_SOURCE** | Multi-runner reconcile + Agent sandbox persistence |
-| P05 restart refuse ambiguous/foreign/exec-id | **PASS_SOURCE** | host RecoveryReconstructor tests |
-| P06 partial-batch / Tray i18n / CLI privacy | **PASS_SOURCE** | Focused unit tests |
-| P06 packaging/update/uninstall sandbox | **PASS_SOURCE** | Existing installation/update matrix; residual UX polish only |
-
-## Remaining GT-01 / early GT-02 executable work
-
-1. HUX-1 ZenBookDuo collection remains PENDING — do not invent PASS.
-2. P05 residual: config-corruption resume / stale-PID refuse proofs if not already covered.
-3. P06 residual: operator packaging docs/receipt polish without production mutation.
-4. Independent security review / Owner tokens remain external gates.
+1. HUX-1 ZenBookDuo collection — PENDING
+2. Independent security review / H2 token / HUX-2 live / ADR 0006 / H3
+3. GT-02 continues P01 Owner-packet polish without live mutation
 
 ## Non-goals this map
 
