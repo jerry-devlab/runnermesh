@@ -10,8 +10,9 @@ BRANCH=feat/160h-gt01-field-baseline
 IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
-CODE_ANCHOR=90740eef1250a2ce0ec5aba39b9738ba0ad15dcd
-LAST_PASS_ALL=0c95e417255ea0a094ff3aff7b4d46cfef0dd331
+CODE_ANCHOR=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec
+LAST_PASS_ALL=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec
+REMOTE_TIP=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
@@ -37,14 +38,28 @@ H3=WAITING_FOR_OWNER
 INDEPENDENT_SECURITY_REVIEW=PENDING
 ```
 
-## Active focus (GT-03 source leaves)
+## Completed in GT-03 leaf 1
 
-- P02: User session synthetic lifecycle backend hardening; duplicate work-root refusal across distinct homes; multi-instance session isolation; orphaned worker launch prevention.
-- P03: SCM restore change_start_mode readback failure semantics (`RestoreFailed` ≠ restore PASS); trusted verifier gate closed.
-- P04: Reserved `runnermesh-admit` preserved for v0.1; same-scope dual managed enrollment refused; ADR 0006 unapproved.
+1. **P02 User Session lifecycle hardening**:
+   - `prepare_launch` refuses `BusyWorker` if worker is present or busy (preventing launching listener while active worker executes on work root).
+   - `prepare_launch` returns `Noop` if listener is already present (preventing duplicate listener spawn).
+   - Added `prepare_multi_launch` and `prepare_multi_graceful_stop` with multi-instance isolation proof.
+2. **P02 Multi-instance work root collision safety**:
+   - Added `RegistryError::DuplicateWorkRoot` to enforce unique work roots across distinct runner homes during enrollment.
+3. **P03 SCM restore change_start_mode readback failure**:
+   - Exposed `MockScmBackend::change_calls()`.
+   - Proved that if `change_start_mode` succeeds but subsequent readback fails, `restore()` returns `stage=RestoreFailed`, `restore_pass=false`, and `achieved=Unknown`.
+4. **Validation**:
+   - Local: all 311 tests pass (295 lib, 3 package, 13 admission model).
+   - Hosted CI: Run `42497980765` on `2f42098` PASS_ALL.
 
-## Progress
+## Next safe goal
 
-- Entered GT-03 on same worktree `runnermesh-160h` and branch `feat/160h-gt01-field-baseline`.
-- PR #65 checks all green at tip `0c95e417`.
-- Commencing P02/P03 source leaves without external Owner mutations.
+```text
+NEXT_SAFE_GOAL=GT-03 leaf 2: P04/P05 multi-runner admission & policy fail-closed matrices OR await Owner gates
+BUDGET_USED_GT03≈estimate_1.5h
+BUDGET_REMAINING_GT03≈estimate_22.5h
+WAITING_FOR_OWNER=true
+STOP_BEFORE=H2 cutover; HUX-2; real SCM; labels; H3 publish
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
+```
