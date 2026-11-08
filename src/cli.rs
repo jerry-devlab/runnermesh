@@ -18,6 +18,7 @@ pub enum CliCommand {
     ProbeEnabled { probe_id: ProbeId, enabled: bool },
     RunnerStatus,
     Version,
+    Runners { command: AgentCommand, json: bool },
 }
 
 /// Parses arguments after the executable name into the stable G05 command set.
@@ -57,8 +58,56 @@ pub fn parse_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
             Ok(CliCommand::RunnerStatus)
         }
         [command] if command == "version" => Ok(CliCommand::Version),
+        args if args.first().map(String::as_str) == Some("runners") => parse_runners_cli(args),
         _ => Err(CliError::Usage),
     }
+}
+
+fn parse_runners_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
+    let json = arguments.iter().any(|argument| argument == "--json");
+    let prepare_only = arguments.iter().any(|argument| argument == "--prepare");
+    let when_idle = arguments.iter().any(|argument| argument == "--when-idle");
+    let positional: Vec<&str> = arguments
+        .iter()
+        .map(String::as_str)
+        .filter(|argument| !matches!(*argument, "--json" | "--prepare" | "--when-idle"))
+        .collect();
+    let command = match positional.as_slice() {
+        ["runners", "list"] => AgentCommand::RunnersList,
+        ["runners", "discover"] => AgentCommand::RunnersDiscover,
+        ["runners", "inspect", key] => AgentCommand::RunnersInspect {
+            local_runner_key: (*key).to_owned(),
+        },
+        ["runners", "enroll", key] => AgentCommand::RunnersEnroll {
+            local_runner_key: (*key).to_owned(),
+            prepare_only,
+        },
+        ["runners", "enable", key] => AgentCommand::RunnersEnable {
+            local_runner_key: (*key).to_owned(),
+            prepare_only,
+        },
+        ["runners", "disable", key] => AgentCommand::RunnersDisable {
+            local_runner_key: (*key).to_owned(),
+            when_idle,
+            prepare_only,
+        },
+        ["runners", "reconcile", key] => AgentCommand::RunnersReconcile {
+            local_runner_key: (*key).to_owned(),
+            prepare_only,
+        },
+        ["runners", "forget", key] => AgentCommand::RunnersForget {
+            local_runner_key: (*key).to_owned(),
+            prepare_only,
+        },
+        ["runners", "status"] => AgentCommand::RunnersStatus {
+            local_runner_key: None,
+        },
+        ["runners", "status", key] => AgentCommand::RunnersStatus {
+            local_runner_key: Some((*key).to_owned()),
+        },
+        _ => return Err(CliError::Usage),
+    };
+    Ok(CliCommand::Runners { command, json })
 }
 
 /// The transport boundary used by CLI tests and the real local IPC client.
@@ -134,6 +183,14 @@ pub fn execute_cli(
             Ok(render_runner_status(&snapshot))
         }
         CliCommand::Version => Ok(format!("runnermesh {version}")),
+        CliCommand::Runners { command, json } => {
+            let report = request_runners(transport, command)?;
+            if json {
+                render_json(&report)
+            } else {
+                Ok(render_runners_text(&report))
+            }
+        }
     }
 }
 
@@ -155,7 +212,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: status [--json] | doctor [--json] | mode <mode> | zen <on|off> | probe <list|enable|disable> | runner status | version",
+                "usage: status [--json] | doctor [--json] | mode <mode> | zen <on|off> | probe <list|enable|disable> | runner status | runners <list|discover|inspect|enroll|enable|disable|reconcile|forget|status> | version",
             ),
             Self::InvalidMode(error) => write!(formatter, "invalid mode: {error}"),
             Self::InvalidProbeId(error) => write!(formatter, "invalid probe ID: {error}"),
@@ -193,9 +250,24 @@ fn request_snapshot(
     match response {
         AgentResponse::Snapshot(snapshot) | AgentResponse::Accepted { snapshot } => Ok(snapshot),
         AgentResponse::Rejected { reason_code } => Err(CliError::AgentRejected(reason_code)),
-        AgentResponse::Doctor(_) => Err(CliError::UnexpectedResponse(
-            "a doctor response for a snapshot command",
+        AgentResponse::Doctor(_) | AgentResponse::Runners(_) => Err(CliError::UnexpectedResponse(
+            "a doctor/runners response for a snapshot command",
         )),
+    }
+}
+
+fn request_runners(
+    transport: &impl AgentTransport,
+    command: AgentCommand,
+) -> Result<crate::RunnerCommandReport, CliError> {
+    match send(transport, command)? {
+        AgentResponse::Runners(report) => Ok(report),
+        AgentResponse::Rejected { reason_code } => Err(CliError::AgentRejected(reason_code)),
+        AgentResponse::Snapshot(_) | AgentResponse::Accepted { .. } | AgentResponse::Doctor(_) => {
+            Err(CliError::UnexpectedResponse(
+                "a non-runners response for a runners command",
+            ))
+        }
     }
 }
 
@@ -204,9 +276,11 @@ fn request_doctor(transport: &impl AgentTransport) -> Result<DoctorReport, CliEr
     match response {
         AgentResponse::Doctor(report) => Ok(report),
         AgentResponse::Rejected { reason_code } => Err(CliError::AgentRejected(reason_code)),
-        AgentResponse::Snapshot(_) | AgentResponse::Accepted { .. } => Err(
-            CliError::UnexpectedResponse("a snapshot response for a doctor command"),
-        ),
+        AgentResponse::Snapshot(_) | AgentResponse::Accepted { .. } | AgentResponse::Runners(_) => {
+            Err(CliError::UnexpectedResponse(
+                "a snapshot/runners response for a doctor command",
+            ))
+        }
     }
 }
 
@@ -316,6 +390,34 @@ fn render_runner_status(snapshot: &AgentSnapshot) -> String {
     )
 }
 
+fn render_runners_text(report: &crate::RunnerCommandReport) -> String {
+    let mut lines = vec![format!(
+        "runners read_only={} prepare_only={} applied={} discovered={} collisions={}",
+        report.read_only,
+        report.prepare_only,
+        report.applied,
+        report.discovered_keys.len(),
+        report.same_scope_collisions
+    )];
+    if let Some(reason) = &report.reason_code {
+        lines.push(format!("reason: {reason}"));
+    }
+    for record in &report.records {
+        lines.push(format!(
+            "- {} id={} enabled={} state={:?} backend={}",
+            record.local_runner_key,
+            record.runner_id,
+            record.desired_enabled,
+            record.enrollment_state,
+            record.backend_kind
+        ));
+    }
+    for key in &report.discovered_keys {
+        lines.push(format!("discovered: {key}"));
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -355,6 +457,31 @@ mod tests {
         );
         assert!(parse_cli(&arguments(["mode", "ForceCi"])).is_err());
         assert!(parse_cli(&arguments(["status", "--pretty"])).is_err());
+        assert_eq!(
+            parse_cli(&arguments(["runners", "list", "--json"])).unwrap(),
+            CliCommand::Runners {
+                command: AgentCommand::RunnersList,
+                json: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments([
+                "runners",
+                "disable",
+                "key-a",
+                "--when-idle",
+                "--prepare"
+            ]))
+            .unwrap(),
+            CliCommand::Runners {
+                command: AgentCommand::RunnersDisable {
+                    local_runner_key: "key-a".to_owned(),
+                    when_idle: true,
+                    prepare_only: true,
+                },
+                json: false,
+            }
+        );
     }
 
     #[test]
