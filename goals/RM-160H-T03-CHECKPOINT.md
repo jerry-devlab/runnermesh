@@ -10,9 +10,9 @@ BRANCH=feat/160h-gt01-field-baseline
 IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
-CODE_ANCHOR=54fa9cc6d618dea830701f2f0d720035f692f59f
-LAST_PASS_ALL=e2c889617ad3000b0946059d643a6d45903b4172
-REMOTE_TIP=e2c889617ad3000b0946059d643a6d45903b4172
+CODE_ANCHOR=7bf1f47a6b5699ee7cece7a6100aaa7e2c2d5190
+LAST_PASS_ALL=a1d9be09071fe30dfcb5c76ea10c4d29e7102e21
+REMOTE_TIP=a1d9be09071fe30dfcb5c76ea10c4d29e7102e21
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
@@ -69,14 +69,29 @@ INDEPENDENT_SECURITY_REVIEW=PENDING
    - Proved disabled runner is never auto-re-enabled across multiple reconcile ticks and worker is never killed destructively.
 4. **Validation**:
    - Local: all 313 tests pass (297 lib, 3 package, 13 admission model).
+   - Hosted CI: Run `42499969141` on `a1d9be0` PASS_ALL.
+
+## Completed in GT-03 leaf 3
+
+1. **P03-02 SCM execution gate boundaries & unissued verifier hardening** (`src/windows_scm_executor.rs`):
+   - `closed_gate_refuses_every_mutation_intent_and_reports_closed`: proves CLOSED gate refuses all mutations without authorizing start, stop, or config.
+   - `granular_gate_permissions_and_identity_match_strictly_enforced`: proves granular permissions (start does not authorize stop or config) and strict service/image identity matching.
+   - `unissued_verifier_rejects_diverse_request_payloads`: proves `UnissuedOwnerAuthorizationVerifier` refuses empty, populated, or forged requests with `AuthorizationNotIssued`.
+2. **P04-02 Scoped admission simulation & ADR 0006 unapproved preservation** (`src/scoped_admission_sim.rs`):
+   - `mixed_managed_and_unmanaged_or_missing_selector_classifications`: proves unmanaged runners and valid managed runners remain compatible under v0.1 rules, while missing/unrelated selectors are classified as `RefusedMissingSelector`.
+   - `migration_sanitizer_and_adr_preservation`: proves proposed migration names are sanitized, but strictly maintain `requires_owner_gate = true`, `mutates_workflows = true`, `approved = false` under unaccepted ADR 0006.
+3. **P05/P06 Registry scope coexistence** (`src/runner_registry.rs`):
+   - `distinct_scopes_or_unmanaged_runners_coexist_without_collision`: proves runners in distinct scopes or unmanaged runners coexist cleanly without triggering collision refusal.
+4. **Validation**:
+   - Local: all 319 tests pass (303 lib, 3 package, 13 admission model).
 
 ## Next safe goal
 
 ```text
-NEXT_SAFE_GOAL=GT-03-LEAF-03: P04 ADR 0006 unapproved preservation / FakeGithub matrix / packaging sandbox OR await Owner gates
-BUDGET_USED_GT03≈estimate_2.5h
-BUDGET_REMAINING_GT03≈estimate_21.5h
+NEXT_SAFE_GOAL=GT-03-LEAF-04: Multi-runner CLI/Doctor status JSON rendering / tray presentation consistency OR await Owner gates
+BUDGET_USED_GT03≈estimate_3.5h
+BUDGET_REMAINING_GT03≈estimate_20.5h
 WAITING_FOR_OWNER=true
 STOP_BEFORE=H2 cutover; HUX-2; real SCM; labels; H3 publish
-RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=e2c889617ad3000b0946059d643a6d45903b4172; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=a1d9be09071fe30dfcb5c76ea10c4d29e7102e21; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
 ```
