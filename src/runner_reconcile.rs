@@ -217,7 +217,9 @@ fn reconcile_disabled(
             "runners-disable-busy-hold",
         );
     }
-    if selector_absent && observed.lifecycle == DiscoveredLifecycle::Stopped {
+    // ADR 0004: achieved DRAINED = selector absent + no Worker + consistent
+    // evidence. Listener may still be Listening; stop is not required.
+    if selector_absent {
         return result(
             record,
             PerRunnerDesired::Drained,
@@ -274,31 +276,39 @@ fn reconcile_policy_drain(
             global.reason_code.as_str(),
         );
     }
-    // Selector absence alone does not prove Listener stopped / Offline achieved.
-    if selector_absent && observed.lifecycle == DiscoveredLifecycle::Stopped {
-        let achieved = match desired {
-            PerRunnerDesired::Offline => PerRunnerAchieved::Offline,
-            _ => PerRunnerAchieved::Drained,
-        };
+    if selector_absent {
+        // Work/Gaming drain: DRAINED does not require Listener stopped (ADR 0004).
+        // Zen/Offline: Offline achieved still requires Listener Stopped evidence.
+        if desired == PerRunnerDesired::Offline {
+            if observed.lifecycle == DiscoveredLifecycle::Stopped {
+                return result(
+                    record,
+                    desired,
+                    observed.lifecycle,
+                    AdmissionLifecycleState::Drained,
+                    PerRunnerAchieved::Offline,
+                    PerRunnerPlan::Noop,
+                    global.reason_code.as_str(),
+                );
+            }
+            return result(
+                record,
+                desired,
+                observed.lifecycle,
+                AdmissionLifecycleState::DrainPending,
+                PerRunnerAchieved::Transitional,
+                PerRunnerPlan::Noop,
+                "runners-listener-stop-unproven",
+            );
+        }
         return result(
             record,
             desired,
             observed.lifecycle,
             AdmissionLifecycleState::Drained,
-            achieved,
+            PerRunnerAchieved::Drained,
             PerRunnerPlan::Noop,
             global.reason_code.as_str(),
-        );
-    }
-    if selector_absent {
-        return result(
-            record,
-            desired,
-            observed.lifecycle,
-            AdmissionLifecycleState::DrainPending,
-            PerRunnerAchieved::Transitional,
-            PerRunnerPlan::Noop,
-            "runners-listener-stop-unproven",
         );
     }
     result(
@@ -566,6 +576,51 @@ mod tests {
         assert_eq!(a.reason_code.as_str(), "runners-listener-stop-unproven");
         assert_ne!(a.achieved, PerRunnerAchieved::Offline);
         assert_ne!(a.achieved, PerRunnerAchieved::Drained);
+    }
+
+    #[test]
+    fn policy_drained_allows_listening_listener_when_selector_absent() {
+        // ADR 0004 matrix: selector absent + no Worker => DRAINED even if Listening.
+        let registry = build_registry(vec![record("a", "repo-a", 1, true, false)]);
+        let observations = vec![obs("a", DiscoveredLifecycle::Listening, false, Some(false))];
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Work, ZenOverride::Disabled),
+            &observations,
+        );
+        let a = &report.results[0];
+        assert_eq!(a.desired, PerRunnerDesired::Drained);
+        assert_eq!(a.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(a.admission_lifecycle, AdmissionLifecycleState::Drained);
+        assert_eq!(a.plan, PerRunnerPlan::Noop);
+    }
+
+    #[test]
+    fn disabled_drained_allows_listening_listener_when_selector_absent() {
+        let registry = build_registry(vec![record("a", "repo-a", 1, false, false)]);
+        let observations = vec![obs("a", DiscoveredLifecycle::Listening, false, Some(false))];
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::ForceCi, ZenOverride::Disabled),
+            &observations,
+        );
+        let a = &report.results[0];
+        assert_eq!(a.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(a.reason_code.as_str(), "runners-disabled-drained");
+    }
+
+    #[test]
+    fn zen_offline_requires_stopped_listener_for_offline_achieved() {
+        let registry = build_registry(vec![record("a", "repo-a", 1, true, false)]);
+        let observations = vec![obs("a", DiscoveredLifecycle::Stopped, false, Some(false))];
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Idle, ZenOverride::Enabled),
+            &observations,
+        );
+        let a = &report.results[0];
+        assert_eq!(a.desired, PerRunnerDesired::Offline);
+        assert_eq!(a.achieved, PerRunnerAchieved::Offline);
     }
 
     #[test]
