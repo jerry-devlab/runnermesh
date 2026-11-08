@@ -41,11 +41,21 @@ Exact installed path, private runner identity, prestate, rollback steps, STOP
 conditions, remote/local readback commands. Never paste private paths/IDs into
 this public file.
 
+## Public-safe readiness checklist (no private values)
+
+- [ ] Independent security review bound to exact G15R RC HEAD (not Draft #65 tip)
+- [ ] Fresh Owner token issued for this RC (prior token consumed)
+- [ ] Private packet lists prestate capture + restore plan + STOP conditions
+- [ ] Rollback rehearsal documented offline; restore disposition separate from cutover
+- [ ] Dogfood clock starts only after H2_CUTOVER=PASS and H2_RESTORE=PASS
+- [ ] G17/H3 remain blocked until dogfood elapsed ≥24h ordinary use
+
 ## Program disposition
 
 ```text
 P01_SOURCE_PREP=READY_FOR_OWNER_PACKET
 P01_LIVE=WAITING_FOR_OWNER
+BOUND_PASS_ALL_TIP=90740eef1250a2ce0ec5aba39b9738ba0ad15dcd
 ```
 
-Continue LRM P02–P06 source while H2 remains Owner-gated.
+Continue LRM P02–P06 / GT-02 source while H2 remains Owner-gated.
