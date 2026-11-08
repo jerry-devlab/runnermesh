@@ -30,5 +30,11 @@ $root = "<absolute-empty-dir>"
 ## Disposition
 
 ```text
-HUMAN_TRAY_VISUAL=<PASS|PENDING_OWNER|FAIL>
+HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED
+HUX0_PRODUCTION_MUTATION=false
+HUX0_EVIDENCE_SOURCE=Owner_confirmation_of_PR63_dev_Tray
 ```
+
+Owner confirmed the #63 development Tray experience is acceptable. This milestone
+is recorded from that Owner confirmation only. No per-item screenshots were
+attached, and Cursor did not re-execute the click checklist above.

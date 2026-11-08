@@ -42,15 +42,23 @@ HUX2_FINAL_T2=PASS HUX0_tray_card; HUX1_local=EMPTY_OK; HUX1_ZENBOOKDUO=PENDING
 HUX2_FINAL_T3=PASS mock+fake_github full matrix; SYNTHETIC_PASS; SOURCE_READY; LIVE_NOT_AUTHORIZED
 HUX2_FINAL_T4=PASS_PENDING_PUSH
 
-HUX0_HUMAN_TRAY_VISUAL=PENDING_OWNER
+# Owner verbally/chat-confirmed #63 development Tray UX on the Draft candidate.
+# No per-item screenshots were filed; Cursor did not re-run HUX-0 clicks.
+HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED
+HUX0_PRODUCTION_MUTATION=false
+HUX0_EVIDENCE_CLASS=HUMAN_UX_TESTED
+HUX0_EVIDENCE_SOURCE=Owner_confirmation_of_PR63_dev_Tray
+
 HUX1_NONEMPTY_LOCAL=EMPTY_OK
 HUX1_NONEMPTY_ZENBOOKDUO=PENDING
+HUX1_COLLECTION=ready_privacy_safe_template_awaiting_host_data
 HUX2_SYNTHETIC=PASS
 HUX2_SOURCE_READY=true
 HUX2_LIVE=NOT_AUTHORIZED
+INDEPENDENT_SECURITY_REVIEW=PENDING
 H2=WAITING_FOR_OWNER
 
-NEXT_OWNER_GATE=independent_SCM_security_review_THEN_trusted_auth_OR_ZenBookDuo_RO_OR_H2
-NEXT_SAFE_GOAL=Owner_independent_SCM_review_OR_ZenBookDuo_RO_nonempty_OR_v0_2B_readonly_resource_probe_source
-STOP_BEFORE=real SCM mutation; UAC; labels; H2; v0.1.0; fold LRM into frozen v0.1; treat synthetic grant as Owner auth
+NEXT_OWNER_GATE=ZenBookDuo_RO_nonempty_OR_independent_SCM_security_review_OR_H2
+NEXT_SAFE_GOAL=Owner_ZenBookDuo_discover_readonly_counts_OR_independent_SCM_review
+STOP_BEFORE=real SCM mutation; UAC; labels; H2; v0.1.0; fold LRM into frozen v0.1; treat synthetic grant as Owner auth; invent HUX-1 counts
 ```

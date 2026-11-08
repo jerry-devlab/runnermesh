@@ -61,6 +61,28 @@ HUX1_NONEMPTY_ZENBOOKDUO=PENDING
 
 Do not mark ZenBookDuo PASS until that host itself is observed.
 
+## Privacy-safe result collection slot (awaiting ZenBookDuo data)
+
+Fill only after running `discover-readonly` on ZenBookDuo. Leave blanks until then.
+Public repo may store these fields only — never service names, paths, SIDs, or
+runner IDs.
+
+```text
+HOST_LABEL=ZenBookDuo
+OBSERVED_AT=
+CANDIDATE_HEAD=
+candidate_count=
+observed_only_count=
+refused_count=
+identity_complete_count=
+service_enumeration=
+session_enumeration=
+process_observation=
+incomplete=
+HUX1_NONEMPTY_ZENBOOKDUO=PENDING
+PRODUCTION_MUTATION=false
+```
+
 ## Disposition mapping
 
 | Result | Disposition |
@@ -68,4 +90,4 @@ Do not mark ZenBookDuo PASS until that host itself is observed.
 | Counts > 0 with Ok/Incomplete honestly reported | HUX_1_NONEMPTY=PASS (host-specific) |
 | candidate_count=0 with Ok | host has no runners; still not proof for other hosts |
 | Unavailable disguised as Ok empty | FAIL |
-| ZenBookDuo not reachable this Train | HUX1_NONEMPTY_ZENBOOKDUO=UNPROVEN |
+| ZenBookDuo data not yet supplied | HUX1_NONEMPTY_ZENBOOKDUO=PENDING |

@@ -65,8 +65,9 @@ Tip baseline before this readiness commit: `#63` @ `3fd2816e24cb…`
 
 ```text
 INDEPENDENT_SECURITY_REVIEW=PENDING   # live SCM surface
-HUX1_NONEMPTY_ZENBOOKDUO=PENDING      # ZenBookDuo not observed this Train
-HUMAN_TRAY_VISUAL=PENDING_OWNER
+HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED  # Owner confirmed #63 dev Tray
+HUX0_PRODUCTION_MUTATION=false
+HUX1_NONEMPTY_ZENBOOKDUO=PENDING      # awaiting host discover-readonly counts
 HUX2_LIVE=NOT_AUTHORIZED
 TRUSTED_OWNER_AUTH=UNISSUED
 H2=WAITING_FOR_OWNER                  # separate lane

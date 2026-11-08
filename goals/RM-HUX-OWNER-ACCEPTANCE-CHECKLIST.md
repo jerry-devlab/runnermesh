@@ -50,10 +50,25 @@ cargo test --lib hux_sandbox
 ```
 
 ```text
-HUMAN_TRAY_VISUAL=PENDING_OWNER
+HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED
+HUX0_PRODUCTION_MUTATION=false
+HUX0_EVIDENCE_SOURCE=Owner_confirmation_of_PR63_dev_Tray
 ```
 
+Owner accepted the #63 development Tray UX. Recorded from Owner confirmation;
+Cursor did not re-run the human click list.
+
+## HUX-1 (next)
+
+ZenBookDuo nonempty read-only discovery remains `PENDING` until host counts are
+supplied. Collection template: `goals/RM-HUX-1-ZENBOOKDUO-READONLY-CHECKLIST.md`.
+
 ## HUX-2
+
+```text
+HUX2_LIVE=NOT_AUTHORIZED
+INDEPENDENT_SECURITY_REVIEW=PENDING
+```
 
 Blocked until independent security review PASS + sealed Owner proof. See
 `RM-HUX-2-OWNER-SERVICE-GATE-PLAN.md` and `RM-HUX-2-READINESS-PACKAGE.md`.
