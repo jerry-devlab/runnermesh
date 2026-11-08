@@ -81,6 +81,19 @@ fn presentation_status_for(record: &RunnerRecord) -> RunnerPresentationStatus {
     }
 }
 
+/// Privacy-safe discovery candidate summary for Tray/CLI (no paths/IDs leaked).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveredCandidateView {
+    pub local_discovery_key: String,
+    pub backend_kind: String,
+    pub disposition: String,
+    #[serde(default)]
+    pub refusal_reason: Option<String>,
+    pub enrollment_eligible: bool,
+    pub same_scope_collision: bool,
+}
+
 /// Authoritative runners command report shared by CLI/IPC.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -97,6 +110,9 @@ pub struct RunnerCommandReport {
     pub resource_aggregate: Option<RunnerResourceAggregate>,
     #[serde(default)]
     pub partial_failure: bool,
+    /// Optional privacy-safe discovery rows (present on discover responses).
+    #[serde(default)]
+    pub discovered_candidates: Vec<DiscoveredCandidateView>,
 }
 
 impl RunnerCommandReport {
@@ -125,6 +141,7 @@ impl RunnerCommandReport {
             same_scope_collisions,
             resource_aggregate: None,
             partial_failure: false,
+            discovered_candidates: Vec::new(),
         }
     }
 
@@ -227,6 +244,11 @@ pub fn handle_runners_command(
                 // Unavailable/Incomplete host evidence is a partial observation,
                 // never a clean empty success.
                 partial_failure: report.is_incomplete(),
+                discovered_candidates: report
+                    .candidates
+                    .iter()
+                    .map(discovered_candidate_view)
+                    .collect(),
             })
         }
         crate::AgentCommand::RunnersInspect { local_runner_key } => {
@@ -251,6 +273,7 @@ pub fn handle_runners_command(
                 same_scope_collisions: 0,
                 resource_aggregate: None,
                 partial_failure: false,
+                discovered_candidates: Vec::new(),
             })
         }
         crate::AgentCommand::RunnersStatus { local_runner_key } => {
@@ -277,6 +300,7 @@ pub fn handle_runners_command(
                 same_scope_collisions: 0,
                 resource_aggregate: None,
                 partial_failure: false,
+                discovered_candidates: Vec::new(),
             })
         }
         crate::AgentCommand::RunnersEnroll {
@@ -432,6 +456,25 @@ fn static_reason(code: &str) -> ReasonCode {
     ReasonCode::new(code.to_owned()).expect("runners reason codes are static kebab tokens")
 }
 
+fn discovered_candidate_view(candidate: &crate::DiscoveredRunner) -> DiscoveredCandidateView {
+    DiscoveredCandidateView {
+        local_discovery_key: candidate.local_discovery_key.clone(),
+        backend_kind: match candidate.backend {
+            crate::RunnerBackendKind::WindowsService => "windows-service".to_owned(),
+            crate::RunnerBackendKind::UserSession => "user-session".to_owned(),
+            crate::RunnerBackendKind::ScheduledTask => "scheduled-task".to_owned(),
+            crate::RunnerBackendKind::Unknown => "unknown".to_owned(),
+        },
+        disposition: match candidate.disposition {
+            crate::DiscoveryDisposition::ObservedOnly => "OBSERVED_ONLY".to_owned(),
+            crate::DiscoveryDisposition::Refused => "REFUSED".to_owned(),
+        },
+        refusal_reason: candidate.refusal.map(|reason| reason.as_str().to_owned()),
+        enrollment_eligible: candidate.capabilities.enrollment_eligible,
+        same_scope_collision: candidate.same_scope_collision,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,7 +549,36 @@ mod tests {
         .unwrap();
         assert!(discovered.read_only);
         assert_eq!(discovered.discovered_keys, vec!["key-a".to_owned()]);
+        assert_eq!(discovered.discovered_candidates.len(), 1);
+        assert_eq!(
+            discovered.discovered_candidates[0].disposition,
+            "OBSERVED_ONLY"
+        );
+        assert!(discovered.discovered_candidates[0].enrollment_eligible);
         assert!(editor.registry().records.is_empty());
+    }
+
+    #[test]
+    fn discover_surfaces_refused_candidates_without_enrollment() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut discovery = discovery_report();
+        discovery.candidates[0].disposition = DiscoveryDisposition::Refused;
+        discovery.candidates[0].refusal = Some(crate::DiscoveryRefusalReason::DuplicateHome);
+        discovery.candidates[0].capabilities.enrollment_eligible = false;
+        let discovered = handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersDiscover,
+        )
+        .unwrap();
+        assert_eq!(discovered.discovered_candidates[0].disposition, "REFUSED");
+        assert_eq!(
+            discovered.discovered_candidates[0]
+                .refusal_reason
+                .as_deref(),
+            Some("discovery.duplicate-home")
+        );
+        assert!(!discovered.discovered_candidates[0].enrollment_eligible);
     }
 
     #[test]

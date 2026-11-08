@@ -136,7 +136,8 @@ pub use qualification::{
 };
 pub use resource_policy_probe::{probe_resource_policy_capabilities, ResourcePolicyCapability};
 pub use runner_commands::{
-    handle_runners_command, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+    handle_runners_command, DiscoveredCandidateView, RunnerCommandReport, RunnerPresentationStatus,
+    RunnerRecordView,
 };
 pub use runner_discovery::{
     DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity, DiscoveredServiceBinding,

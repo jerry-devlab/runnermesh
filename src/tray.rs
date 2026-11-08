@@ -1274,6 +1274,7 @@ mod tests {
                 confidence: ResourceSampleConfidence::Unknown,
             }),
             partial_failure: false,
+            discovered_candidates: Vec::new(),
         };
         let english_snapshot = sample_snapshot();
         let mut chinese_snapshot = sample_snapshot();
