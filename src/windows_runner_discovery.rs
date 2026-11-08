@@ -602,16 +602,23 @@ fn service_image_path_token(binary_path_name: &str) -> Option<&str> {
 
 #[cfg(any(windows, test))]
 fn runner_home_from_image(image_path: &Path) -> Option<PathBuf> {
-    // Typical layout: <home>\bin\RunnerService.exe
-    let parent = image_path.parent()?;
-    if parent
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
-    {
-        return parent.parent().map(Path::to_path_buf);
+    // Use normalized `\` keys so Windows ImagePath fixtures remain meaningful
+    // under Unix unit tests (Path::parent treats `\` as a name character there).
+    let key = normalize_path_key(image_path);
+    if key.is_empty() {
+        return None;
     }
-    Some(parent.to_path_buf())
+    let (parent_key, file_name) = key.rsplit_once('\\')?;
+    if file_name.is_empty() {
+        return None;
+    }
+    // Typical layout: <home>\bin\RunnerService.exe
+    if let Some((home_key, bin)) = parent_key.rsplit_once('\\') {
+        if bin.eq_ignore_ascii_case("bin") {
+            return Some(PathBuf::from(home_key));
+        }
+    }
+    Some(PathBuf::from(parent_key))
 }
 
 #[cfg(windows)]
@@ -839,12 +846,16 @@ mod tests {
             .expect("token"),
         );
         let home = runner_home_from_image(&image).expect("home");
-        assert_eq!(home, PathBuf::from(r"C:\fixture\runners\svc-home"));
+        assert_eq!(
+            normalize_path_key(&home),
+            normalize_path_key(Path::new(r"C:\fixture\runners\svc-home"))
+        );
         // Non-bin layout falls back to parent directory only.
         let odd = PathBuf::from(r"C:\fixture\runners\svc-home\RunnerService.exe");
+        let odd_home = runner_home_from_image(&odd).expect("odd home");
         assert_eq!(
-            runner_home_from_image(&odd),
-            Some(PathBuf::from(r"C:\fixture\runners\svc-home"))
+            normalize_path_key(&odd_home),
+            normalize_path_key(Path::new(r"C:\fixture\runners\svc-home"))
         );
     }
 }
