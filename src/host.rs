@@ -439,6 +439,29 @@ mod tests {
     }
 
     #[test]
+    fn restart_refuses_stale_or_ambiguous_process_ownership_without_adoption() {
+        let mut ambiguous = runner(RunnerPhase::Listening);
+        ambiguous.listener = ProcessOwnership::Unknown;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: ambiguous,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::ProcessOwnershipAmbiguous)
+        );
+        assert_eq!(recovered.directive, RecoveryDirective::Reobserve);
+        assert_ne!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Adopt
+        );
+    }
+
+    #[test]
     fn resume_refuses_ambiguous_home_and_interruption_only_directs_reconnect() {
         let source = QueueRecoverySource::new(vec![
             RecoveryObservation {
