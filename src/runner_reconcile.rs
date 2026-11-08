@@ -860,4 +860,136 @@ mod tests {
         assert!(!registry.get("a").unwrap().desired_enabled);
         assert!(registry.get("b").unwrap().desired_enabled);
     }
+
+    #[test]
+    fn selector_removal_alone_is_not_job_assignment_barrier_and_achieved_drained_requires_no_worker() {
+        let registry = build_registry(vec![record("runner-1", "repo-a", 1, true, false)]);
+
+        // Case 1: Work policy drain requested, selector is already absent from GitHub,
+        // but an in-flight / racing job is executing (worker_present = true).
+        // Selector removal alone is NOT a linearizable barrier; achieved MUST remain Transitional.
+        let obs_busy = vec![obs(
+            "runner-1",
+            DiscoveredLifecycle::Busy,
+            true,
+            Some(false),
+        )];
+        let report_busy = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Work, ZenOverride::Disabled),
+            &obs_busy,
+        );
+        let r1_busy = &report_busy.results[0];
+        assert_eq!(r1_busy.desired, PerRunnerDesired::Drained);
+        assert_eq!(r1_busy.admission_lifecycle, AdmissionLifecycleState::DrainPending);
+        assert_eq!(r1_busy.achieved, PerRunnerAchieved::Transitional);
+        assert_ne!(r1_busy.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(r1_busy.plan, PerRunnerPlan::HoldBusy);
+
+        // Case 2: Racing job completes (worker_present = false), selector absent.
+        // Now achieved DRAINED is reached.
+        let obs_drained = vec![obs(
+            "runner-1",
+            DiscoveredLifecycle::Listening,
+            false,
+            Some(false),
+        )];
+        let report_drained = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Work, ZenOverride::Disabled),
+            &obs_drained,
+        );
+        let r1_drained = &report_drained.results[0];
+        assert_eq!(r1_drained.desired, PerRunnerDesired::Drained);
+        assert_eq!(r1_drained.admission_lifecycle, AdmissionLifecycleState::Drained);
+        assert_eq!(r1_drained.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(r1_drained.plan, PerRunnerPlan::Noop);
+
+        // Case 3: DRAINED does NOT require Listener to be Stopped (ADR 0004 Work mode).
+        assert_eq!(r1_drained.observed_lifecycle, DiscoveredLifecycle::Listening);
+
+        // Case 4: Zen/Offline policy requires Listener Stopped before achieved OFFLINE is asserted.
+        let report_offline_listening = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Idle, ZenOverride::Enabled),
+            &obs_drained,
+        );
+        let r1_zen_listening = &report_offline_listening.results[0];
+        assert_eq!(r1_zen_listening.desired, PerRunnerDesired::Offline);
+        assert_eq!(r1_zen_listening.achieved, PerRunnerAchieved::Transitional);
+        assert_eq!(r1_zen_listening.reason_code.as_str(), "runners-listener-stop-unproven");
+
+        let obs_stopped = vec![obs(
+            "runner-1",
+            DiscoveredLifecycle::Stopped,
+            false,
+            Some(false),
+        )];
+        let report_offline_stopped = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Idle, ZenOverride::Enabled),
+            &obs_stopped,
+        );
+        let r1_zen_stopped = &report_offline_stopped.results[0];
+        assert_eq!(r1_zen_stopped.desired, PerRunnerDesired::Offline);
+        assert_eq!(r1_zen_stopped.achieved, PerRunnerAchieved::Offline);
+    }
+
+    #[test]
+    fn service_vs_session_multi_backend_reconcile_and_no_auto_reenable() {
+        let mut rec_svc = record("svc-runner", "repo-a", 10, true, false);
+        rec_svc.backend = RegistryBackendBinding::WindowsService {
+            service_name: "actions.runner.svc".to_owned(),
+        };
+        rec_svc.desired_enabled = false; // explicitly disabled
+
+        let mut rec_sess = record("sess-runner", "repo-b", 20, true, false);
+        rec_sess.backend = RegistryBackendBinding::UserSession;
+        rec_sess.desired_enabled = true; // explicitly enabled
+
+        let registry = build_registry(vec![rec_svc, rec_sess]);
+
+        // Multiple ticks simulated
+        for tick in 1..=3 {
+            let observations = vec![
+                obs("svc-runner", DiscoveredLifecycle::Busy, true, Some(false)),
+                obs("sess-runner", DiscoveredLifecycle::Listening, false, Some(true)),
+            ];
+            let report = reconcile_multi_runners(
+                &registry,
+                &globals(UserMode::Idle, ZenOverride::Disabled),
+                &observations,
+            );
+            let svc_res = report
+                .results
+                .iter()
+                .find(|r| r.local_runner_key == "svc-runner")
+                .unwrap();
+            let sess_res = report
+                .results
+                .iter()
+                .find(|r| r.local_runner_key == "sess-runner")
+                .unwrap();
+
+            // Service runner: explicitly disabled, worker busy -> HoldBusy, never kills Worker
+            assert_eq!(svc_res.desired, PerRunnerDesired::Drained);
+            assert_eq!(svc_res.plan, PerRunnerPlan::HoldBusy);
+            assert_eq!(svc_res.achieved, PerRunnerAchieved::Transitional);
+
+            // Session runner: enabled, Idle policy -> Full
+            assert_eq!(sess_res.desired, PerRunnerDesired::Full);
+            assert_eq!(sess_res.achieved, PerRunnerAchieved::Full);
+            assert_eq!(sess_res.plan, PerRunnerPlan::Noop);
+
+            // Registry intent is strictly preserved: never automatically re-enabled
+            assert!(
+                !registry.get("svc-runner").unwrap().desired_enabled,
+                "tick {tick} must never re-enable disabled runner"
+            );
+            assert!(
+                registry.get("sess-runner").unwrap().desired_enabled,
+                "tick {tick} session runner remains enabled"
+            );
+        }
+    }
 }

@@ -467,6 +467,131 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         out.push(("partial-admission-restore-mismatch", disposition));
     }
 
+    // Interrupted stop readback: stop accepted by SCM, but observation query fails
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock.clone(), synthetic_gate(false, true, false));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        mock.set_fail_after_queries(1, ScmApiError::Timeout);
+        let receipt = executor.advance(
+            DesiredServiceLifecycle::DrainThenStop,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        let disposition = if receipt.stage == ScmTransactionStage::Interrupted
+            && receipt.api_accepted
+            && !receipt.restore_pass
+            && receipt.achieved == AchievedServiceControl::Unknown
+            && receipt.reason.as_deref() == Some("scm.timeout")
+            && mock.stop_calls() == 1
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("interrupted-stop-readback-fail", disposition));
+    }
+
+    // Interrupted start readback: start accepted by SCM, but observation query fails
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Stopped,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock.clone(), synthetic_gate(true, false, false));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        mock.set_fail_after_queries(1, ScmApiError::Unavailable);
+        let receipt = executor.advance(
+            DesiredServiceLifecycle::RemainRunning,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        let disposition = if receipt.stage == ScmTransactionStage::Interrupted
+            && receipt.api_accepted
+            && !receipt.restore_pass
+            && receipt.achieved == AchievedServiceControl::Unknown
+            && receipt.reason.as_deref() == Some("scm.unavailable")
+            && mock.start_calls() == 1
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("interrupted-start-readback-fail", disposition));
+    }
+
+    // Restore change-start-mode readback fails: change accepted but readback query times out
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Automatic,
+            false,
+        ));
+        let executor = executor(mock.clone(), synthetic_gate(true, true, true));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        let plan = crate::capture_restore_plan(&prestate);
+        mock.set_fail_after_queries(1, ScmApiError::Timeout);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt = executor.restore(&plan, &mut admission);
+        let disposition = if receipt.stage == ScmTransactionStage::RestoreFailed
+            && receipt.api_accepted
+            && !receipt.restore_pass
+            && receipt.achieved == AchievedServiceControl::Unknown
+            && receipt.reason.as_deref() == Some("scm.timeout")
+            && mock.change_calls() == 1
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("restore-start-mode-readback-interrupted", disposition));
+    }
+
+    // Concurrent Agent state drift: prestate was Listening, but service became Busy before stop
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock.clone(), synthetic_gate(false, true, false));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        mock.set_worker_busy("fixture.scm.hux2", true);
+        let receipt = executor.advance(
+            DesiredServiceLifecycle::DrainThenStop,
+            true,
+            true,
+            true,
+            &prestate,
+        );
+        let disposition = if receipt.stage == ScmTransactionStage::WaitingIdle
+            && mock.stop_calls() == 0
+            && !receipt.restore_pass
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("concurrent-agent-state-drift", disposition));
+    }
+
     out
 }
 
