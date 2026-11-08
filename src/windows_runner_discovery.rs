@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+#[cfg(windows)]
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
     SessionDiscoverySource,
 };
 
+#[cfg(windows)]
 const SERVICE_ACCOUNT_IDENTITY_PROVIDER: &str = "windows-service-account-sha256-v1";
 
 /// Runs the pure inventory over live Service enumeration plus optional session homes.
@@ -93,6 +95,7 @@ fn current_user_identity_optional() -> Option<OpaqueIdentityReference> {
     }
 }
 
+#[cfg(windows)]
 fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
     let normalized = account.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -102,6 +105,7 @@ fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
     OpaqueIdentityReference::new(SERVICE_ACCOUNT_IDENTITY_PROVIDER, digest).ok()
 }
 
+#[cfg(windows)]
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -250,6 +254,7 @@ fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
     }
 }
 
+#[cfg(windows)]
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
