@@ -4,7 +4,6 @@
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 ACTIVE_TRAIN=RM-160H-T01-FIELD-BASELINE
 ACTIVE_BUDGET=16h
-WORKTREE=C:\Dev\src\runnermesh-160h
 WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
@@ -43,20 +42,20 @@ development-host zero-runner observation to ZenBookDuo PASS.
 - `goals/RM-160H-P01-G17-RELEASE-PREP.md` (WAITING_FOR_OWNER)
 - P01 H2 preflight points at G17 checklist
 - P03 trusted SCM auth design already on tip
+- `goals/RM-160H-P04-SELECTOR-DECISION-PREP.md` (ADR 0006 still Draft)
 
 ## Remaining / next
 
 ```text
-COMPLETED_GOALS=P00-partial(PENDING ZenBookDuo); P02-01..05_SOURCE_PASS; P02-06_PENDING_ZenBookDuo; P01_G17_prep_doc; P03_design_doc
+COMPLETED_GOALS=P00-partial(PENDING ZenBookDuo); P02-01..05_SOURCE_PASS; P02-06_PENDING_ZenBookDuo; P01_G17_prep_doc; P03_design_doc; P04_decision_prep_doc
 CANDIDATE_PR=65
-REMOTE_HEAD=bb1343e955e9c58c2ceb65ad22eeb2850943ba29
-LOCAL_EQUIVALENT_TIP=fe5e04ccc2c57fae0df9378f71cc229a8c61f702
-NOTE=git HTTPS to github.com:443 flaky; tip advanced via GitHub Git Data API (content-equivalent squash onto b5e60fe)
-NEXT_SAFE_GOAL=GT-02 P01 Owner-packet polish remaining OR P04 FakeGithub Busy/Unknown matrix source; no live gates
-BUDGET_USED≈estimate_5.5h
-BUDGET_LEFT≈10.5h_of_GT01
-CI_STATUS=awaiting_checks_on_bb1343e
+REMOTE_HEAD=see_branch_tip
+NOTE=git HTTPS to github.com:443 flaky; tip advanced via GitHub Git Data API with LF-normalized blobs
+NEXT_SAFE_GOAL=GT-02 P04-05 FakeGithub Busy/Unknown matrix source OR remaining P01 packet polish; no live gates
+BUDGET_USED≈estimate_6.0h
+BUDGET_LEFT≈10.0h_of_GT01
+CI_STATUS=awaiting_checks_after_privacy_fix
 WIP_STATUS=clean_except_untracked_goals/RM-160H-DELIVERY-PROGRAM-001_identical_to_main
-OWNER_GATES=HUX1_ZENBOOKDUO; H2; HUX2_LIVE; TRUSTED_SCM; INDEPENDENT_SECURITY_REVIEW
-RECOVERY_INSTRUCTION=resume WORKTREE=C:\Dev\src\runnermesh-160h BRANCH=feat/160h-gt01-field-baseline; prefer gh api / git Data API if git HTTPS fails; do not touch feat/lrm-09 or overwrite productization tip worktree; if local/remote tip diverge after API push, sync working tree to REMOTE_HEAD once fetch works
+OWNER_GATES=HUX1_ZENBOOKDUO; H2; HUX2_LIVE; TRUSTED_SCM; INDEPENDENT_SECURITY_REVIEW; G-ADR006
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; prefer gh Git Data API if git HTTPS fails; never embed absolute workstation roots in public checkpoints; do not touch feat/lrm-09 or overwrite productization tip worktree
 ```
