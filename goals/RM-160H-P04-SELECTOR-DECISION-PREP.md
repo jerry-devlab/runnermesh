@@ -43,4 +43,3 @@ P04_SCOPED_SIM=PASS_SOURCE_UNAPPROVED
 P04_07_HUMAN_GATE=WAITING_FOR_OWNER
 NEXT=await G-ADR006 Owner decision; no live label/workflow writes
 ```
-
