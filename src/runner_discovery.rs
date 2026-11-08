@@ -909,7 +909,7 @@ mod tests {
     fn one_service_candidate_is_observed_only() {
         let report = inventory(
             vec![service_fact(
-                "actions.runner.fixture-a",
+                "fixture.scm.generic-a",
                 r"C:\fixture\runners\a",
                 repo_scope("fixture-owner", "repo-a"),
                 101,
@@ -936,14 +936,14 @@ mod tests {
         let report = inventory(
             vec![
                 service_fact(
-                    "actions.runner.fixture-a",
+                    "fixture.scm.generic-a",
                     r"C:\fixture\runners\a",
                     repo_scope("fixture-owner", "repo-a"),
                     101,
                     DiscoveredLifecycle::Stopped,
                 ),
                 service_fact(
-                    "actions.runner.fixture-b",
+                    "fixture.scm.generic-b",
                     r"C:\fixture\runners\b",
                     repo_scope("fixture-owner", "repo-b"),
                     102,
@@ -972,7 +972,7 @@ mod tests {
     fn duplicate_home_is_refused() {
         let report = inventory(
             vec![service_fact(
-                "actions.runner.fixture-a",
+                "fixture.scm.generic-a",
                 r"C:\fixture\runners\shared",
                 repo_scope("fixture-owner", "repo-a"),
                 101,
@@ -1027,7 +1027,7 @@ mod tests {
         let scope = repo_scope("fixture-owner", "same-repo");
         let report = inventory(
             vec![service_fact(
-                "actions.runner.fixture-a",
+                "fixture.scm.generic-a",
                 r"C:\fixture\runners\a",
                 scope.clone(),
                 42,
@@ -1055,14 +1055,14 @@ mod tests {
         let report = inventory(
             vec![
                 service_fact(
-                    "actions.runner.fixture-a",
+                    "fixture.scm.generic-a",
                     r"C:\fixture\runners\a",
                     scope.clone(),
                     101,
                     DiscoveredLifecycle::Listening,
                 ),
                 service_fact(
-                    "actions.runner.fixture-b",
+                    "fixture.scm.generic-b",
                     r"C:\fixture\runners\b",
                     scope,
                     102,
@@ -1084,7 +1084,7 @@ mod tests {
     fn unknown_lifecycle_is_preserved_and_not_treated_as_stopped() {
         let report = inventory(
             vec![service_fact(
-                "actions.runner.fixture-unknown",
+                "fixture.scm.generic-unknown",
                 r"C:\fixture\runners\unknown",
                 repo_scope("fixture-owner", "repo-unknown"),
                 777,
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn identity_filter_refuses_mismatched_execution_identity() {
         let mut fact = service_fact(
-            "actions.runner.fixture-mismatch",
+            "fixture.scm.generic-mismatch",
             r"C:\fixture\runners\mismatch",
             repo_scope("fixture-owner", "repo-mismatch"),
             88,
@@ -1172,7 +1172,7 @@ mod tests {
     #[test]
     fn missing_identity_evidence_is_refused() {
         let mut fact = service_fact(
-            "actions.runner.fixture-missing",
+            "fixture.scm.generic-missing",
             r"C:\fixture\runners\missing",
             repo_scope("fixture-owner", "repo-missing"),
             3,
@@ -1192,7 +1192,7 @@ mod tests {
         // Without an expected-identity filter, incomplete server identity remains
         // visible as ObservedOnly but must not be enrollment-eligible.
         let mut fact = service_fact(
-            "actions.runner.fixture-incomplete",
+            "fixture.scm.generic-incomplete",
             r"C:\fixture\runners\incomplete",
             repo_scope("fixture-owner", "repo-incomplete"),
             3,
@@ -1245,7 +1245,7 @@ mod tests {
         assert!(super::read_only_boundary::discovery_is_read_only::<Inventory>());
         let report = inventory(
             vec![service_fact(
-                "actions.runner.fixture-boundary",
+                "fixture.scm.generic-boundary",
                 r"C:\fixture\runners\boundary",
                 repo_scope("fixture-owner", "repo-boundary"),
                 1,
@@ -1265,7 +1265,7 @@ mod tests {
         let home = r"C:\fixture\runners\key";
         let report = inventory(
             vec![service_fact(
-                "actions.runner.fixture-key",
+                "fixture.scm.generic-key",
                 home,
                 repo_scope("fixture-owner", "repo-key"),
                 12,
@@ -1279,7 +1279,7 @@ mod tests {
         let again = discovery_key(
             RunnerBackendKind::WindowsService,
             Path::new(home),
-            Some("actions.runner.fixture-key"),
+            Some("fixture.scm.generic-key"),
             None,
         );
         assert_eq!(key, &again);
@@ -1302,5 +1302,73 @@ mod tests {
         assert!(report.candidates.is_empty());
         assert!(report.read_only);
         assert!(!report.exhaustive);
+        assert_eq!(report.service_enumeration, DiscoveryEnumerationStatus::Ok);
+    }
+
+    #[test]
+    fn nonempty_synthetic_inventory_separates_two_candidates_and_collisions() {
+        let report = inventory(
+            vec![
+                service_fact(
+                    "fixture.scm.a",
+                    r"C:\fixture\runners\a",
+                    repo_scope("fixture-owner", "repo-a"),
+                    1,
+                    DiscoveredLifecycle::Listening,
+                ),
+                service_fact(
+                    "fixture.scm.b",
+                    r"C:\fixture\runners\b",
+                    repo_scope("fixture-owner", "repo-b"),
+                    2,
+                    DiscoveredLifecycle::Stopped,
+                ),
+            ],
+            vec![session_fact(
+                r"C:\fixture\runners\a",
+                repo_scope("fixture-owner", "repo-a"),
+                1,
+                true,
+                DiscoveredLifecycle::Unknown,
+            )],
+            Vec::new(),
+        )
+        .discover();
+        assert!(report.candidates.len() >= 2);
+        // Duplicate home between service+session must refuse at least one.
+        assert!(report.refused().count() >= 1);
+        // Service Listening must not imply Worker Busy without process evidence.
+        let listening = report.candidates.iter().find(|c| {
+            c.service
+                .as_ref()
+                .is_some_and(|s| s.state == DiscoveredLifecycle::Listening)
+        });
+        if let Some(candidate) = listening {
+            assert_ne!(candidate.observed_lifecycle, DiscoveredLifecycle::Busy);
+        }
+    }
+
+    #[test]
+    fn unavailable_service_enumeration_marks_incomplete_not_false_empty_success() {
+        #[derive(Clone, Default)]
+        struct UnavailableServices;
+        impl ServiceDiscoverySource for UnavailableServices {
+            fn list_service_candidates(&self) -> Vec<ServiceCandidateFact> {
+                Vec::new()
+            }
+            fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+                DiscoveryEnumerationStatus::Unavailable
+            }
+        }
+        let report = RunnerDiscoveryInventory::new(
+            UnavailableServices,
+            EmptySessionDiscoverySource,
+            EmptyUnsupportedDiscoverySource,
+            DiscoveryIdentityFilter::default(),
+        )
+        .discover();
+        assert!(report.candidates.is_empty());
+        assert!(report.is_incomplete());
+        assert!(report.is_false_empty_success());
     }
 }

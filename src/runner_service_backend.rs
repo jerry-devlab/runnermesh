@@ -227,7 +227,7 @@ mod tests {
 
     fn observation(state: DiscoveredLifecycle) -> ServiceObservation {
         ServiceObservation {
-            service_name: "actions.runner.fixture".to_owned(),
+            service_name: "fixture.scm.generic".to_owned(),
             state,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn prepare_stop_refuses_busy_and_unknown_without_scm_call() {
         let backend = SyntheticWindowsServiceBackend;
-        let record = record("actions.runner.fixture");
+        let record = record("fixture.scm.generic");
         assert!(matches!(
             backend.prepare_stop_when_idle(&record, &observation(DiscoveredLifecycle::Busy)),
             ServicePrepareOutcome::Refused(ServiceBackendRefusal::BusyWorker)
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(
             backend.prepare_stop_when_idle(&record, &observation(DiscoveredLifecycle::Listening)),
             ServicePrepareOutcome::Planned(PreparedServiceAction::Stop {
-                service_name: "actions.runner.fixture".to_owned()
+                service_name: "fixture.scm.generic".to_owned()
             })
         );
     }
@@ -266,7 +266,7 @@ mod tests {
         let mut unverified = observation(DiscoveredLifecycle::Stopped);
         unverified.ownership_verified = false;
         assert!(matches!(
-            backend.prepare_start(&record("actions.runner.fixture"), &unverified),
+            backend.prepare_start(&record("fixture.scm.generic"), &unverified),
             ServicePrepareOutcome::Refused(ServiceBackendRefusal::OwnershipUnverified)
         ));
     }
@@ -274,12 +274,12 @@ mod tests {
     #[test]
     fn start_mode_change_is_transactional_plan_only() {
         let backend = SyntheticWindowsServiceBackend;
-        let record = record("actions.runner.fixture");
+        let record = record("fixture.scm.generic");
         let observed = observation(DiscoveredLifecycle::Stopped);
         assert_eq!(
             backend.prepare_set_start_mode(&record, &observed, ServiceStartMode::Disabled),
             ServicePrepareOutcome::Planned(PreparedServiceAction::SetStartMode {
-                service_name: "actions.runner.fixture".to_owned(),
+                service_name: "fixture.scm.generic".to_owned(),
                 from: ServiceStartMode::Manual,
                 to: ServiceStartMode::Disabled,
             })

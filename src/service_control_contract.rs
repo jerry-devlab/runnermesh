@@ -40,6 +40,9 @@ pub enum AchievedServiceControl {
 }
 
 /// Prestate capture required before any Owner-authorized mutation.
+///
+/// Binds the exact service, image token, execution identity, and transaction so
+/// a restore plan cannot be applied to a drifted identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePrestateCapture {
@@ -50,6 +53,12 @@ pub struct ServicePrestateCapture {
     pub ownership_verified: bool,
     pub worker_busy: bool,
     pub admission_selector_absent: bool,
+    /// Opaque image fingerprint (never a raw private path in public receipts).
+    pub image_token: String,
+    /// Opaque execution-identity fingerprint for the bound service account.
+    pub execution_identity_token: String,
+    /// Stable id shared by prestate and the derived restore plan.
+    pub transaction_id: String,
 }
 
 /// Restore plan derived from prestate. Execution remains Owner-gated.
@@ -60,6 +69,10 @@ pub struct ServiceRestorePlan {
     pub restore_start_mode: ServiceStartMode,
     pub restore_running: bool,
     pub requires_owner_gate: bool,
+    pub image_token: String,
+    pub execution_identity_token: String,
+    pub transaction_id: String,
+    pub admission_selector_absent: bool,
 }
 
 /// One step in the prepare-only control state machine.
@@ -80,11 +93,32 @@ pub enum ServiceControlPhase {
 }
 
 /// Evaluates the next prepare-only phase without touching SCM.
+///
+/// `managed_admission` forces StayStopped through the same withdraw→idle→stop
+/// sequence as DrainThenStop. A direct PrepareStop while a managed selector may
+/// still admit work is refused as an unsafe shortcut.
 pub fn next_control_phase(
     desired: DesiredServiceLifecycle,
     observed: &ServiceObservation,
     admission_selector_absent: bool,
     worker_busy: bool,
+) -> ServiceControlPhase {
+    next_control_phase_with_admission(
+        desired,
+        observed,
+        admission_selector_absent,
+        worker_busy,
+        true,
+    )
+}
+
+/// Same as [`next_control_phase`], with an explicit managed-admission flag.
+pub fn next_control_phase_with_admission(
+    desired: DesiredServiceLifecycle,
+    observed: &ServiceObservation,
+    admission_selector_absent: bool,
+    worker_busy: bool,
+    managed_admission: bool,
 ) -> ServiceControlPhase {
     if !observed.ownership_verified || !observed.image_path_matches {
         return ServiceControlPhase::Refused {
@@ -109,23 +143,24 @@ pub fn next_control_phase(
                 ServiceControlPhase::PrepareStart
             }
         }
-        DesiredServiceLifecycle::StayStopped => {
-            if matches!(observed.state, DiscoveredLifecycle::Stopped) {
-                ServiceControlPhase::Observe
-            } else if worker_busy {
-                ServiceControlPhase::Refused {
-                    reason: ServiceBackendRefusal::BusyWorker.as_str().to_owned(),
-                }
-            } else {
-                ServiceControlPhase::PrepareStop
+        DesiredServiceLifecycle::StayStopped | DesiredServiceLifecycle::DrainThenStop => {
+            // Managed admission must withdraw before any stop attempt. Unmanaged
+            // runners still refuse Busy Workers and Unknown states.
+            if managed_admission && !admission_selector_absent {
+                return ServiceControlPhase::WithdrawAdmission;
             }
-        }
-        DesiredServiceLifecycle::DrainThenStop => {
-            if !admission_selector_absent {
-                ServiceControlPhase::WithdrawAdmission
-            } else if worker_busy {
-                ServiceControlPhase::WaitIdle { worker_busy: true }
-            } else if matches!(observed.state, DiscoveredLifecycle::Stopped) {
+            if worker_busy {
+                return if matches!(desired, DesiredServiceLifecycle::DrainThenStop)
+                    || managed_admission
+                {
+                    ServiceControlPhase::WaitIdle { worker_busy: true }
+                } else {
+                    ServiceControlPhase::Refused {
+                        reason: ServiceBackendRefusal::BusyWorker.as_str().to_owned(),
+                    }
+                };
+            }
+            if matches!(observed.state, DiscoveredLifecycle::Stopped) {
                 ServiceControlPhase::Observe
             } else {
                 ServiceControlPhase::PrepareStop
@@ -144,6 +179,10 @@ pub fn capture_restore_plan(prestate: &ServicePrestateCapture) -> ServiceRestore
             DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
         ),
         requires_owner_gate: true,
+        image_token: prestate.image_token.clone(),
+        execution_identity_token: prestate.execution_identity_token.clone(),
+        transaction_id: prestate.transaction_id.clone(),
+        admission_selector_absent: prestate.admission_selector_absent,
     }
 }
 
@@ -192,7 +231,7 @@ mod tests {
 
     fn observation(state: DiscoveredLifecycle, busy_safe: bool) -> ServiceObservation {
         ServiceObservation {
-            service_name: "actions.runner.fixture".to_owned(),
+            service_name: "fixture.scm.generic".to_owned(),
             state,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,
@@ -225,26 +264,65 @@ mod tests {
             wait,
             ServiceControlPhase::WaitIdle { worker_busy: true }
         ));
-        let refused =
+        // Managed StayStopped must not skip Worker protection.
+        let wait_stay =
             next_control_phase(DesiredServiceLifecycle::StayStopped, &observed, true, true);
-        assert!(matches!(refused, ServiceControlPhase::Refused { .. }));
+        assert!(matches!(
+            wait_stay,
+            ServiceControlPhase::WaitIdle { worker_busy: true }
+        ));
+    }
+
+    #[test]
+    fn stay_stopped_with_managed_admission_withdraws_before_stop() {
+        let observed = observation(DiscoveredLifecycle::Listening, true);
+        let phase = next_control_phase_with_admission(
+            DesiredServiceLifecycle::StayStopped,
+            &observed,
+            false,
+            false,
+            true,
+        );
+        assert!(matches!(phase, ServiceControlPhase::WithdrawAdmission));
+    }
+
+    #[test]
+    fn unmanaged_stay_stopped_may_prepare_stop_when_idle() {
+        let observed = observation(DiscoveredLifecycle::Listening, true);
+        let phase = next_control_phase_with_admission(
+            DesiredServiceLifecycle::StayStopped,
+            &observed,
+            false,
+            false,
+            false,
+        );
+        assert!(matches!(phase, ServiceControlPhase::PrepareStop));
     }
 
     #[test]
     fn restore_plan_always_requires_owner_gate() {
         let prestate = ServicePrestateCapture {
-            service_name: "actions.runner.fixture".to_owned(),
+            service_name: "fixture.scm.generic".to_owned(),
             state: DiscoveredLifecycle::Listening,
             start_mode: ServiceStartMode::Automatic,
             image_path_matches: true,
             ownership_verified: true,
             worker_busy: false,
             admission_selector_absent: false,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            transaction_id: "tx-restore-1".to_owned(),
         };
         let plan = capture_restore_plan(&prestate);
         assert!(plan.requires_owner_gate);
         assert!(plan.restore_running);
         assert_eq!(plan.restore_start_mode, ServiceStartMode::Automatic);
+        assert_eq!(plan.transaction_id, prestate.transaction_id);
+        assert_eq!(plan.image_token, prestate.image_token);
+        assert_eq!(
+            plan.execution_identity_token,
+            prestate.execution_identity_token
+        );
     }
 
     #[test]

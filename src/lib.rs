@@ -11,6 +11,7 @@ mod github_transport;
 mod h1_artifact;
 mod h1_live;
 mod host;
+mod hux2_synthetic;
 mod hux_sandbox;
 mod installation;
 mod ipc;
@@ -42,6 +43,7 @@ mod windows_github;
 #[cfg(windows)]
 pub mod windows_preferences;
 mod windows_runner_discovery;
+mod windows_scm_executor;
 #[cfg(windows)]
 pub mod windows_supervisor;
 #[cfg(windows)]
@@ -88,6 +90,10 @@ pub use host::{
     AdoptionRefusal, ExistingListenerAdoption, HostEvidence, HostHealth, HostSnapshot, HostSource,
     RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
     RecoverySource, RecoveryTrigger, SessionState, WindowsHostSource,
+};
+pub use hux2_synthetic::{
+    run_hux2_synthetic_failure_matrix, run_hux2_synthetic_happy_path, Hux2SyntheticReceipt,
+    SyntheticDisposition,
 };
 pub use hux_sandbox::{
     assert_registry_intent_round_trip, prepare_two_runner_sandbox, HuxSandboxLayout,
@@ -188,8 +194,9 @@ pub use scoped_admission_sim::{
 };
 pub use service_control_contract::{
     achieved_from_observation, capture_restore_plan, mutation_rights, next_control_phase,
-    read_only_rights, AchievedServiceControl, DesiredServiceLifecycle, ServiceControlPhase,
-    ServiceControlRight, ServicePrestateCapture, ServiceRestorePlan,
+    next_control_phase_with_admission, read_only_rights, AchievedServiceControl,
+    DesiredServiceLifecycle, ServiceControlPhase, ServiceControlRight, ServicePrestateCapture,
+    ServiceRestorePlan,
 };
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
@@ -212,6 +219,13 @@ pub use windows_github::{
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source,
     ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
+};
+pub use windows_scm_executor::{
+    opaque_image_token, AdmissionSelectorObserver, FakeGithubAdmissionBackend,
+    GatedWindowsScmBackend, LiveScmExecutionGate, MockScmBackend, MockServiceRecord, ScmApiError,
+    ScmControlBackend, ScmControlExecutor, ScmExactSnapshot, ScmTransactionReceipt,
+    ScmTransactionStage, SyntheticScmTestGrant, TrustedOwnerAuthorizationRequest,
+    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
