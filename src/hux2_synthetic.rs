@@ -44,13 +44,8 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
         allow_stop: true,
         allow_change_config: true,
     };
-    let executor = ScmControlExecutor::new(
-        mock.clone(),
-        "fixture.scm.hux2",
-        "hux2-image",
-        true,
-        gate,
-    );
+    let executor =
+        ScmControlExecutor::new(mock.clone(), "fixture.scm.hux2", "hux2-image", true, gate);
 
     // 1–2 prestate + identity
     let prestate = match executor.capture_prestate(false, false) {

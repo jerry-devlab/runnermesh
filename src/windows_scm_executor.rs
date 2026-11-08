@@ -583,13 +583,8 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
         };
-        let executor = ScmControlExecutor::new(
-            mock.clone(),
-            "fixture.scm.a",
-            "fixture-image",
-            true,
-            gate,
-        );
+        let executor =
+            ScmControlExecutor::new(mock.clone(), "fixture.scm.a", "fixture-image", true, gate);
         let prestate = executor.capture_prestate(false, true).unwrap();
         let receipt = executor.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -615,13 +610,8 @@ mod tests {
             allow_start: false,
             allow_change_config: false,
         };
-        let executor = ScmControlExecutor::new(
-            mock.clone(),
-            "fixture.scm.a",
-            "fixture-image",
-            true,
-            gate,
-        );
+        let executor =
+            ScmControlExecutor::new(mock.clone(), "fixture.scm.a", "fixture-image", true, gate);
         let prestate = executor.capture_prestate(true, true).unwrap();
         let receipt = executor.advance(
             DesiredServiceLifecycle::DrainThenStop,
