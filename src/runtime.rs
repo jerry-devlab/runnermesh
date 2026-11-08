@@ -487,13 +487,28 @@ pub struct DoctorReport {
 pub enum AgentCommand {
     GetSnapshot,
     RunDoctor,
-    SetMode { mode: UserMode },
-    SetZen { zen: ZenOverride },
-    SetProbeEnabled { probe_id: ProbeId, enabled: bool },
-    SetUiPreferences { ui_preferences: UiPreferences },
-    SetStartOnLoginPreference { enabled: bool },
-    SetAutoIdleThreshold { seconds: u64 },
-    SetUpdateChecksEnabled { enabled: bool },
+    SetMode {
+        mode: UserMode,
+    },
+    SetZen {
+        zen: ZenOverride,
+    },
+    SetProbeEnabled {
+        probe_id: ProbeId,
+        enabled: bool,
+    },
+    SetUiPreferences {
+        ui_preferences: UiPreferences,
+    },
+    SetStartOnLoginPreference {
+        enabled: bool,
+    },
+    SetAutoIdleThreshold {
+        seconds: u64,
+    },
+    SetUpdateChecksEnabled {
+        enabled: bool,
+    },
     CheckForUpdates,
     OpenConfig,
     OpenDataDirectory,
@@ -501,6 +516,35 @@ pub enum AgentCommand {
     ExitAfterDrain,
     GetRunnerStatus,
     GetVersion,
+    RunnersList,
+    RunnersDiscover,
+    RunnersInspect {
+        local_runner_key: String,
+    },
+    RunnersEnroll {
+        local_runner_key: String,
+        prepare_only: bool,
+    },
+    RunnersEnable {
+        local_runner_key: String,
+        prepare_only: bool,
+    },
+    RunnersDisable {
+        local_runner_key: String,
+        when_idle: bool,
+        prepare_only: bool,
+    },
+    RunnersReconcile {
+        local_runner_key: String,
+        prepare_only: bool,
+    },
+    RunnersForget {
+        local_runner_key: String,
+        prepare_only: bool,
+    },
+    RunnersStatus {
+        local_runner_key: Option<String>,
+    },
 }
 
 /// Typed response from the Agent. Errors use stable machine reason codes so
@@ -512,6 +556,7 @@ pub enum AgentResponse {
     Doctor(DoctorReport),
     Accepted { snapshot: AgentSnapshot },
     Rejected { reason_code: ReasonCode },
+    Runners(crate::RunnerCommandReport),
 }
 
 #[cfg(test)]

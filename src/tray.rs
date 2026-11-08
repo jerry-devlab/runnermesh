@@ -274,6 +274,11 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
             }
             AgentResponse::Doctor(report) => Ok(TrayActionResult::Doctor(report)),
             AgentResponse::Rejected { reason_code } => Ok(TrayActionResult::Rejected(reason_code)),
+            // LRM-07 owns tray runners presentation; LRM-03 only extends the IPC
+            // contract. Unexpected runners payloads are rejected, not applied.
+            AgentResponse::Runners(_) => Ok(TrayActionResult::Rejected(
+                crate::ReasonCode::new("runners-tray-unsupported").expect("static reason"),
+            )),
         }
     }
 

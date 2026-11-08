@@ -12,11 +12,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    decide_admission, AdmissionControlSnapshot, AdmissionDecision, AgentCommand, AgentHealth,
-    AgentResponse, AgentSnapshot, BuildProvenance, DesiredAdmissionState, DoctorCheck,
-    DoctorReport, DoctorStatus, ExecutionIdentityEvidence, HardSafetyState, LinkKind, LinkSnapshot,
-    LinkState, OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-    RunnerPhase, SystemPreferences, UiPreferences, UserMode, ZenOverride,
+    decide_admission, handle_runners_command, AdmissionControlSnapshot, AdmissionDecision,
+    AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
+    DesiredAdmissionState, DiscoveryReport, DoctorCheck, DoctorReport, DoctorStatus,
+    ExecutionIdentityEvidence, HardSafetyState, LinkKind, LinkSnapshot, LinkState,
+    OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
+    RunnerRegistryEditor, SystemPreferences, UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -248,6 +249,8 @@ pub struct AgentCore<O, R, S> {
     observation: AgentObservation,
     decision: AdmissionDecision,
     admission_control: AdmissionControlSnapshot,
+    runner_registry: RunnerRegistryEditor,
+    last_runner_discovery: Option<DiscoveryReport>,
 }
 
 impl<O, R, S> AgentCore<O, R, S>
@@ -280,7 +283,19 @@ where
             observation,
             decision,
             admission_control,
+            runner_registry: RunnerRegistryEditor::empty(),
+            last_runner_discovery: None,
         })
+    }
+
+    /// Injects a read-only discovery report for subsequent enroll/inspect flows.
+    /// Discovery itself remains non-mutating.
+    pub fn set_runner_discovery(&mut self, report: DiscoveryReport) {
+        self.last_runner_discovery = Some(report);
+    }
+
+    pub fn runner_registry(&self) -> &crate::RunnerRegistry {
+        self.runner_registry.registry()
     }
 
     pub fn config(&self) -> &AgentConfig {
@@ -385,6 +400,57 @@ where
             | AgentCommand::OpenLogs
             | AgentCommand::ExitAfterDrain => Ok(AgentResponse::Rejected {
                 reason_code: static_reason("not-implemented"),
+            }),
+            AgentCommand::RunnersList
+            | AgentCommand::RunnersDiscover
+            | AgentCommand::RunnersInspect { .. }
+            | AgentCommand::RunnersEnroll { .. }
+            | AgentCommand::RunnersEnable { .. }
+            | AgentCommand::RunnersDisable { .. }
+            | AgentCommand::RunnersReconcile { .. }
+            | AgentCommand::RunnersForget { .. }
+            | AgentCommand::RunnersStatus { .. } => self.handle_runners_command(command),
+        }
+    }
+
+    fn handle_runners_command(
+        &mut self,
+        command: AgentCommand,
+    ) -> Result<AgentResponse, AgentCoreError> {
+        if matches!(command, AgentCommand::RunnersDiscover) {
+            // Without an injected source inventory, discover remains honest:
+            // empty, read-only, and non-exhaustive.
+            if self.last_runner_discovery.is_none() {
+                self.last_runner_discovery = Some(DiscoveryReport {
+                    schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+                    read_only: true,
+                    exhaustive: false,
+                    candidates: Vec::new(),
+                });
+            }
+        }
+        match handle_runners_command(
+            &mut self.runner_registry,
+            self.last_runner_discovery.as_ref(),
+            &command,
+        ) {
+            Ok(report) => Ok(AgentResponse::Runners(report)),
+            Err(crate::RegistryError::NotFound) => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("runners-not-found"),
+            }),
+            Err(crate::RegistryError::NotEnrollmentEligible) => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("runners-not-enrollment-eligible"),
+            }),
+            Err(crate::RegistryError::SameScopeManagedAdmissionCollision) => {
+                Ok(AgentResponse::Rejected {
+                    reason_code: static_reason("runners-same-scope-collision"),
+                })
+            }
+            Err(crate::RegistryError::Forgotten) => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("runners-forgotten"),
+            }),
+            Err(_) => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("runners-command-failed"),
             }),
         }
     }
