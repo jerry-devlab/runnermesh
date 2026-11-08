@@ -293,18 +293,11 @@ fn service_fact_from_scm(
             .collect();
         let service = OpenServiceW(scm, wide_name.as_ptr(), SERVICE_QUERY_CONFIG);
         if service.is_null() {
-            return Some(ServiceCandidateFact {
-                service_name: service_name.to_owned(),
-                display_name,
-                image_path: None,
-                runner_home: PathBuf::from(format!(r"C:\unknown\{service_name}")),
-                work_root: None,
-                registration_scope: None,
-                runner_id: None,
-                expected_runner_name: None,
-                execution_identity_ref: None,
-                state: DiscoveredLifecycle::Unknown,
-            });
+            // Incomplete SCM evidence must not invent a runner home or promote
+            // an unverified candidate into ObservedOnly/Enrolled paths.
+            let _ = display_name;
+            let _ = state;
+            return None;
         }
         let mut needed = 0u32;
         QueryServiceConfigW(service, ptr::null_mut(), 0, &mut needed);
