@@ -26,8 +26,8 @@ LRM09_PR=59 HEAD=ed68ba7 CI=PASS DRAFT
 LRM_RUNTIME_BRANCH=feat/lrm-runtime-integration
 LRM_RUNTIME_BASE=ed68ba7 (#59 DRAINED ADR0004 alignment)
 LRM_RUNTIME_PR=61 DRAFT
-LRM_RUNTIME_HEAD=4a68d7053e4d72809482f44ad32cb056e922b31d
-LRM_RUNTIME_CI=PASS run=42455171720
+LRM_RUNTIME_HEAD=pending_scoped_sim_push
+LRM_RUNTIME_CI=PASS_ON_4a68d70 run=42455171720; follow-up commits awaiting re-CI
 LRM_REMAINING=keep Draft off frozen v0.1; live Service Control NOT_QUALIFIED; no force-merge onto main
 
 # Master train
@@ -37,6 +37,7 @@ T1=PASS
 T2=PASS
 T3=PASS
 T4=PASS local+hosted CI on #61
+POST_T4=scoped_admission_sim dry-run (unapproved migration shape)
 DISPOSITION=PASS_SOURCE_CANDIDATE
 
 # v0.1 lane

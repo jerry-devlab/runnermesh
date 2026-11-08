@@ -30,6 +30,7 @@ mod runner_service_backend;
 mod runner_session_backend;
 mod runtime;
 mod runtime_binding;
+mod scoped_admission_sim;
 mod supervisor;
 mod tray;
 mod update;
@@ -172,6 +173,11 @@ pub use runtime_binding::current_windows_identity_reference;
 pub use runtime_binding::{
     InstalledRuntimeBinding, INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION,
     WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+};
+pub use scoped_admission_sim::{
+    evaluate_v01_selector_compatibility, propose_scoped_selector_migration,
+    ScopedSelectorMigrationPlan, SelectorCompatibility, SimulatedAdmissionBinding,
+    PROPOSED_SCOPED_SELECTOR_PREFIX,
 };
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
