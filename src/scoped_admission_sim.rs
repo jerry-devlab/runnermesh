@@ -183,6 +183,28 @@ mod tests {
     }
 
     #[test]
+    fn unmanaged_same_scope_runners_remain_compatible_without_reserved_claim() {
+        let bindings = vec![
+            SimulatedAdmissionBinding {
+                local_runner_key: "a".into(),
+                scope: repo_scope(),
+                managed_admission: false,
+                claimed_selector: None,
+            },
+            SimulatedAdmissionBinding {
+                local_runner_key: "b".into(),
+                scope: repo_scope(),
+                managed_admission: false,
+                claimed_selector: None,
+            },
+        ];
+        let outcomes = evaluate_v01_selector_compatibility(&bindings);
+        assert!(outcomes
+            .iter()
+            .all(|o| matches!(o, SelectorCompatibility::Compatible)));
+    }
+
+    #[test]
     fn proposed_namespaced_selectors_do_not_silently_unlock_v01_collision() {
         // Even if each runner *proposes* a distinct scoped selector, the frozen
         // v0.1 evaluator still blocks dual managed claims on the reserved label

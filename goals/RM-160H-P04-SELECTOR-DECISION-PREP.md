@@ -37,7 +37,10 @@ P04_01_ADR0006=DRAFT_NOT_ACCEPTED
 P04_02_V01_PRESERVE_RUNNERMESH_ADMIT=PASS_SOURCE
 P04_05_FAKE_GITHUB_MATRIX=PASS_SOURCE
   # lag, stale token, permission denial, partial restore, link-loss,
-  # race-during-lag, identity/name drift observe fail-closed
+  # race-during-lag, identity/name drift, scope-drift, racing assignment
+P04_SCOPED_SIM=PASS_SOURCE_UNAPPROVED
+  # proposed namespaced selectors remain approved=false; unmanaged same-scope OK
 P04_07_HUMAN_GATE=WAITING_FOR_OWNER
-NEXT=P06/Tray polish remaining OR P05 deeper controller wiring; no live writes
+NEXT=await G-ADR006 Owner decision; no live label/workflow writes
 ```
+
