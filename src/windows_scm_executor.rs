@@ -295,6 +295,8 @@ pub struct MockScmBackend {
 struct MockScmState {
     services: BTreeMap<String, MockServiceRecord>,
     fail_next: Option<ScmApiError>,
+    /// Remaining successful `query_exact` calls before the next query fails.
+    fail_after_queries: Option<(u32, ScmApiError)>,
     fail_change: Option<ScmApiError>,
     stop_calls: u32,
     start_calls: u32,
@@ -328,6 +330,14 @@ impl MockScmBackend {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .fail_next = Some(error);
+    }
+
+    /// Allow `successful_before_fail` more successful queries, then fail once.
+    pub fn set_fail_after_queries(&self, successful_before_fail: u32, error: ScmApiError) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fail_after_queries = Some((successful_before_fail, error));
     }
 
     pub fn set_fail_change(&self, error: ScmApiError) {
@@ -387,10 +397,15 @@ impl ScmControlBackend for MockScmBackend {
     fn query_exact(&self, service_name: &str) -> Result<ScmExactSnapshot, ScmApiError> {
         self.take_fail()?;
         let key = service_name.to_ascii_lowercase();
-        let record = self
-            .inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((remaining, error)) = guard.fail_after_queries {
+            if remaining == 0 {
+                guard.fail_after_queries = None;
+                return Err(error);
+            }
+            guard.fail_after_queries = Some((remaining.saturating_sub(1), error));
+        }
+        let record = guard
             .services
             .get(&key)
             .cloned()
@@ -1705,6 +1720,29 @@ mod tests {
         );
         assert_eq!(receipt.stage, ScmTransactionStage::StopReadback);
         assert_eq!(receipt.achieved, AchievedServiceControl::Stopped);
+        assert_eq!(mock.stop_calls(), 1);
+    }
+
+    #[test]
+    fn stop_accepted_but_readback_failure_is_interrupted_not_restore_pass() {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_listening());
+        let exec = executor(mock.clone(), open_synthetic_gate());
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        // capture_prestate already queried once. Allow one more successful query
+        // (advance planning observe), then fail the post-stop readback.
+        mock.set_fail_after_queries(1, ScmApiError::Timeout);
+        let receipt = exec.advance(
+            DesiredServiceLifecycle::DrainThenStop,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        assert_eq!(receipt.stage, ScmTransactionStage::Interrupted);
+        assert!(!receipt.restore_pass);
+        assert_eq!(receipt.achieved, AchievedServiceControl::Unknown);
+        assert_eq!(receipt.reason.as_deref(), Some("scm.timeout"));
         assert_eq!(mock.stop_calls(), 1);
     }
 
