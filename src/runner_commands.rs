@@ -573,9 +573,7 @@ mod tests {
         .unwrap();
         assert_eq!(discovered.discovered_candidates[0].disposition, "REFUSED");
         assert_eq!(
-            discovered.discovered_candidates[0]
-                .refusal_reason
-                .as_deref(),
+            discovered.discovered_candidates[0].refusal_reason.as_deref(),
             Some("discovery.duplicate-home")
         );
         assert!(!discovered.discovered_candidates[0].enrollment_eligible);

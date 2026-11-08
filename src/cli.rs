@@ -430,10 +430,7 @@ fn render_runners_text(report: &crate::RunnerCommandReport) -> String {
         lines.push(format!("discovered: {key}"));
     }
     for candidate in &report.discovered_candidates {
-        let refusal = candidate
-            .refusal_reason
-            .as_deref()
-            .unwrap_or("none");
+        let refusal = candidate.refusal_reason.as_deref().unwrap_or("none");
         lines.push(format!(
             "candidate: {} backend={} disposition={} eligible={} collision={} refusal={}",
             candidate.local_discovery_key,
