@@ -188,7 +188,25 @@ fn reconcile_disabled(
     record: &RunnerRecord,
     observed: &PerRunnerObservation,
 ) -> PerRunnerReconcileResult {
-    if observed.worker_present || observed.lifecycle == DiscoveredLifecycle::Busy {
+    let busy = observed.worker_present || observed.lifecycle == DiscoveredLifecycle::Busy;
+    let selector_absent = observed.selector_present == Some(false);
+    let selector_present = observed.selector_present == Some(true);
+
+    // Busy with selector still present: withdraw admission now; never defer
+    // withdrawal solely because a Worker is held.
+    if busy && selector_present {
+        return result(
+            record,
+            PerRunnerDesired::Drained,
+            observed.lifecycle,
+            AdmissionLifecycleState::WithdrawRequested,
+            PerRunnerAchieved::Transitional,
+            PerRunnerPlan::WithdrawSelector,
+            "runners-disable-busy-withdraw",
+        );
+    }
+    // Busy with selector already absent: preserve Worker, do not claim drained.
+    if busy {
         return result(
             record,
             PerRunnerDesired::Drained,
@@ -199,7 +217,6 @@ fn reconcile_disabled(
             "runners-disable-busy-hold",
         );
     }
-    let selector_absent = observed.selector_present == Some(false);
     if selector_absent && observed.lifecycle == DiscoveredLifecycle::Stopped {
         return result(
             record,
@@ -231,7 +248,22 @@ fn reconcile_policy_drain(
         NodeState::Offline => PerRunnerDesired::Offline,
         _ => PerRunnerDesired::Drained,
     };
-    if observed.worker_present || observed.lifecycle == DiscoveredLifecycle::Busy {
+    let busy = observed.worker_present || observed.lifecycle == DiscoveredLifecycle::Busy;
+    let selector_absent = observed.selector_present == Some(false);
+    let selector_present = observed.selector_present == Some(true);
+
+    if busy && selector_present {
+        return result(
+            record,
+            desired,
+            observed.lifecycle,
+            AdmissionLifecycleState::WithdrawRequested,
+            PerRunnerAchieved::Transitional,
+            PerRunnerPlan::WithdrawSelector,
+            global.reason_code.as_str(),
+        );
+    }
+    if busy {
         return result(
             record,
             desired,
@@ -242,23 +274,31 @@ fn reconcile_policy_drain(
             global.reason_code.as_str(),
         );
     }
-    if observed.selector_present == Some(false) {
+    // Selector absence alone does not prove Listener stopped / Offline achieved.
+    if selector_absent && observed.lifecycle == DiscoveredLifecycle::Stopped {
         let achieved = match desired {
             PerRunnerDesired::Offline => PerRunnerAchieved::Offline,
             _ => PerRunnerAchieved::Drained,
-        };
-        let lifecycle = match desired {
-            PerRunnerDesired::Offline => AdmissionLifecycleState::Drained,
-            _ => AdmissionLifecycleState::Drained,
         };
         return result(
             record,
             desired,
             observed.lifecycle,
-            lifecycle,
+            AdmissionLifecycleState::Drained,
             achieved,
             PerRunnerPlan::Noop,
             global.reason_code.as_str(),
+        );
+    }
+    if selector_absent {
+        return result(
+            record,
+            desired,
+            observed.lifecycle,
+            AdmissionLifecycleState::DrainPending,
+            PerRunnerAchieved::Transitional,
+            PerRunnerPlan::Noop,
+            "runners-listener-stop-unproven",
         );
     }
     result(
@@ -276,7 +316,20 @@ fn reconcile_enabled_full(
     record: &RunnerRecord,
     observed: &PerRunnerObservation,
 ) -> PerRunnerReconcileResult {
-    if observed.lifecycle == DiscoveredLifecycle::Busy || observed.worker_present {
+    let busy = observed.lifecycle == DiscoveredLifecycle::Busy || observed.worker_present;
+    if busy {
+        // Full requires independent admission evidence (selector present).
+        if observed.selector_present != Some(true) {
+            return result(
+                record,
+                PerRunnerDesired::Full,
+                observed.lifecycle,
+                AdmissionLifecycleState::Busy,
+                PerRunnerAchieved::Transitional,
+                PerRunnerPlan::Noop,
+                "runners-busy-selector-unproven",
+            );
+        }
         return result(
             record,
             PerRunnerDesired::Full,
@@ -433,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_disable_outranks_force_ci_and_holds_busy_worker() {
+    fn manual_disable_outranks_force_ci_and_withdraws_busy_with_selector() {
         let registry = build_registry(vec![
             record("a", "repo-a", 1, false, false),
             record("b", "repo-b", 2, true, false),
@@ -457,12 +510,29 @@ mod tests {
             .iter()
             .find(|item| item.local_runner_key == "b")
             .unwrap();
-        assert_eq!(a.plan, PerRunnerPlan::HoldBusy);
+        assert_eq!(a.plan, PerRunnerPlan::WithdrawSelector);
         assert_eq!(a.desired, PerRunnerDesired::Drained);
         assert_eq!(a.achieved, PerRunnerAchieved::Transitional);
+        assert_eq!(a.reason_code.as_str(), "runners-disable-busy-withdraw");
         assert_eq!(b.desired, PerRunnerDesired::Full);
         assert_eq!(b.achieved, PerRunnerAchieved::Full);
         assert_eq!(b.plan, PerRunnerPlan::Noop);
+    }
+
+    #[test]
+    fn enabled_busy_without_selector_does_not_claim_full() {
+        let registry = build_registry(vec![record("a", "repo-a", 1, true, false)]);
+        let observations = vec![obs("a", DiscoveredLifecycle::Busy, true, Some(false))];
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::ForceCi, ZenOverride::Disabled),
+            &observations,
+        );
+        let a = &report.results[0];
+        assert_eq!(a.desired, PerRunnerDesired::Full);
+        assert_eq!(a.achieved, PerRunnerAchieved::Transitional);
+        assert_eq!(a.reason_code.as_str(), "runners-busy-selector-unproven");
+        assert_ne!(a.achieved, PerRunnerAchieved::Full);
     }
 
     #[test]
@@ -479,6 +549,23 @@ mod tests {
         assert_eq!(a.plan, PerRunnerPlan::WithdrawSelector);
         // Registry intent untouched by reconcile.
         assert!(registry.get("a").unwrap().desired_enabled);
+    }
+
+    #[test]
+    fn zen_offline_with_selector_absent_does_not_claim_listener_stopped() {
+        let registry = build_registry(vec![record("a", "repo-a", 1, true, false)]);
+        let observations = vec![obs("a", DiscoveredLifecycle::Listening, false, Some(false))];
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::ForceCi, ZenOverride::Enabled),
+            &observations,
+        );
+        let a = &report.results[0];
+        assert_eq!(a.desired, PerRunnerDesired::Offline);
+        assert_eq!(a.achieved, PerRunnerAchieved::Transitional);
+        assert_eq!(a.reason_code.as_str(), "runners-listener-stop-unproven");
+        assert_ne!(a.achieved, PerRunnerAchieved::Offline);
+        assert_ne!(a.achieved, PerRunnerAchieved::Drained);
     }
 
     #[test]

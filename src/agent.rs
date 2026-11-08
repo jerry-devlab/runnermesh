@@ -283,6 +283,9 @@ where
             observation,
             decision,
             admission_control,
+            // In-memory registry only. FileRegistryStore exists for LRM persistence
+            // fixtures; AgentCore does not yet wire durable cross-restart storage.
+            // Do not claim production-grade enable/disable persistence here.
             runner_registry: RunnerRegistryEditor::empty(),
             last_runner_discovery: None,
         })
