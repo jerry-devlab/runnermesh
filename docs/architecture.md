@@ -118,3 +118,9 @@ SOURCE != BUILD != RELEASE != INSTALLED RUNTIME != ACTIVE VERSION
 ```
 
 Production installation uses immutable version slots and an explicit activation indirection. Mutable worktrees and Cargo `target/` output are not deployment sources. See ADR 0003.
+
+## Planned post-v0.1: multiple local official runners
+
+The v0.1 installed runtime still binds **one exact runner**. A later local-host extension, [RM-LOCAL-RUNNER-MANAGER-001](../goals/RM-LOCAL-RUNNER-MANAGER-001.md), proposes that **one controlling Agent per user profile** manages multiple independently enrolled exact local runner records through a versioned local registry. Windows Service and owned user-session runners use different scoped lifecycle backends. Discovery is read-only; enrollment, service mutation, new selector namespaces, credentials, and production cutover require separately approved authority.
+
+The [proposed ADR 0005](adr/0005-local-multi-runner-lifecycle.md) explains the distinction between persistent per-runner enablement, observed process/service state, GitHub-native admission, safe stop, and the legacy generic-label limitation. It does not amend [ADR 0004](adr/0004-g11r-admission-linearization.md) for v0.1, confer production control, or imply multi-runner implementation has shipped. Cross-host placement remains a v0.4 responsibility; local multi-runner lifecycle is scheduled first in v0.2-A.
