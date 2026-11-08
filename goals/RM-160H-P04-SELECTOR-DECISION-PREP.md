@@ -36,8 +36,8 @@ before any Owner architecture acceptance. Cursor self-review is not acceptance.
 P04_01_ADR0006=DRAFT_NOT_ACCEPTED
 P04_02_V01_PRESERVE_RUNNERMESH_ADMIT=PASS_SOURCE
 P04_05_FAKE_GITHUB_MATRIX=PARTIAL_PASS_SOURCE
-  # lag visibility, stale token, permission denial, partial restore, link-loss
-  # remaining: racing assignment + scope-drift cases still open
+  # lag, stale token, permission denial, partial restore, link-loss, race-during-lag
+  # remaining: explicit scope-drift injection still open
 P04_07_HUMAN_GATE=WAITING_FOR_OWNER
-NEXT=finish remaining P04-05 race/scope-drift FakeGitHub cases OR start P05 controller wiring source; no live writes
+NEXT=FakeGitHub scope-drift injection OR P06 partial-batch polish; no live writes
 ```
