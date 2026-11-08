@@ -1879,4 +1879,20 @@ mod tests {
             .observe_selector_absent()
             .expect("absent after reconnect"));
     }
+
+    #[test]
+    fn fake_github_racing_observe_error_during_lag_does_not_claim_absence() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.set_eventual_visibility_lag(1);
+        admission.withdraw_capacity().expect("withdraw");
+        admission.set_fail_next_observe(ScmApiError::AccessDenied);
+        assert!(matches!(
+            admission.observe_selector_absent(),
+            Err(ScmApiError::AccessDenied)
+        ));
+        // Lag still applies: next successful observe remains non-absent.
+        assert!(!admission.observe_selector_absent().expect("still present"));
+        // Only after remaining lag is consumed does absence become visible.
+        assert!(admission.observe_selector_absent().expect("absent"));
+    }
 }
