@@ -1,9 +1,11 @@
 use std::{fmt, thread::ThreadId};
 
 use crate::{
-    AgentCommand, AgentResponse, AgentSnapshot, AgentTransport, DoctorReport, EffectiveLocale,
-    IpcRequest, IpcResponseBody, IpcTransportError, LanguagePreference, LinkKind, LinkState,
-    ProbeId, ThemePreference, UiPreferences, UserMode, ZenOverride, IPC_PROTOCOL_VERSION,
+    format_resource_estimate, AgentCommand, AgentResponse, AgentSnapshot, AgentTransport,
+    DoctorReport, EffectiveLocale, IpcRequest, IpcResponseBody, IpcTransportError,
+    LanguagePreference, LinkKind, LinkState, ProbeId, RunnerCommandReport,
+    RunnerPresentationStatus, ThemePreference, UiPreferences, UserMode, ZenOverride,
+    IPC_PROTOCOL_VERSION,
 };
 
 /// Stable identifiers for native tray actions. They are never localized.
@@ -17,6 +19,9 @@ pub enum TrayMenuId {
     Zen,
     Mode(UserMode),
     ProbeToggle(ProbeId),
+    RunnersRefresh,
+    RunnerToggle(String),
+    RunnerStatus(String),
     StatusDetails,
     Doctor,
     Logs,
@@ -43,6 +48,9 @@ impl TrayMenuId {
             Self::Zen => "control.zen".to_owned(),
             Self::Mode(mode) => format!("control.mode.{mode}"),
             Self::ProbeToggle(probe_id) => format!("control.probe.{probe_id}"),
+            Self::RunnersRefresh => "control.runners.refresh".to_owned(),
+            Self::RunnerToggle(key) => format!("control.runners.toggle.{key}"),
+            Self::RunnerStatus(key) => format!("control.runners.status.{key}"),
             Self::StatusDetails => "action.status-details".to_owned(),
             Self::Doctor => "action.doctor".to_owned(),
             Self::Logs => "action.logs".to_owned(),
@@ -73,6 +81,7 @@ pub enum TrayHelpKey {
     ModeChoice(UserMode),
     Probes,
     Probe(ProbeId),
+    Runners,
 }
 
 impl TrayHelpKey {
@@ -81,6 +90,9 @@ impl TrayHelpKey {
             TrayMenuId::Zen => Some(Self::Zen),
             TrayMenuId::Mode(mode) => Some(Self::ModeChoice(*mode)),
             TrayMenuId::ProbeToggle(id) => Some(Self::Probe(id.clone())),
+            TrayMenuId::RunnersRefresh
+            | TrayMenuId::RunnerToggle(_)
+            | TrayMenuId::RunnerStatus(_) => Some(Self::Runners),
             _ => None,
         }
     }
@@ -115,6 +127,8 @@ pub fn localized_menu_hint(key: &TrayHelpKey, locale: EffectiveLocale) -> Option
         (true, TrayHelpKey::Probe(id)) if id.as_str() == "steam-game" => Some("检测 Steam 是否实际启动了应用/游戏；仅启动 Steam 客户端不会触发。"),
         (false, TrayHelpKey::Probe(id)) if id.as_str() == "process-list" => Some("Detects configured programs to protect games, simulation, rendering, or other latency-sensitive software."),
         (true, TrayHelpKey::Probe(id)) if id.as_str() == "process-list" => Some("检测配置的程序，可保护游戏、仿真、渲染或其他延迟敏感软件。"),
+        (false, TrayHelpKey::Runners) => Some("Per-runner enable/disable intent. Resource numbers are estimates with timestamps, not exact savings."),
+        (true, TrayHelpKey::Runners) => Some("按运行器启用/禁用意图。资源数字仅为带时间戳的估计，不是精确节省值。"),
         _ => None,
     }
 }
@@ -185,6 +199,7 @@ pub enum TrayUiUpdate {
 pub enum TrayActionResult {
     Snapshot(Box<AgentSnapshot>),
     Doctor(DoctorReport),
+    Runners(Box<RunnerCommandReport>),
     Rejected(crate::ReasonCode),
     NoOp,
 }
@@ -229,6 +244,8 @@ pub struct NativeTrayEventLoop<T> {
     transport: T,
     ui_thread: ThreadId,
     current_render: Option<TrayRender>,
+    last_snapshot: Option<AgentSnapshot>,
+    runners_report: Option<RunnerCommandReport>,
 }
 
 impl<T: AgentTransport> NativeTrayEventLoop<T> {
@@ -237,6 +254,8 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
             transport,
             ui_thread: std::thread::current().id(),
             current_render: None,
+            last_snapshot: None,
+            runners_report: None,
         }
     }
 
@@ -244,7 +263,8 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
     pub fn apply(&mut self, update: TrayUiUpdate) -> Result<&TrayRender, TrayError> {
         self.require_ui_thread()?;
         let TrayUiUpdate::Snapshot(snapshot) = update;
-        self.current_render = Some(render(&snapshot));
+        self.current_render = Some(render(&snapshot, self.runners_report.as_ref()));
+        self.last_snapshot = Some(snapshot);
         Ok(self
             .current_render
             .as_ref()
@@ -255,6 +275,10 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
         self.current_render.as_ref()
     }
 
+    pub fn runners_report(&self) -> Option<&RunnerCommandReport> {
+        self.runners_report.as_ref()
+    }
+
     /// Sends one typed Agent command for a stable menu identifier. The tray
     /// never decides runner, admission, or probe state locally.
     pub fn activate(
@@ -263,22 +287,25 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
         snapshot: &AgentSnapshot,
     ) -> Result<TrayActionResult, TrayError> {
         self.require_ui_thread()?;
-        let Some(command) = command_for(id, snapshot) else {
+        let Some(command) = command_for(id, snapshot, self.runners_report.as_ref()) else {
             return Ok(TrayActionResult::NoOp);
         };
         let response = send(&self.transport, command)?;
         match response {
             AgentResponse::Snapshot(snapshot) | AgentResponse::Accepted { snapshot } => {
-                self.current_render = Some(render(&snapshot));
+                self.current_render = Some(render(&snapshot, self.runners_report.as_ref()));
+                self.last_snapshot = Some(snapshot.clone());
                 Ok(TrayActionResult::Snapshot(Box::new(snapshot)))
             }
             AgentResponse::Doctor(report) => Ok(TrayActionResult::Doctor(report)),
             AgentResponse::Rejected { reason_code } => Ok(TrayActionResult::Rejected(reason_code)),
-            // LRM-07 owns tray runners presentation; LRM-03 only extends the IPC
-            // contract. Unexpected runners payloads are rejected, not applied.
-            AgentResponse::Runners(_) => Ok(TrayActionResult::Rejected(
-                crate::ReasonCode::new("runners-tray-unsupported").expect("static reason"),
-            )),
+            AgentResponse::Runners(report) => {
+                self.runners_report = Some(report.clone());
+                if let Some(snapshot) = self.last_snapshot.as_ref().or(Some(snapshot)) {
+                    self.current_render = Some(render(snapshot, Some(&report)));
+                }
+                Ok(TrayActionResult::Runners(Box::new(report)))
+            }
         }
     }
 
@@ -291,7 +318,11 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
     }
 }
 
-fn command_for(id: &TrayMenuId, snapshot: &AgentSnapshot) -> Option<AgentCommand> {
+fn command_for(
+    id: &TrayMenuId,
+    snapshot: &AgentSnapshot,
+    runners: Option<&RunnerCommandReport>,
+) -> Option<AgentCommand> {
     match id {
         TrayMenuId::Zen => Some(AgentCommand::SetZen {
             zen: match snapshot.zen {
@@ -308,6 +339,35 @@ fn command_for(id: &TrayMenuId, snapshot: &AgentSnapshot) -> Option<AgentCommand
                 probe_id: probe_id.clone(),
                 enabled: !probe.enabled,
             }),
+        TrayMenuId::RunnersRefresh => Some(AgentCommand::RunnersStatus {
+            local_runner_key: None,
+        }),
+        TrayMenuId::RunnerToggle(key) => {
+            let enabled = runners
+                .and_then(|report| {
+                    report
+                        .records
+                        .iter()
+                        .find(|record| record.local_runner_key == *key)
+                })
+                .map(|record| record.desired_enabled)
+                .unwrap_or(true);
+            if enabled {
+                Some(AgentCommand::RunnersDisable {
+                    local_runner_key: key.clone(),
+                    when_idle: true,
+                    prepare_only: false,
+                })
+            } else {
+                Some(AgentCommand::RunnersEnable {
+                    local_runner_key: key.clone(),
+                    prepare_only: false,
+                })
+            }
+        }
+        TrayMenuId::RunnerStatus(key) => Some(AgentCommand::RunnersStatus {
+            local_runner_key: Some(key.clone()),
+        }),
         TrayMenuId::StatusDetails => Some(AgentCommand::GetSnapshot),
         TrayMenuId::Doctor => Some(AgentCommand::RunDoctor),
         TrayMenuId::Logs => Some(AgentCommand::OpenLogs),
@@ -379,7 +439,7 @@ fn send(
     }
 }
 
-fn render(snapshot: &AgentSnapshot) -> TrayRender {
+fn render(snapshot: &AgentSnapshot, runners: Option<&RunnerCommandReport>) -> TrayRender {
     let language = match snapshot.effective_ui_preferences.locale {
         EffectiveLocale::ZhCn => LanguagePreference::ZhCn,
         EffectiveLocale::EnUs => LanguagePreference::EnUs,
@@ -476,6 +536,11 @@ fn render(snapshot: &AgentSnapshot) -> TrayRender {
                 text(language, Text::Probes),
                 probe_entries(snapshot, language),
             ),
+            submenu(
+                "control.runners",
+                text(language, Text::Runners),
+                runners_entries(runners, language),
+            ),
             TrayMenuEntry::Separator,
             item(
                 TrayMenuId::StatusDetails,
@@ -555,6 +620,90 @@ fn probe_entries(snapshot: &AgentSnapshot, language: LanguagePreference) -> Vec<
             )
         })
         .collect()
+}
+
+fn runners_entries(
+    runners: Option<&RunnerCommandReport>,
+    language: LanguagePreference,
+) -> Vec<TrayMenuEntry> {
+    let mut entries = vec![item(
+        TrayMenuId::RunnersRefresh,
+        text(language, Text::RunnersRefresh).to_owned(),
+        None,
+        true,
+    )];
+    let Some(report) = runners else {
+        entries.push(item(
+            TrayMenuId::RunnerStatus("_empty".to_owned()),
+            text(language, Text::RunnersEmpty).to_owned(),
+            None,
+            false,
+        ));
+        return entries;
+    };
+    if report.partial_failure {
+        entries.push(item(
+            TrayMenuId::RunnerStatus("_partial".to_owned()),
+            text(language, Text::RunnersPartialFailure).to_owned(),
+            None,
+            false,
+        ));
+    }
+    if let Some(aggregate) = &report.resource_aggregate {
+        entries.push(item(
+            TrayMenuId::RunnerStatus("_resources".to_owned()),
+            format_resource_estimate(aggregate, language == LanguagePreference::ZhCn),
+            None,
+            false,
+        ));
+    }
+    for record in &report.records {
+        let status = presentation_label(language, record.presentation_status);
+        let item_state = match record.item_applied {
+            Some(true) => text(language, Text::ItemApplied),
+            Some(false) => text(language, Text::ItemFailed),
+            None => text(language, Text::ItemPending),
+        };
+        entries.push(item(
+            TrayMenuId::RunnerToggle(record.local_runner_key.clone()),
+            format!("{} · {status}", record.local_runner_key),
+            Some(record.desired_enabled),
+            true,
+        ));
+        entries.push(item(
+            TrayMenuId::RunnerStatus(record.local_runner_key.clone()),
+            format!(
+                "{} · {status} · {} · {item_state}",
+                text(language, Text::RunnerStatus),
+                record.backend_kind
+            ),
+            None,
+            true,
+        ));
+    }
+    entries
+}
+
+fn presentation_label(
+    language: LanguagePreference,
+    status: RunnerPresentationStatus,
+) -> &'static str {
+    match (language == LanguagePreference::ZhCn, status) {
+        (false, RunnerPresentationStatus::Enabled) => "Enabled",
+        (false, RunnerPresentationStatus::Disabled) => "Disabled",
+        (false, RunnerPresentationStatus::Draining) => "Draining",
+        (false, RunnerPresentationStatus::Busy) => "Busy",
+        (false, RunnerPresentationStatus::Stopped) => "Stopped",
+        (false, RunnerPresentationStatus::Unknown) => "Unknown",
+        (false, RunnerPresentationStatus::Refused) => "Refused",
+        (true, RunnerPresentationStatus::Enabled) => "已启用",
+        (true, RunnerPresentationStatus::Disabled) => "已禁用",
+        (true, RunnerPresentationStatus::Draining) => "排空中",
+        (true, RunnerPresentationStatus::Busy) => "忙碌",
+        (true, RunnerPresentationStatus::Stopped) => "已停止",
+        (true, RunnerPresentationStatus::Unknown) => "未知",
+        (true, RunnerPresentationStatus::Refused) => "已拒绝",
+    }
 }
 
 fn settings_entries(snapshot: &AgentSnapshot, language: LanguagePreference) -> Vec<TrayMenuEntry> {
@@ -667,6 +816,14 @@ enum Text {
     Agent,
     Capacity,
     Runner,
+    Runners,
+    RunnersRefresh,
+    RunnersEmpty,
+    RunnersPartialFailure,
+    RunnerStatus,
+    ItemApplied,
+    ItemFailed,
+    ItemPending,
     Github,
     Zen,
     Mode,
@@ -693,6 +850,14 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (false, Text::Agent) => "Agent",
         (false, Text::Capacity) => "Capacity",
         (false, Text::Runner) => "Runner",
+        (false, Text::Runners) => "Runners",
+        (false, Text::RunnersRefresh) => "Refresh runners",
+        (false, Text::RunnersEmpty) => "No enrolled runners yet",
+        (false, Text::RunnersPartialFailure) => "Partial failure — inspect item results",
+        (false, Text::RunnerStatus) => "Status",
+        (false, Text::ItemApplied) => "applied",
+        (false, Text::ItemFailed) => "failed",
+        (false, Text::ItemPending) => "pending",
         (false, Text::Github) => "GitHub",
         (false, Text::Zen) => "Zen Mode",
         (false, Text::Mode) => "Mode",
@@ -714,6 +879,14 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (true, Text::Agent) => "代理",
         (true, Text::Capacity) => "容量",
         (true, Text::Runner) => "运行器",
+        (true, Text::Runners) => "运行器列表",
+        (true, Text::RunnersRefresh) => "刷新运行器",
+        (true, Text::RunnersEmpty) => "尚未登记运行器",
+        (true, Text::RunnersPartialFailure) => "部分失败 — 请查看单项结果",
+        (true, Text::RunnerStatus) => "状态",
+        (true, Text::ItemApplied) => "已应用",
+        (true, Text::ItemFailed) => "失败",
+        (true, Text::ItemPending) => "待处理",
         (true, Text::Github) => "GitHub",
         (true, Text::Zen) => "禅模式",
         (true, Text::Mode) => "模式",
@@ -807,7 +980,7 @@ mod tests {
 
     #[test]
     fn render_contains_frozen_information_architecture_and_non_color_semantics() {
-        let rendered = render(&sample_snapshot());
+        let rendered = render(&sample_snapshot(), None);
         let ids = collect_ids(&rendered.entries);
 
         assert_eq!(rendered.icon_glyph.marker(), 'D');
@@ -834,8 +1007,8 @@ mod tests {
             language: LanguagePreference::ZhCn,
             menu_hints_enabled: true,
         };
-        let english = render(&english_snapshot);
-        let chinese = render(&chinese_snapshot);
+        let english = render(&english_snapshot, None);
+        let chinese = render(&chinese_snapshot, None);
 
         assert_eq!(collect_ids(&english.entries), collect_ids(&chinese.entries));
         assert_ne!(english.entries, chinese.entries);
@@ -865,7 +1038,7 @@ mod tests {
     #[test]
     fn contextual_hints_are_localized_and_have_no_command_authority() {
         let snapshot = sample_snapshot();
-        let command_before = super::command_for(&TrayMenuId::Mode(UserMode::Auto), &snapshot);
+        let command_before = super::command_for(&TrayMenuId::Mode(UserMode::Auto), &snapshot, None);
         assert_eq!(
             localized_menu_hint(&TrayHelpKey::Zen, EffectiveLocale::ZhCn),
             Some("暂停新的 CI 任务；当前任务安全完成后退出 CI。退出 Zen 后恢复之前选择的模式。")
@@ -877,7 +1050,7 @@ mod tests {
         .unwrap()
         .contains("actually launched"));
         assert_eq!(
-            super::command_for(&TrayMenuId::Mode(UserMode::Auto), &snapshot),
+            super::command_for(&TrayMenuId::Mode(UserMode::Auto), &snapshot, None),
             command_before
         );
         assert_eq!(snapshot.admission, sample_snapshot().admission);
@@ -886,12 +1059,12 @@ mod tests {
     #[test]
     fn repeated_hint_preference_switches_keep_stable_ids_and_policy() {
         let mut snapshot = sample_snapshot();
-        let baseline = render(&snapshot);
+        let baseline = render(&snapshot, None);
         let baseline_ids = collect_ids(&baseline.entries);
         let admission = snapshot.admission.clone();
         for enabled in [false, true, false, true] {
             snapshot.ui_preferences.menu_hints_enabled = enabled;
-            let rendered = render(&snapshot);
+            let rendered = render(&snapshot, None);
             assert_eq!(collect_ids(&rendered.entries), baseline_ids);
             assert_eq!(snapshot.admission, admission);
         }
@@ -900,7 +1073,7 @@ mod tests {
     #[test]
     fn repeated_presentation_changes_keep_stable_ids_and_policy_unchanged() {
         let baseline = sample_snapshot();
-        let expected_ids = collect_ids(&render(&baseline).entries);
+        let expected_ids = collect_ids(&render(&baseline, None).entries);
         for (theme, language, mode, probe_enabled) in [
             (
                 ThemePreference::Light,
@@ -933,7 +1106,7 @@ mod tests {
             };
             snapshot.user_mode = mode;
             snapshot.probes[0].enabled = probe_enabled;
-            let rendered = render(&snapshot);
+            let rendered = render(&snapshot, None);
             assert_eq!(collect_ids(&rendered.entries), expected_ids);
             assert_eq!(snapshot.admission, baseline.admission);
         }
@@ -1054,6 +1227,80 @@ mod tests {
     }
 
     #[test]
+    fn runners_submenu_toggles_issue_typed_commands_and_localize_labels() {
+        use crate::{
+            EnrollmentState, ResourceSampleConfidence, RunnerCommandReport,
+            RunnerPresentationStatus, RunnerRecordView, RunnerResourceAggregate,
+        };
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: true,
+            prepare_only: false,
+            applied: false,
+            reason_code: None,
+            records: vec![RunnerRecordView {
+                local_runner_key: "runner-a".to_owned(),
+                runner_id: 1,
+                expected_runner_name: "fixture".to_owned(),
+                desired_enabled: true,
+                enrollment_state: EnrollmentState::Enrolled,
+                managed_admission: false,
+                backend_kind: "user-session".to_owned(),
+                presentation_status: RunnerPresentationStatus::Enabled,
+                memory_samples: Vec::new(),
+                item_applied: None,
+                item_reason_code: None,
+            }],
+            discovered_keys: Vec::new(),
+            same_scope_collisions: 0,
+            resource_aggregate: Some(RunnerResourceAggregate {
+                sampled_at_unix_ms: 42,
+                listener_working_set_bytes: Some(10 * 1024 * 1024),
+                worker_working_set_bytes: None,
+                instance_count: 1,
+                unknown_sample_count: 1,
+                confidence: ResourceSampleConfidence::Unknown,
+            }),
+            partial_failure: false,
+        };
+        let english_snapshot = sample_snapshot();
+        let mut chinese_snapshot = sample_snapshot();
+        chinese_snapshot.effective_ui_preferences.locale = EffectiveLocale::ZhCn;
+        chinese_snapshot.ui_preferences.language = LanguagePreference::ZhCn;
+
+        let english = render(&english_snapshot, Some(&report));
+        let chinese = render(&chinese_snapshot, Some(&report));
+        assert!(
+            collect_ids(&english.entries).contains(&"control.runners.toggle.runner-a".to_owned())
+        );
+        assert_eq!(collect_ids(&english.entries), collect_ids(&chinese.entries));
+        assert_ne!(english.entries, chinese.entries);
+
+        let transport = FakeTransport::new(AgentResponse::Runners(report.clone()));
+        let mut tray = NativeTrayEventLoop::new(transport.clone());
+        tray.apply(TrayUiUpdate::Snapshot(english_snapshot.clone()))
+            .unwrap();
+        let result = tray
+            .activate(
+                &TrayMenuId::RunnerToggle("runner-a".to_owned()),
+                &english_snapshot,
+            )
+            .unwrap();
+        assert!(matches!(result, TrayActionResult::Runners(_)));
+        assert_eq!(
+            transport.commands(),
+            vec![AgentCommand::RunnersDisable {
+                local_runner_key: "runner-a".to_owned(),
+                when_idle: true,
+                prepare_only: false,
+            }]
+        );
+        assert_eq!(english_snapshot.admission, sample_snapshot().admission);
+        let _ = chinese_snapshot;
+    }
+
+    #[test]
     fn tray_explains_withdrawal_blocked_without_claiming_achieved_drained() {
         let mut snapshot = sample_snapshot();
         snapshot.admission_control = AdmissionControlSnapshot {
@@ -1068,7 +1315,7 @@ mod tests {
         };
         snapshot.achieved_node_state = None;
 
-        let rendered = render(&snapshot);
+        let rendered = render(&snapshot, None);
         assert!(rendered.tooltip.contains("WITHDRAWAL_BLOCKED"));
         let capacity = rendered
             .entries

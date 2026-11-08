@@ -24,6 +24,7 @@ mod runner_discovery;
 mod runner_observer;
 mod runner_reconcile;
 mod runner_registry;
+mod runner_resource;
 mod runner_service_backend;
 mod runner_session_backend;
 mod runtime;
@@ -114,7 +115,9 @@ pub use qualification::{
     ReadinessDisposition, RestoreDisposition, H1_READINESS_SCHEMA_VERSION,
     H1_TRANSACTION_FAMILY_ID, H1_TRANSACTION_SCHEMA_VERSION,
 };
-pub use runner_commands::{handle_runners_command, RunnerCommandReport, RunnerRecordView};
+pub use runner_commands::{
+    handle_runners_command, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+};
 pub use runner_discovery::{
     DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity, DiscoveredServiceBinding,
     DiscoveredSessionBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryIdentityFilter,
@@ -138,6 +141,10 @@ pub use runner_registry::{
     EnrollmentState, FileRegistryStore, MemoryRegistryStore, RegistryBackendBinding, RegistryError,
     RegistryStore, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
     RUNNER_REGISTRY_SCHEMA_VERSION,
+};
+pub use runner_resource::{
+    aggregate_runner_memory, format_resource_estimate, ResourceSampleConfidence,
+    RunnerMemorySample, RunnerResourceAggregate, RunnerResourceRole,
 };
 pub use runner_service_backend::{
     PreparedServiceAction, ServiceBackendRefusal, ServiceObservation, ServicePrepareOutcome,

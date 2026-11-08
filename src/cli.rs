@@ -392,25 +392,39 @@ fn render_runner_status(snapshot: &AgentSnapshot) -> String {
 
 fn render_runners_text(report: &crate::RunnerCommandReport) -> String {
     let mut lines = vec![format!(
-        "runners read_only={} prepare_only={} applied={} discovered={} collisions={}",
+        "runners read_only={} prepare_only={} applied={} discovered={} collisions={} partial_failure={}",
         report.read_only,
         report.prepare_only,
         report.applied,
         report.discovered_keys.len(),
-        report.same_scope_collisions
+        report.same_scope_collisions,
+        report.partial_failure
     )];
     if let Some(reason) = &report.reason_code {
         lines.push(format!("reason: {reason}"));
     }
+    if let Some(aggregate) = &report.resource_aggregate {
+        lines.push(crate::format_resource_estimate(aggregate, false));
+    }
     for record in &report.records {
+        let item = match record.item_applied {
+            Some(true) => "applied",
+            Some(false) => "failed",
+            None => "pending",
+        };
         lines.push(format!(
-            "- {} id={} enabled={} state={:?} backend={}",
+            "- {} id={} enabled={} presentation={:?} state={:?} backend={} item={}",
             record.local_runner_key,
             record.runner_id,
             record.desired_enabled,
+            record.presentation_status,
             record.enrollment_state,
-            record.backend_kind
+            record.backend_kind,
+            item
         ));
+        if let Some(reason) = &record.item_reason_code {
+            lines.push(format!("  item_reason: {reason}"));
+        }
     }
     for key in &report.discovered_keys {
         lines.push(format!("discovered: {key}"));
