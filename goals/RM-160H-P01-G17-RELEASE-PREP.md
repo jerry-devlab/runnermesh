@@ -38,4 +38,8 @@ is not independent security acceptance.
 P01_G17_SOURCE_PREP=READY_FOR_OWNER
 P01_G17_LIVE=WAITING_FOR_OWNER
 P01_H3=WAITING_FOR_OWNER
+G15R_REVERIFY_2026-11-08=PASS_READ_ONLY
+BOUND_SOURCE_TRAIN_TIP=e04c77b98902bd3a6e7f5cf84e4b2abe9a370291
 ```
+
+Docs-only and LRM Draft tip advancement does not rebuild or retag G15R.
