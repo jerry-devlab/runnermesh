@@ -464,8 +464,15 @@ pub struct FakeGithubAdmissionBackend {
 #[derive(Clone, Debug)]
 struct FakeGithubState {
     selector_present: bool,
+    /// Desired presence after pending eventual-visibility lag expires.
+    pending_selector_present: Option<bool>,
+    /// Observe calls remaining before `pending_selector_present` becomes visible.
+    eventual_visibility_lag: u32,
     fail_next_observe: Option<ScmApiError>,
+    fail_next_withdraw: Option<ScmApiError>,
+    fail_next_restore: Option<ScmApiError>,
     disconnected: bool,
+    stale_token: bool,
     withdraw_calls: u32,
     restore_calls: u32,
     observe_calls: u32,
@@ -475,8 +482,13 @@ impl Default for FakeGithubState {
     fn default() -> Self {
         Self {
             selector_present: true,
+            pending_selector_present: None,
+            eventual_visibility_lag: 0,
             fail_next_observe: None,
+            fail_next_withdraw: None,
+            fail_next_restore: None,
             disconnected: false,
+            stale_token: false,
             withdraw_calls: 0,
             restore_calls: 0,
             observe_calls: 0,
@@ -502,6 +514,20 @@ impl FakeGithubAdmissionBackend {
             .fail_next_observe = Some(error);
     }
 
+    pub fn set_fail_next_withdraw(&self, error: ScmApiError) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fail_next_withdraw = Some(error);
+    }
+
+    pub fn set_fail_next_restore(&self, error: ScmApiError) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fail_next_restore = Some(error);
+    }
+
     pub fn set_disconnected(&self, disconnected: bool) {
         self.inner
             .lock()
@@ -509,24 +535,75 @@ impl FakeGithubAdmissionBackend {
             .disconnected = disconnected;
     }
 
+    /// Models a stale / expired GitHub token: all mutations and observations fail closed.
+    pub fn set_stale_token(&self, stale: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stale_token = stale;
+    }
+
+    /// After a successful withdraw/restore, keep the previous observed value for
+    /// `lag` observe calls before the new presence becomes visible.
+    pub fn set_eventual_visibility_lag(&self, lag: u32) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .eventual_visibility_lag = lag;
+    }
+
     pub fn withdraw_capacity(&self) -> Result<(), ScmApiError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.stale_token {
+            return Err(ScmApiError::AccessDenied);
+        }
         if guard.disconnected {
             return Err(ScmApiError::Unavailable);
         }
-        guard.selector_present = false;
+        if let Some(error) = guard.fail_next_withdraw.take() {
+            return Err(error);
+        }
+        Self::queue_presence(&mut guard, false);
         guard.withdraw_calls = guard.withdraw_calls.saturating_add(1);
         Ok(())
     }
 
     pub fn restore_capacity(&self) -> Result<(), ScmApiError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.stale_token {
+            return Err(ScmApiError::AccessDenied);
+        }
         if guard.disconnected {
             return Err(ScmApiError::Unavailable);
         }
-        guard.selector_present = true;
+        if let Some(error) = guard.fail_next_restore.take() {
+            return Err(error);
+        }
+        Self::queue_presence(&mut guard, true);
         guard.restore_calls = guard.restore_calls.saturating_add(1);
         Ok(())
+    }
+
+    fn queue_presence(guard: &mut FakeGithubState, present: bool) {
+        if guard.eventual_visibility_lag == 0 {
+            guard.selector_present = present;
+            guard.pending_selector_present = None;
+            return;
+        }
+        guard.pending_selector_present = Some(present);
+    }
+
+    fn advance_eventual_visibility(guard: &mut FakeGithubState) {
+        let Some(pending) = guard.pending_selector_present else {
+            return;
+        };
+        // Consume one lag slot per observe while keeping the previous value.
+        if guard.eventual_visibility_lag > 0 {
+            guard.eventual_visibility_lag = guard.eventual_visibility_lag.saturating_sub(1);
+            return;
+        }
+        guard.selector_present = pending;
+        guard.pending_selector_present = None;
     }
 
     pub fn withdraw_calls(&self) -> u32 {
@@ -542,18 +619,29 @@ impl FakeGithubAdmissionBackend {
             .unwrap_or_else(|p| p.into_inner())
             .restore_calls
     }
+
+    pub fn observe_calls(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .observe_calls
+    }
 }
 
 impl AdmissionSelectorObserver for FakeGithubAdmissionBackend {
     fn observe_selector_absent(&mut self) -> Result<bool, ScmApiError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         guard.observe_calls = guard.observe_calls.saturating_add(1);
+        if guard.stale_token {
+            return Err(ScmApiError::AccessDenied);
+        }
         if let Some(error) = guard.fail_next_observe.take() {
             return Err(error);
         }
         if guard.disconnected {
             return Err(ScmApiError::Unavailable);
         }
+        Self::advance_eventual_visibility(&mut guard);
         Ok(!guard.selector_present)
     }
 }
@@ -1721,5 +1809,58 @@ mod tests {
             backend.query_exact("Event*"),
             Err(ScmApiError::NameDrift)
         ));
+    }
+
+    #[test]
+    fn fake_github_permission_denial_and_stale_token_fail_closed() {
+        let admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.set_fail_next_withdraw(ScmApiError::AccessDenied);
+        assert!(matches!(
+            admission.withdraw_capacity(),
+            Err(ScmApiError::AccessDenied)
+        ));
+        assert_eq!(admission.withdraw_calls(), 0);
+        // Second attempt succeeds because fail-next was consumed.
+        admission.withdraw_capacity().expect("withdraw");
+        assert_eq!(admission.withdraw_calls(), 1);
+
+        let stale = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        stale.set_stale_token(true);
+        assert!(matches!(
+            stale.withdraw_capacity(),
+            Err(ScmApiError::AccessDenied)
+        ));
+        let mut observer = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        observer.set_stale_token(true);
+        assert!(matches!(
+            observer.observe_selector_absent(),
+            Err(ScmApiError::AccessDenied)
+        ));
+    }
+
+    #[test]
+    fn fake_github_eventual_visibility_lags_before_readback() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.set_eventual_visibility_lag(1);
+        admission.withdraw_capacity().expect("withdraw");
+        // First observe still sees selector present (lag).
+        assert_eq!(admission.observe_selector_absent().expect("obs1"), false);
+        // Second observe sees absence after lag consumed.
+        assert_eq!(admission.observe_selector_absent().expect("obs2"), true);
+        assert_eq!(admission.observe_calls(), 2);
+    }
+
+    #[test]
+    fn fake_github_partial_restore_failure_preserves_withdrawn_intent() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.withdraw_capacity().expect("withdraw");
+        admission.set_fail_next_restore(ScmApiError::Unavailable);
+        assert!(matches!(
+            admission.restore_capacity(),
+            Err(ScmApiError::Unavailable)
+        ));
+        assert_eq!(admission.restore_calls(), 0);
+        // Withdrawal remains observed; restore did not partially flip presence.
+        assert!(admission.observe_selector_absent().expect("absent"));
     }
 }
