@@ -13,7 +13,7 @@ Authoritative contracts: [end-to-end plan](../RM-END-TO-END-DELIVERY-PLAN.md), [
 | v0.1 | G15R immutable RC on `fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab`, hosted run `42452639359` PASS; PR #60 G15R ledger/H2 plan merged; main at `ca1dd96e75a606b80d1978f83e973bd2586d36e4` | H2 independent security acceptance and fresh exact Owner cutover token; H2 real cutover; >=24h real dogfood; G17/H3 release; no v0.1.0 release |
 | v0.2-A | PR #51–#59, #61–#63 Draft stack; FileRegistryStore↔Agent, CLI/Tray intent, discovery, HUX-0 sandbox, Win32 SCM source, mock stop/start/restore and fake GitHub matrix; PR #63 CI PASS | Windows live SCM write gate unissued, independent privilege review, live HUX-2, same-scope selector decision, real multi-runner HUX-3, packaging and release |
 | Human UX | Owner manually accepted PR #63 development Tray as `HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED`; no per-item screenshots claimed | HUX-1 **nonempty on ZenBookDuo** unproven; screenshots not independently attested |
-| Host discovery | On **laptop-zenbook14**, PR #63 candidate `8cd996a` ran `discover-readonly` and reported zero candidates with enumeration/process channels Ok; independent Windows Service and Listener/Worker counts were all zero | This is a valid **ZenBook14 empty-host** observation, not ZenBookDuo verification. Do not mark HUX1_ZENBOOKDUO PASS |
+| Host discovery | On **the non-target development Windows host**, PR #63 candidate `8cd996a` ran `discover-readonly` and reported zero candidates with enumeration/process channels Ok; independent Windows Service and Listener/Worker counts were all zero | This is a valid **the development host empty-host** observation, not ZenBookDuo verification. Do not mark HUX1_ZENBOOKDUO PASS |
 | Authorization | `SyntheticScmTestGrant` test-only; `UnissuedOwnerAuthorizationVerifier` denies trusted SCM authorization; actual writes remain disabled | No permission for UAC, Windows SCM write, GitHub labels/registration, production installation, H2/HUX-2 transactions, releases |
 
 Do not confuse `Cargo.toml version = 0.1.0` with a published `v0.1.0` GitHub release. Do not claim `SOURCE_READY` is `LIVE_QUALIFIED`.
@@ -50,7 +50,7 @@ Work-package numbers are ceilings for budgeting and triage, not proof that tasks
 
 | Train | Active budget | Start and primary focus | Mandatory checkpoint |
 |---|---:|---|---|
-| GT-01 `RM-160H-T01-FIELD-BASELINE` | **16h** | P00 host truth and P02 identity; audit actual ZenBook14-vs-ZenBookDuo difference; initialize program ledger | HUX1 host evidence, exact HEAD, candidate gap map |
+| GT-01 `RM-160H-T01-FIELD-BASELINE` | **16h** | P00 host truth and P02 identity; audit actual the development host-vs-ZenBookDuo difference; initialize program ledger | HUX1 host evidence, exact HEAD, candidate gap map |
 | GT-02 `RM-160H-T02-V01-CLOSEOUT-PREP` | **24h** | P01 v0.1 H2/G17/H3 preparation and any currently unblocked P02/P04 work | RC hash/independent review/Owner line; do not block source train on token |
 | GT-03 `RM-160H-T03-IDENTITY-SESSION` | **24h** | P02 owned Session backend and P03 SCM semantics/source; native read-only and sandbox | exact multi-instance ownership tests, baseline compatibility |
 | GT-04 `RM-160H-T04-TRUSTED-SCM` | **24h** | P03 scoped privilege and recovery, P04 GitHub admission contracts | sealed live gate remains closed absent authorized transaction |
