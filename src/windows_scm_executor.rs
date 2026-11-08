@@ -1747,6 +1747,29 @@ mod tests {
     }
 
     #[test]
+    fn start_accepted_but_readback_failure_is_interrupted_not_restore_pass() {
+        let mock = MockScmBackend::new();
+        let mut stopped = fixture_listening();
+        stopped.observation.state = DiscoveredLifecycle::Stopped;
+        mock.insert(stopped);
+        let exec = executor(mock.clone(), open_synthetic_gate());
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        mock.set_fail_after_queries(1, ScmApiError::Unavailable);
+        let receipt = exec.advance(
+            DesiredServiceLifecycle::RemainRunning,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        assert_eq!(receipt.stage, ScmTransactionStage::Interrupted);
+        assert!(!receipt.restore_pass);
+        assert_eq!(receipt.achieved, AchievedServiceControl::Unknown);
+        assert_eq!(receipt.reason.as_deref(), Some("scm.unavailable"));
+        assert_eq!(mock.start_calls(), 1);
+    }
+
+    #[test]
     fn restore_requires_independent_admission_observation() {
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
