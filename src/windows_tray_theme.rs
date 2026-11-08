@@ -2028,6 +2028,7 @@ fn mark_hint_key(evidence: &mut NativeHintEvidence, key: &TrayHelpKey) {
         TrayHelpKey::ModeChoice(_) => evidence.mode_child_hint_key_resolved = true,
         TrayHelpKey::Probes => evidence.probes_submenu_hint_key_resolved = true,
         TrayHelpKey::Probe(_) => evidence.probe_child_hint_key_resolved = true,
+        TrayHelpKey::Runners => {}
     }
 }
 

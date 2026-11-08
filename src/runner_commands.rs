@@ -7,9 +7,23 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DiscoveryReport, EnrollmentState, ReasonCode, RegistryError, RunnerRecord, RunnerRegistry,
-    RunnerRegistryEditor,
+    aggregate_runner_memory, DiscoveryReport, EnrollmentState, ReasonCode, RegistryError,
+    RunnerMemorySample, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
+    RunnerResourceAggregate,
 };
+
+/// Presentation vocabulary for Tray/CLI. Stable non-localized values.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RunnerPresentationStatus {
+    Enabled,
+    Disabled,
+    Draining,
+    Busy,
+    Stopped,
+    Unknown,
+    Refused,
+}
 
 /// Stable machine-facing summary of one registry record for IPC/CLI JSON.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -22,6 +36,18 @@ pub struct RunnerRecordView {
     pub enrollment_state: EnrollmentState,
     pub managed_admission: bool,
     pub backend_kind: String,
+    #[serde(default = "default_presentation_status")]
+    pub presentation_status: RunnerPresentationStatus,
+    #[serde(default)]
+    pub memory_samples: Vec<RunnerMemorySample>,
+    #[serde(default)]
+    pub item_applied: Option<bool>,
+    #[serde(default)]
+    pub item_reason_code: Option<ReasonCode>,
+}
+
+fn default_presentation_status() -> RunnerPresentationStatus {
+    RunnerPresentationStatus::Unknown
 }
 
 impl From<&RunnerRecord> for RunnerRecordView {
@@ -39,7 +65,19 @@ impl From<&RunnerRecord> for RunnerRecordView {
                 }
                 crate::RegistryBackendBinding::UserSession => "user-session".to_owned(),
             },
+            presentation_status: presentation_status_for(record),
+            memory_samples: Vec::new(),
+            item_applied: None,
+            item_reason_code: None,
         }
+    }
+}
+
+fn presentation_status_for(record: &RunnerRecord) -> RunnerPresentationStatus {
+    match record.enrollment_state {
+        EnrollmentState::Forgotten => RunnerPresentationStatus::Stopped,
+        EnrollmentState::Enrolled if record.desired_enabled => RunnerPresentationStatus::Enabled,
+        EnrollmentState::Enrolled => RunnerPresentationStatus::Disabled,
     }
 }
 
@@ -55,6 +93,10 @@ pub struct RunnerCommandReport {
     pub records: Vec<RunnerRecordView>,
     pub discovered_keys: Vec<String>,
     pub same_scope_collisions: usize,
+    #[serde(default)]
+    pub resource_aggregate: Option<RunnerResourceAggregate>,
+    #[serde(default)]
+    pub partial_failure: bool,
 }
 
 impl RunnerCommandReport {
@@ -67,20 +109,73 @@ impl RunnerCommandReport {
         discovered_keys: Vec<String>,
         same_scope_collisions: usize,
     ) -> Self {
+        let records: Vec<RunnerRecordView> = registry
+            .records
+            .iter()
+            .map(RunnerRecordView::from)
+            .collect();
         Self {
             schema_version: crate::RUNNER_REGISTRY_SCHEMA_VERSION,
             read_only,
             prepare_only,
             applied,
             reason_code,
-            records: registry
-                .records
-                .iter()
-                .map(RunnerRecordView::from)
-                .collect(),
+            records,
             discovered_keys,
             same_scope_collisions,
+            resource_aggregate: None,
+            partial_failure: false,
         }
+    }
+
+    /// Attaches synthetic/timestamped resource samples for presentation.
+    pub fn with_resource_samples(
+        mut self,
+        samples_by_key: &[(String, Vec<RunnerMemorySample>)],
+        sampled_at_unix_ms: u64,
+    ) -> Self {
+        let mut flat = Vec::new();
+        for record in &mut self.records {
+            if let Some((_, samples)) = samples_by_key
+                .iter()
+                .find(|(key, _)| key == &record.local_runner_key)
+            {
+                record.memory_samples = samples.clone();
+                flat.extend(samples.iter().cloned());
+            }
+        }
+        self.resource_aggregate = Some(aggregate_runner_memory(&flat, sampled_at_unix_ms));
+        self
+    }
+
+    /// Marks per-item outcomes for batch-style presentation (partial failure).
+    pub fn with_item_outcome(
+        mut self,
+        local_runner_key: &str,
+        applied: bool,
+        reason: Option<ReasonCode>,
+    ) -> Self {
+        if let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|item| item.local_runner_key == local_runner_key)
+        {
+            record.item_applied = Some(applied);
+            record.item_reason_code = reason;
+        }
+        self.partial_failure = self
+            .records
+            .iter()
+            .any(|item| item.item_applied == Some(false))
+            && self
+                .records
+                .iter()
+                .any(|item| item.item_applied == Some(true));
+        if self.partial_failure && self.reason_code.is_none() {
+            self.reason_code =
+                Some(ReasonCode::new("runners-partial-failure".to_owned()).expect("static reason"));
+        }
+        self
     }
 }
 
@@ -129,6 +224,8 @@ pub fn handle_runners_command(
                     .iter()
                     .filter(|candidate| candidate.same_scope_collision)
                     .count(),
+                resource_aggregate: None,
+                partial_failure: false,
             })
         }
         crate::AgentCommand::RunnersInspect { local_runner_key } => {
@@ -151,6 +248,8 @@ pub fn handle_runners_command(
                 records: view,
                 discovered_keys: Vec::new(),
                 same_scope_collisions: 0,
+                resource_aggregate: None,
+                partial_failure: false,
             })
         }
         crate::AgentCommand::RunnersStatus { local_runner_key } => {
@@ -175,6 +274,8 @@ pub fn handle_runners_command(
                 records,
                 discovered_keys: Vec::new(),
                 same_scope_collisions: 0,
+                resource_aggregate: None,
+                partial_failure: false,
             })
         }
         crate::AgentCommand::RunnersEnroll {

@@ -523,6 +523,16 @@ fn run_native_tray_loop(
                         development_controls,
                     )?;
                 }
+                crate::TrayActionResult::Runners(_) => {
+                    if let Some(render) = frontend.current_render() {
+                        native.apply(
+                            render,
+                            current_snapshot.effective_ui_preferences.theme,
+                            current_snapshot.ui_preferences.theme != ThemePreference::System,
+                        )?;
+                        refreshes += 1;
+                    }
+                }
                 crate::TrayActionResult::Doctor(_)
                 | crate::TrayActionResult::Rejected(_)
                 | crate::TrayActionResult::NoOp => {}
@@ -620,6 +630,7 @@ fn maybe_toggle_menu_hints_for_development(
     {
         crate::TrayActionResult::Snapshot(snapshot) => Ok(Some(*snapshot)),
         crate::TrayActionResult::Doctor(_)
+        | crate::TrayActionResult::Runners(_)
         | crate::TrayActionResult::Rejected(_)
         | crate::TrayActionResult::NoOp => {
             Err("development menu-hints action did not produce an Agent snapshot".to_owned())
