@@ -571,12 +571,13 @@ mod tests {
             &AgentCommand::RunnersDiscover,
         )
         .unwrap();
-        assert_eq!(discovered.discovered_candidates[0].disposition, "REFUSED");
+        let refused = &discovered.discovered_candidates[0];
+        assert_eq!(refused.disposition, "REFUSED");
         assert_eq!(
-            discovered.discovered_candidates[0].refusal_reason.as_deref(),
+            refused.refusal_reason.as_deref(),
             Some("discovery.duplicate-home")
         );
-        assert!(!discovered.discovered_candidates[0].enrollment_eligible);
+        assert!(!refused.enrollment_eligible);
     }
 
     #[test]
