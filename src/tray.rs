@@ -1313,6 +1313,102 @@ mod tests {
     }
 
     #[test]
+    fn runners_partial_failure_banner_and_item_failed_are_localized() {
+        use crate::{
+            EnrollmentState, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: false,
+            prepare_only: false,
+            applied: true,
+            reason_code: Some(ReasonCode::new("runners-partial-failure").unwrap()),
+            records: vec![
+                RunnerRecordView {
+                    local_runner_key: "runner-a".to_owned(),
+                    runner_id: 1,
+                    expected_runner_name: "fixture-a".to_owned(),
+                    desired_enabled: true,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: false,
+                    backend_kind: "user-session".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Enabled,
+                    memory_samples: Vec::new(),
+                    item_applied: Some(true),
+                    item_reason_code: None,
+                },
+                RunnerRecordView {
+                    local_runner_key: "runner-b".to_owned(),
+                    runner_id: 2,
+                    expected_runner_name: "fixture-b".to_owned(),
+                    desired_enabled: true,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: false,
+                    backend_kind: "user-session".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Enabled,
+                    memory_samples: Vec::new(),
+                    item_applied: Some(false),
+                    item_reason_code: Some(ReasonCode::new("runners-item-failed").unwrap()),
+                },
+            ],
+            discovered_keys: Vec::new(),
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: true,
+            discovered_candidates: Vec::new(),
+        };
+
+        let english_snapshot = sample_snapshot();
+        let mut chinese_snapshot = sample_snapshot();
+        chinese_snapshot.effective_ui_preferences.locale = EffectiveLocale::ZhCn;
+        chinese_snapshot.ui_preferences.language = LanguagePreference::ZhCn;
+
+        let english = render(&english_snapshot, Some(&report));
+        let chinese = render(&chinese_snapshot, Some(&report));
+        assert_eq!(collect_ids(&english.entries), collect_ids(&chinese.entries));
+        assert!(
+            collect_ids(&english.entries).contains(&"control.runners.status._partial".to_owned())
+        );
+
+        fn find_label<'a>(entries: &'a [TrayMenuEntry], id: &TrayMenuId) -> Option<&'a str> {
+            for entry in entries {
+                match entry {
+                    TrayMenuEntry::Item(item) if &item.id == id => {
+                        return Some(item.label.as_str())
+                    }
+                    TrayMenuEntry::Submenu { entries, .. } => {
+                        if let Some(label) = find_label(entries, id) {
+                            return Some(label);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        fn any_label(entries: &[TrayMenuEntry], needle: &str) -> bool {
+            entries.iter().any(|entry| match entry {
+                TrayMenuEntry::Item(item) => item.label.contains(needle),
+                TrayMenuEntry::Submenu { entries, .. } => any_label(entries, needle),
+                TrayMenuEntry::Separator => false,
+            })
+        }
+
+        let partial_id = TrayMenuId::RunnerStatus("_partial".to_owned());
+        assert_eq!(
+            find_label(&english.entries, &partial_id),
+            Some("Partial failure — inspect item results")
+        );
+        assert_eq!(
+            find_label(&chinese.entries, &partial_id),
+            Some("部分失败 — 请查看单项结果")
+        );
+        assert!(any_label(&english.entries, "failed"));
+        assert!(any_label(&chinese.entries, "失败"));
+    }
+
+    #[test]
     fn tray_explains_withdrawal_blocked_without_claiming_achieved_drained() {
         let mut snapshot = sample_snapshot();
         snapshot.admission_control = AdmissionControlSnapshot {
