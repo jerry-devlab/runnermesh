@@ -14,6 +14,15 @@ AUTHORITATIVE_MAIN_AT_PLAN=d2b37444342d085e650f996e5fb4322f775bbe6f
 Docs-only main advancement after the RC does **not** invalidate the immutable RC.
 Do not silently rebuild or retag this RC for LRM work.
 
+## Reverification (source train, read-only)
+
+```text
+REVERIFIED_AT=2026-11-08T14:50Z_approx
+REVERIFY_COMMIT_API=PASS  # fdd9fe6b… still resolves
+REVERIFY_HOSTED_RUN=PASS  # run 42452639359 conclusion=success headSha=fdd9fe6b…
+RC_REBUILD=NOT_PERFORMED
+```
+
 ## Still required before live H2
 
 ```text

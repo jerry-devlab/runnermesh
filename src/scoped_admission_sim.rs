@@ -181,4 +181,35 @@ mod tests {
         assert!(plan.mutates_workflows);
         assert!(!plan.approved);
     }
+
+    #[test]
+    fn proposed_namespaced_selectors_do_not_silently_unlock_v01_collision() {
+        // Even if each runner *proposes* a distinct scoped selector, the frozen
+        // v0.1 evaluator still blocks dual managed claims on the reserved label
+        // until a separate ADR/Owner gate accepts the migration.
+        let bindings = vec![
+            SimulatedAdmissionBinding {
+                local_runner_key: "alpha".into(),
+                scope: repo_scope(),
+                managed_admission: true,
+                claimed_selector: Some(RESERVED_ADMISSION_LABEL.to_owned()),
+            },
+            SimulatedAdmissionBinding {
+                local_runner_key: "beta".into(),
+                scope: repo_scope(),
+                managed_admission: true,
+                claimed_selector: Some(RESERVED_ADMISSION_LABEL.to_owned()),
+            },
+        ];
+        let plans: Vec<_> = bindings
+            .iter()
+            .map(propose_scoped_selector_migration)
+            .collect();
+        assert_ne!(plans[0].proposed_selector, plans[1].proposed_selector);
+        assert!(plans.iter().all(|plan| !plan.approved));
+        let outcomes = evaluate_v01_selector_compatibility(&bindings);
+        assert!(outcomes
+            .iter()
+            .all(|o| matches!(o, SelectorCompatibility::BlockedSameScopeCollision { .. })));
+    }
 }
