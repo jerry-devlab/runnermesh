@@ -690,6 +690,44 @@ mod tests {
     }
 
     #[test]
+    fn zen_drain_keeps_busy_and_listening_runners_independent() {
+        let registry = build_registry(vec![
+            record("busy", "repo-a", 1, true, false),
+            record("idle", "repo-b", 2, true, false),
+        ]);
+        let observations = vec![
+            obs("busy", DiscoveredLifecycle::Busy, true, Some(true)),
+            obs("idle", DiscoveredLifecycle::Listening, false, Some(true)),
+        ];
+        // Zen outranks Force-CI: both desire Offline/Drain, but Busy never claims
+        // drained while a Worker is held.
+        let report = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::ForceCi, ZenOverride::Enabled),
+            &observations,
+        );
+        let busy = report
+            .results
+            .iter()
+            .find(|item| item.local_runner_key == "busy")
+            .unwrap();
+        let idle = report
+            .results
+            .iter()
+            .find(|item| item.local_runner_key == "idle")
+            .unwrap();
+        assert_eq!(busy.plan, PerRunnerPlan::WithdrawSelector);
+        assert_eq!(busy.achieved, PerRunnerAchieved::Transitional);
+        assert_ne!(busy.achieved, PerRunnerAchieved::Drained);
+        assert_ne!(busy.achieved, PerRunnerAchieved::Offline);
+        assert_eq!(idle.plan, PerRunnerPlan::WithdrawSelector);
+        assert_eq!(idle.achieved, PerRunnerAchieved::Transitional);
+        // Plans are independent intents — neither runner mutates the other.
+        assert_eq!(busy.local_runner_key, "busy");
+        assert_eq!(idle.local_runner_key, "idle");
+    }
+
+    #[test]
     fn two_runners_remain_isolated_when_only_one_is_disabled() {
         let mut registry = build_registry(vec![
             record("a", "repo-a", 1, true, false),
