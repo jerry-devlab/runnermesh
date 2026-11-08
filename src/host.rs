@@ -462,6 +462,24 @@ mod tests {
     }
 
     #[test]
+    fn restart_refuses_execution_identity_mismatch_without_adoption() {
+        let mut mismatched = runner(RunnerPhase::Listening);
+        mismatched.execution_identity = ExecutionIdentityEvidence::Mismatch;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: mismatched,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::ExecutionIdentityMismatch)
+        );
+    }
+
+    #[test]
     fn restart_refuses_foreign_worker_without_destructive_adoption() {
         let mut foreign = runner(RunnerPhase::Busy);
         foreign.worker = ProcessOwnership::Foreign;
