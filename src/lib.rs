@@ -21,6 +21,7 @@ mod process_snapshot;
 mod qualification;
 mod runner_discovery;
 mod runner_observer;
+mod runner_registry;
 mod runtime;
 mod runtime_binding;
 mod supervisor;
@@ -122,6 +123,11 @@ pub use runner_discovery::{
 pub use runner_observer::{
     ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
     RunnerLocalEvidence, RunnerObservation, RunnerSource, WindowsRunnerSource,
+};
+pub use runner_registry::{
+    EnrollmentState, FileRegistryStore, MemoryRegistryStore, RegistryBackendBinding, RegistryError,
+    RegistryStore, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
+    RUNNER_REGISTRY_SCHEMA_VERSION,
 };
 pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
