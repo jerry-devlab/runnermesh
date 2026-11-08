@@ -180,6 +180,7 @@ pub enum RegistryError {
     InvalidRecord(&'static str),
     DuplicateKey,
     DuplicateHome,
+    DuplicateWorkRoot,
     DuplicateServerIdentity,
     SameScopeManagedAdmissionCollision,
     NotEnrollmentEligible,
@@ -199,6 +200,7 @@ impl fmt::Display for RegistryError {
             Self::InvalidRecord(reason) => write!(formatter, "invalid runner record: {reason}"),
             Self::DuplicateKey => formatter.write_str("duplicate local runner key"),
             Self::DuplicateHome => formatter.write_str("duplicate runner home"),
+            Self::DuplicateWorkRoot => formatter.write_str("duplicate runner work root"),
             Self::DuplicateServerIdentity => {
                 formatter.write_str("duplicate server runner identity")
             }
@@ -548,6 +550,14 @@ impl RunnerRegistryEditor {
         {
             return Err(RegistryError::DuplicateHome);
         }
+        let work_root_key = normalize_path_key(&record.work_root);
+        if self
+            .registry
+            .active_records()
+            .any(|existing| normalize_path_key(&existing.work_root) == work_root_key)
+        {
+            return Err(RegistryError::DuplicateWorkRoot);
+        }
         if self.registry.active_records().any(|existing| {
             existing.registration_scope == record.registration_scope
                 && existing.runner_id == record.runner_id
@@ -817,6 +827,33 @@ mod tests {
             collided,
             Err(RegistryError::SameScopeManagedAdmissionCollision)
         ));
+    }
+
+    #[test]
+    fn duplicate_work_root_across_distinct_homes_is_refused() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut cand_a = discovered(
+            "key-a",
+            scope_a(),
+            1,
+            r"C:\fixture\runners\a",
+            RunnerBackendKind::UserSession,
+            None,
+        );
+        cand_a.identity.work_root = Some(PathBuf::from(r"C:\fixture\shared_work"));
+        editor.enroll_from_discovery(&cand_a, None, false).unwrap();
+
+        let mut cand_b = discovered(
+            "key-b",
+            scope_b(),
+            2,
+            r"C:\fixture\runners\b",
+            RunnerBackendKind::UserSession,
+            None,
+        );
+        cand_b.identity.work_root = Some(PathBuf::from(r"C:\fixture\shared_work"));
+        let err = editor.enroll_from_discovery(&cand_b, None, false);
+        assert!(matches!(err, Err(RegistryError::DuplicateWorkRoot)));
     }
 
     #[test]

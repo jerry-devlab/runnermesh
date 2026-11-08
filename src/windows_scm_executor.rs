@@ -379,6 +379,13 @@ impl MockScmBackend {
             .start_calls
     }
 
+    pub fn change_calls(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .change_calls
+    }
+
     fn take_fail(&self) -> Result<(), ScmApiError> {
         if let Some(error) = self
             .inner
@@ -1825,6 +1832,25 @@ mod tests {
         assert_eq!(receipt.stage, ScmTransactionStage::RestoreFailed);
         assert!(!receipt.restore_pass);
         assert_eq!(receipt.reason.as_deref(), Some("scm.access-denied"));
+    }
+
+    #[test]
+    fn restore_start_mode_accepted_but_readback_fails_is_restore_failed_not_restore_pass() {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_listening());
+        let exec = executor(mock.clone(), open_synthetic_gate());
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        let plan = capture_restore_plan(&prestate);
+        // capture_prestate already queried once. Fail on the post-change_start_mode query.
+        mock.set_fail_after_queries(1, ScmApiError::Timeout);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt = exec.restore(&plan, &mut admission);
+        assert_eq!(receipt.stage, ScmTransactionStage::RestoreFailed);
+        assert!(receipt.api_accepted);
+        assert!(!receipt.restore_pass);
+        assert_eq!(receipt.achieved, AchievedServiceControl::Unknown);
+        assert_eq!(receipt.reason.as_deref(), Some("scm.timeout"));
+        assert_eq!(mock.change_calls(), 1);
     }
 
     #[test]
