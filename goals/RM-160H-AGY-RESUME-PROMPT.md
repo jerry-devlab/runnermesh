@@ -10,7 +10,7 @@ Copy everything below the line into AGY CLI.
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 ACTIVE_TRAIN=RM-160H-T02-V01-CLOSEOUT-PREP
 PRIOR_TRAIN=RM-160H-T01-FIELD-BASELINE
-ROOT=C:\Dev\src\runnermesh-160h
+ROOT_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=65
 REMOTE_TIP=5271d5b3d4705c2d9b0be58716ce52d273e37db7
@@ -22,7 +22,7 @@ SOURCE_AND_SANDBOX_ONLY=true
 
 ## 硬约束
 
-1. **保持** `C:\Dev\src\runnermesh-160h` + `feat/160h-gt01-field-baseline`；禁止切到 `feat/lrm-09-*`，禁止覆盖 productization worktree。
+1. **保持** worktree `runnermesh-160h` + `feat/160h-gt01-field-baseline`；禁止切到 `feat/lrm-09-*`，禁止覆盖 productization worktree。
 2. 禁止 `reset --hard`、`clean -fd`、强制 checkout、删除其他 worktree。
 3. 先读交接：`goals/RM-160H-CURSOR-TO-AGY-HANDOFF.md`，以及 T01/T02 Checkpoint、gap map、P01 H2/G17、P04 selector prep。
 4. `goals/RM-160H-DELIVERY-PROGRAM-001/` 未跟踪且应等于 main；无差异不要丢弃。

@@ -10,7 +10,7 @@ Cursor Implementer session ending by Owner request (Cursor quota). Continue with
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 ACTIVE_TRAIN=RM-160H-T02-V01-CLOSEOUT-PREP
 PRIOR_TRAIN=RM-160H-T01-FIELD-BASELINE
-WORKTREE=C:\Dev\src\runnermesh-160h
+WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=https://github.com/jerry-devlab/runnermesh/pull/65
 REMOTE_TIP=5271d5b3d4705c2d9b0be58716ce52d273e37db7
