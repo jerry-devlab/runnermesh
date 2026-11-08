@@ -185,13 +185,15 @@ pub fn run_lrm_synthetic_matrix(sampled_at_unix_ms: u64) -> LrmSyntheticMatrixRe
         })
         .collect();
 
+    // Synthetic matrix PASS does not prove production source/rollback readiness.
+    // Those fields stay UNPROVEN until bound to exact hosted evidence / plans.
     let owner_prep = LrmOwnerPrepReceipt {
         schema_version: LRM_OWNER_PREP_SCHEMA_VERSION,
         matrix_id: LRM_SYNTHETIC_MATRIX_ID.to_owned(),
         production_mutation: false,
         synthetic_matrix: LrmPrepDisposition::Pass,
-        source_ready: LrmPrepDisposition::Pass,
-        rollback_plan_ready: LrmPrepDisposition::Pass,
+        source_ready: LrmPrepDisposition::Unproven,
+        rollback_plan_ready: LrmPrepDisposition::Unproven,
         independent_review: LrmPrepDisposition::Pending,
         owner_gate: LrmPrepDisposition::Blocked,
         live_qualification: LrmPrepDisposition::Blocked,
@@ -287,6 +289,11 @@ mod tests {
         );
         assert!(report.command_report.partial_failure);
         assert!(!report.owner_prep.production_mutation);
+        assert_eq!(report.owner_prep.source_ready, LrmPrepDisposition::Unproven);
+        assert_eq!(
+            report.owner_prep.rollback_plan_ready,
+            LrmPrepDisposition::Unproven
+        );
         assert_eq!(report.owner_prep.owner_gate, LrmPrepDisposition::Blocked);
         assert_eq!(
             report.owner_prep.live_qualification,
