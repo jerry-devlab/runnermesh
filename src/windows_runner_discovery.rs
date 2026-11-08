@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     SessionDiscoverySource,
 };
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const SERVICE_ACCOUNT_IDENTITY_PROVIDER: &str = "windows-service-account-sha256-v1";
 
 /// Runs the pure inventory over live Service enumeration plus optional session homes.
@@ -95,17 +95,18 @@ fn current_user_identity_optional() -> Option<OpaqueIdentityReference> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
     let normalized = account.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return None;
     }
+    // Well-known service accounts still hash; empty/whitespace never forge identity.
     let digest = hex_sha256(normalized.as_bytes());
     OpaqueIdentityReference::new(SERVICE_ACCOUNT_IDENTITY_PROVIDER, digest).ok()
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -539,7 +540,9 @@ fn service_fact_from_scm(
         let image = wide_to_string(config.lpBinaryPathName);
         let start_name = wide_to_string(config.lpServiceStartName);
         CloseServiceHandle(service);
-        let image_path = PathBuf::from(image.trim_matches('"'));
+        // lpBinaryPathName may be quoted and may carry args. `trim_matches('"')`
+        // corrupts `"C:\path\exe" -arg` into `C:\path\exe" -arg`.
+        let image_path = PathBuf::from(service_image_path_token(&image)?);
         let runner_home = runner_home_from_image(&image_path)
             .unwrap_or_else(|| image_path.parent().unwrap_or(Path::new(".")).to_path_buf());
         let meta = read_runner_metadata(&runner_home);
@@ -571,7 +574,33 @@ fn service_fact_from_scm(
     }
 }
 
-#[cfg(windows)]
+/// Extracts the executable path token from a Windows service `lpBinaryPathName`.
+///
+/// Handles quoted paths with trailing arguments and unquoted first-token forms.
+/// Empty / unclosed-quote / whitespace-only inputs fail closed (`None`).
+#[cfg(any(windows, test))]
+fn service_image_path_token(binary_path_name: &str) -> Option<&str> {
+    let trimmed = binary_path_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let end = rest.find('"')?;
+        let path = &rest[..end];
+        if path.is_empty() {
+            return None;
+        }
+        return Some(path);
+    }
+    // Unquoted ImagePath: first whitespace-separated token is the executable.
+    let token = trimmed.split_whitespace().next()?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
+#[cfg(any(windows, test))]
 fn runner_home_from_image(image_path: &Path) -> Option<PathBuf> {
     // Typical layout: <home>\bin\RunnerService.exe
     let parent = image_path.parent()?;
@@ -756,10 +785,59 @@ mod tests {
         assert!(!summary.incomplete);
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn service_account_identity_hashes_well_known_and_fails_closed_on_empty() {
+        assert!(opaque_from_account_name("").is_none());
+        assert!(opaque_from_account_name("   ").is_none());
+        let local_system = opaque_from_account_name("LocalSystem").expect("localsystem");
+        let local_service =
+            opaque_from_account_name(r"NT AUTHORITY\LocalService").expect("localservice");
+        assert_ne!(local_system.key, local_service.key);
+        // Case folding must not mint distinct identities for the same account.
+        assert_eq!(
+            opaque_from_account_name("localsystem").expect("folded").key,
+            local_system.key
+        );
+    }
+
+    #[test]
+    fn service_image_path_token_handles_quotes_and_args() {
+        assert_eq!(
+            service_image_path_token(
+                r#""C:\fixture\runners\svc-home\bin\RunnerService.exe" --runAsService"#
+            ),
+            Some(r"C:\fixture\runners\svc-home\bin\RunnerService.exe")
+        );
+        // Legacy trim_matches('"') would leave a trailing quote + args.
+        assert_ne!(
+            r#""C:\path\RunnerService.exe" -arg"#.trim_matches('"'),
+            r"C:\path\RunnerService.exe"
+        );
+        assert_eq!(
+            service_image_path_token(r"C:\fixture\bin\RunnerService.exe -svc"),
+            Some(r"C:\fixture\bin\RunnerService.exe")
+        );
+        assert_eq!(
+            service_image_path_token(r#""C:\fixture\bin\RunnerService.exe""#),
+            Some(r"C:\fixture\bin\RunnerService.exe")
+        );
+        assert_eq!(service_image_path_token(""), None);
+        assert_eq!(service_image_path_token("   "), None);
+        assert_eq!(service_image_path_token(r#""""#), None);
+        assert_eq!(
+            service_image_path_token(r#""C:\unclosed\RunnerService.exe"#),
+            None
+        );
+    }
+
     #[test]
     fn runner_home_from_quoted_service_image_uses_bin_parent() {
-        let image = PathBuf::from(r#"C:\fixture\runners\svc-home\bin\RunnerService.exe"#);
+        let image = PathBuf::from(
+            service_image_path_token(
+                r#""C:\fixture\runners\svc-home\bin\RunnerService.exe" --runAsService"#,
+            )
+            .expect("token"),
+        );
         let home = runner_home_from_image(&image).expect("home");
         assert_eq!(home, PathBuf::from(r"C:\fixture\runners\svc-home"));
         // Non-bin layout falls back to parent directory only.

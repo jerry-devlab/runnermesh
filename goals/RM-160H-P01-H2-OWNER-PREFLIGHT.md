@@ -22,7 +22,7 @@ OWNER_TOKEN=REQUIRED_NEW              # prior H2 token consumed by historical at
 H2_CUTOVER=WAITING_FOR_OWNER
 H2_RESTORE_PLAN=required_in_private_Owner_packet
 DOGFOOD_ELAPSED_24H=not_started
-G17=TODO
+G17=PREPARED_CHECKLIST_ONLY   # see goals/RM-160H-P01-G17-RELEASE-PREP.md
 H3=WAITING_FOR_OWNER
 ```
 
