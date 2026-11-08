@@ -13,6 +13,7 @@ mod h1_live;
 mod host;
 mod installation;
 mod ipc;
+mod lrm_integration;
 mod model;
 mod package;
 mod policy;
@@ -92,6 +93,10 @@ pub use installation::{
 pub use ipc::{
     IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResponseBody,
     IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
+};
+pub use lrm_integration::{
+    run_lrm_synthetic_matrix, LrmOwnerPrepReceipt, LrmPrepDisposition, LrmSyntheticMatrixReport,
+    LrmSyntheticMatrixRow, LRM_OWNER_PREP_SCHEMA_VERSION, LRM_SYNTHETIC_MATRIX_ID,
 };
 pub use model::{NodeState, ParseUserModeError, UserMode};
 pub use package::{
