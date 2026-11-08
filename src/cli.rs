@@ -447,8 +447,8 @@ fn render_runners_text(report: &crate::RunnerCommandReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_cli, parse_cli, render_runner_status, render_snapshot_text, AgentTransport,
-        CliCommand,
+        execute_cli, parse_cli, render_doctor_text, render_runner_status, render_runners_text,
+        render_snapshot_text, AgentTransport, CliCommand,
     };
     use crate::{
         AdmissionControlSnapshot, AdmissionDecision, AdmissionLifecycleState,
@@ -671,5 +671,65 @@ mod tests {
             auto_idle_threshold_seconds: 300,
             update_checks_enabled: true,
         }
+    }
+
+    #[test]
+    fn doctor_and_runners_text_omit_private_path_and_secret_shapes() {
+        use crate::{
+            DiscoveredCandidateView, EnrollmentState, RunnerCommandReport,
+            RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let doctor = DoctorReport {
+            checks: vec![DoctorCheck {
+                id: ReasonCode::new("agent-health").unwrap(),
+                status: DoctorStatus::Pass,
+                reason_code: Some(ReasonCode::new("host-observed").unwrap()),
+            }],
+        };
+        let doctor_text = render_doctor_text(&doctor);
+        assert!(doctor_text.contains("agent-health"));
+        assert!(!doctor_text.contains(r"C:\"));
+        assert!(!doctor_text.contains("/Users/"));
+        assert!(!doctor_text.contains("ghp_"));
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: true,
+            prepare_only: false,
+            applied: false,
+            reason_code: Some(ReasonCode::new("runners-partial-failure").unwrap()),
+            records: vec![RunnerRecordView {
+                local_runner_key: "runner-a".to_owned(),
+                runner_id: 7,
+                expected_runner_name: "fixture".to_owned(),
+                desired_enabled: true,
+                enrollment_state: EnrollmentState::Enrolled,
+                managed_admission: false,
+                backend_kind: "user-session".to_owned(),
+                presentation_status: RunnerPresentationStatus::Enabled,
+                memory_samples: Vec::new(),
+                item_applied: Some(false),
+                item_reason_code: Some(ReasonCode::new("runners-item-failed").unwrap()),
+            }],
+            discovered_keys: vec!["opaque-discovery-key".to_owned()],
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: true,
+            discovered_candidates: vec![DiscoveredCandidateView {
+                local_discovery_key: "opaque-discovery-key".to_owned(),
+                backend_kind: "user-session".to_owned(),
+                disposition: "OBSERVED_ONLY".to_owned(),
+                refusal_reason: None,
+                enrollment_eligible: true,
+                same_scope_collision: false,
+            }],
+        };
+        let runners_text = render_runners_text(&report);
+        assert!(runners_text.contains("partial_failure=true"));
+        assert!(runners_text.contains("opaque-discovery-key"));
+        assert!(!runners_text.contains(r"C:\fixture"));
+        assert!(!runners_text.contains("actions.runner."));
+        assert!(!runners_text.contains("ghp_"));
     }
 }
