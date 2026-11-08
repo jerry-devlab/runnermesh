@@ -234,4 +234,67 @@ mod tests {
             .iter()
             .all(|o| matches!(o, SelectorCompatibility::BlockedSameScopeCollision { .. })));
     }
+
+    #[test]
+    fn mixed_managed_and_unmanaged_or_missing_selector_classifications() {
+        let bindings = vec![
+            SimulatedAdmissionBinding {
+                local_runner_key: "valid-managed".into(),
+                scope: repo_scope(),
+                managed_admission: true,
+                claimed_selector: Some(RESERVED_ADMISSION_LABEL.to_owned()),
+            },
+            SimulatedAdmissionBinding {
+                local_runner_key: "missing-selector".into(),
+                scope: repo_scope(),
+                managed_admission: true,
+                claimed_selector: None,
+            },
+            SimulatedAdmissionBinding {
+                local_runner_key: "unrelated-label".into(),
+                scope: repo_scope(),
+                managed_admission: true,
+                claimed_selector: Some("unrelated-label".to_owned()),
+            },
+            SimulatedAdmissionBinding {
+                local_runner_key: "unmanaged".into(),
+                scope: repo_scope(),
+                managed_admission: false,
+                claimed_selector: None,
+            },
+        ];
+        let outcomes = evaluate_v01_selector_compatibility(&bindings);
+        assert_eq!(outcomes[0], SelectorCompatibility::Compatible);
+        assert_eq!(
+            outcomes[1],
+            SelectorCompatibility::RefusedMissingSelector {
+                local_runner_key: "missing-selector".into()
+            }
+        );
+        assert_eq!(
+            outcomes[2],
+            SelectorCompatibility::RefusedMissingSelector {
+                local_runner_key: "unrelated-label".into()
+            }
+        );
+        assert_eq!(outcomes[3], SelectorCompatibility::Compatible);
+    }
+
+    #[test]
+    fn migration_sanitizer_and_adr_preservation() {
+        let binding = SimulatedAdmissionBinding {
+            local_runner_key: "my org/runner 01#special!".into(),
+            scope: repo_scope(),
+            managed_admission: true,
+            claimed_selector: Some(RESERVED_ADMISSION_LABEL.to_owned()),
+        };
+        let plan = propose_scoped_selector_migration(&binding);
+        assert_eq!(
+            plan.proposed_selector,
+            "runnermesh-admit-my-org-runner-01-special-"
+        );
+        assert!(plan.requires_owner_gate);
+        assert!(plan.mutates_workflows);
+        assert!(!plan.approved);
+    }
 }

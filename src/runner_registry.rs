@@ -830,6 +830,55 @@ mod tests {
     }
 
     #[test]
+    fn distinct_scopes_or_unmanaged_runners_coexist_without_collision() {
+        let mut editor = RunnerRegistryEditor::empty();
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-a",
+                    scope_a(),
+                    1,
+                    r"C:\fixture\runners\a",
+                    RunnerBackendKind::WindowsService,
+                    Some("actions.runner.a"),
+                ),
+                None,
+                true,
+            )
+            .unwrap();
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-b",
+                    scope_b(),
+                    2,
+                    r"C:\fixture\runners\b",
+                    RunnerBackendKind::WindowsService,
+                    Some("actions.runner.b"),
+                ),
+                None,
+                true,
+            )
+            .unwrap();
+
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-a2-unmanaged",
+                    scope_a(),
+                    3,
+                    r"C:\fixture\runners\a2",
+                    RunnerBackendKind::WindowsService,
+                    Some("actions.runner.a2"),
+                ),
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(editor.registry().records.len(), 3);
+    }
+
+    #[test]
     fn duplicate_work_root_across_distinct_homes_is_refused() {
         let mut editor = RunnerRegistryEditor::empty();
         let mut cand_a = discovered(

@@ -1695,6 +1695,69 @@ mod tests {
     }
 
     #[test]
+    fn closed_gate_refuses_every_mutation_intent_and_reports_closed() {
+        let gate = LiveScmExecutionGate::CLOSED;
+        assert!(!gate.allows_mutation());
+        assert!(!gate.is_synthetic_test_only());
+        assert!(!gate.is_trusted_live());
+        assert!(!gate.authorizes("fixture.scm.a", "fixture-image", true, false, false));
+        assert!(!gate.authorizes("fixture.scm.a", "fixture-image", false, true, false));
+        assert!(!gate.authorizes("fixture.scm.a", "fixture-image", false, false, true));
+    }
+
+    #[test]
+    fn granular_gate_permissions_and_identity_match_strictly_enforced() {
+        let grant = SyntheticScmTestGrant::new(
+            "fixture.scm.a",
+            "fixture-image",
+            true,  // allow_start
+            false, // allow_stop
+            false, // allow_change_config
+        );
+        let gate = LiveScmExecutionGate::from_synthetic_test_grant(&grant).unwrap();
+        assert!(gate.allows_mutation());
+        assert!(gate.authorizes("fixture.scm.a", "fixture-image", true, false, false));
+        // Disallowed stop
+        assert!(!gate.authorizes("fixture.scm.a", "fixture-image", false, true, false));
+        // Disallowed config
+        assert!(!gate.authorizes("fixture.scm.a", "fixture-image", false, false, true));
+        // Service mismatch
+        assert!(!gate.authorizes("other.service", "fixture-image", true, false, false));
+        // Image token mismatch
+        assert!(!gate.authorizes("fixture.scm.a", "other-image", true, false, false));
+    }
+
+    #[test]
+    fn unissued_verifier_rejects_diverse_request_payloads() {
+        let verifier = UnissuedOwnerAuthorizationVerifier;
+        let empty_req = TrustedOwnerAuthorizationRequest {
+            service_name: String::new(),
+            image_token: String::new(),
+            allow_start: false,
+            allow_stop: false,
+            allow_change_config: false,
+            owner_material: Vec::new(),
+        };
+        assert!(matches!(
+            verifier.verify(&empty_req),
+            Err(ScmApiError::AuthorizationNotIssued)
+        ));
+
+        let full_req = TrustedOwnerAuthorizationRequest {
+            service_name: "legitimate.service".to_owned(),
+            image_token: "legitimate-token".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: vec![1, 2, 3, 4, 5],
+        };
+        assert!(matches!(
+            verifier.verify(&full_req),
+            Err(ScmApiError::AuthorizationNotIssued)
+        ));
+    }
+
+    #[test]
     fn closed_gate_refuses_stop_without_mutation() {
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
