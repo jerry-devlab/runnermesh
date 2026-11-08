@@ -4,7 +4,7 @@
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 ACTIVE_TRAIN=RM-160H-T01-FIELD-BASELINE
 ACTIVE_BUDGET=16h
-WORKTREE=C:\Dev\src\runnermesh-160h
+WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
@@ -44,5 +44,5 @@ BUDGET_USED≈estimate_1.5h
 BUDGET_LEFT≈14.5h_of_GT01
 CI_STATUS=pending_push
 OWNER_GATES=HUX1_ZENBOOKDUO; H2; HUX2_LIVE; TRUSTED_SCM
-RECOVERY_INSTRUCTION=resume worktree runnermesh-160h branch feat/160h-gt01-field-baseline; do not touch feat/lrm-09 or overwrite runnermesh-lrm-product
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; do not touch feat/lrm-09 or overwrite productization tip worktree
 ```

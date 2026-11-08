@@ -265,6 +265,7 @@ fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
     }
 }
 
+#[cfg(any(windows, test))]
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -274,6 +275,7 @@ fn normalize_path_key(path: &Path) -> String {
 
 /// True when `path_key` is `home` or a descendant separated by `\`.
 /// Rejects sibling prefix collisions (`home\a` vs `home\abc`).
+#[cfg(any(windows, test))]
 fn path_is_under_home_key(path_key: &str, home_key: &str) -> bool {
     if path_key == home_key {
         return true;
@@ -752,5 +754,19 @@ mod tests {
         let summary = PrivacySafeDiscoverySummary::from_report(&report);
         assert_eq!(summary.candidate_count, 0);
         assert!(!summary.incomplete);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runner_home_from_quoted_service_image_uses_bin_parent() {
+        let image = PathBuf::from(r#"C:\fixture\runners\svc-home\bin\RunnerService.exe"#);
+        let home = runner_home_from_image(&image).expect("home");
+        assert_eq!(home, PathBuf::from(r"C:\fixture\runners\svc-home"));
+        // Non-bin layout falls back to parent directory only.
+        let odd = PathBuf::from(r"C:\fixture\runners\svc-home\RunnerService.exe");
+        assert_eq!(
+            runner_home_from_image(&odd),
+            Some(PathBuf::from(r"C:\fixture\runners\svc-home"))
+        );
     }
 }
