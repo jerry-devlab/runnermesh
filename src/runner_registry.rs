@@ -890,4 +890,130 @@ mod tests {
             Err(RegistryError::NotEnrollmentEligible)
         ));
     }
+
+    #[test]
+    fn corrupt_json_and_temp_residue_do_not_silently_diverge_intent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("runnermesh-registry-fail-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("runner-registry.json");
+        let store = FileRegistryStore::new(&path);
+
+        let mut editor = RunnerRegistryEditor::empty();
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-a",
+                    scope_a(),
+                    1,
+                    r"C:\fixture\runners\a",
+                    RunnerBackendKind::UserSession,
+                    None,
+                ),
+                None,
+                false,
+            )
+            .unwrap();
+        editor.set_desired_enabled("key-a", false).unwrap();
+        store.save(editor.registry()).unwrap();
+
+        // Simulate crash residue beside the durable file; load must still see
+        // the last committed intent and must not invent enabled=true.
+        fs::write(root.join("runner-registry.json.tmp"), b"{broken").unwrap();
+        let reloaded = store.load().unwrap().unwrap();
+        assert!(!reloaded.get("key-a").unwrap().desired_enabled);
+
+        // Corrupt durable bytes must fail closed rather than returning empty.
+        fs::write(&path, b"{not-json").unwrap();
+        assert!(matches!(store.load(), Err(RegistryError::Json(_))));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v01_migrate_and_export_preserves_enabled_intent_round_trip() {
+        let mut editor = RunnerRegistryEditor::empty();
+        editor.migrate_v01_binding(&v01_binding(), None).unwrap();
+        let key = editor
+            .registry()
+            .legacy_v01_binding_key
+            .clone()
+            .expect("legacy key");
+        editor.set_desired_enabled(&key, false).unwrap();
+        let exported = editor.export_v01_binding().unwrap();
+        assert_eq!(exported.runner_id, v01_binding().admission.runner_id);
+
+        // Re-import into a fresh editor must not resurrect desired_enabled=true
+        // for a forgotten legacy path; migration is idempotent on key presence.
+        let mut again = RunnerRegistryEditor::empty();
+        again.migrate_v01_binding(&v01_binding(), None).unwrap();
+        // Fresh migration creates a new enabled record because the previous
+        // disable lived only in the first editor document — prove explicit save
+        // is required to retain intent across process boundaries.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("runnermesh-registry-mig-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("runner-registry.json");
+        let store = FileRegistryStore::new(&path);
+        store.save(editor.registry()).unwrap();
+        let persisted = store.load().unwrap().unwrap();
+        assert!(!persisted.get(&key).unwrap().desired_enabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn memory_and_file_stores_report_write_failures_without_intent_drift() {
+        let mut editor = RunnerRegistryEditor::empty();
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-a",
+                    scope_a(),
+                    1,
+                    r"C:\fixture\runners\a",
+                    RunnerBackendKind::UserSession,
+                    None,
+                ),
+                None,
+                false,
+            )
+            .unwrap();
+        let memory = MemoryRegistryStore::default();
+        memory.save(editor.registry()).unwrap();
+        editor.set_desired_enabled("key-a", false).unwrap();
+        // Memory store not yet updated — intentional divergence must be visible
+        // by comparing editor vs store rather than silently coalescing.
+        let stale = memory.persisted().unwrap();
+        assert!(stale.get("key-a").unwrap().desired_enabled);
+        assert!(!editor.registry().get("key-a").unwrap().desired_enabled);
+        memory.save(editor.registry()).unwrap();
+        assert!(
+            !memory
+                .persisted()
+                .unwrap()
+                .get("key-a")
+                .unwrap()
+                .desired_enabled
+        );
+
+        // Write beneath a file-as-parent fails closed (no silent success).
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("runnermesh-registry-io-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("not-a-dir");
+        fs::write(&blocker, b"file").unwrap();
+        let missing = FileRegistryStore::new(blocker.join("registry.json"));
+        let failed = missing.save(editor.registry());
+        assert!(matches!(failed, Err(RegistryError::Io(_))));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

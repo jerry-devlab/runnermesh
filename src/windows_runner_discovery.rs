@@ -5,24 +5,67 @@
 //! registration, and never reads credential files.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 
 use crate::{
-    DiscoveredLifecycle, DiscoveryIdentityFilter, DiscoveryReport, EmptyUnsupportedDiscoverySource,
-    RegistrationScope, RunnerDiscoveryInventory, ServiceCandidateFact, ServiceDiscoverySource,
-    SessionCandidateFact, SessionDiscoverySource,
+    DiscoveredLifecycle, DiscoveryEnumerationStatus, DiscoveryIdentityFilter, DiscoveryReport,
+    EmptyUnsupportedDiscoverySource, OpaqueIdentityReference, RegistrationScope,
+    RunnerDiscoveryInventory, ServiceCandidateFact, ServiceDiscoverySource, SessionCandidateFact,
+    SessionDiscoverySource,
 };
+
+#[cfg(windows)]
+const SERVICE_ACCOUNT_IDENTITY_PROVIDER: &str = "windows-service-account-sha256-v1";
 
 /// Runs the pure inventory over live Service enumeration plus optional session homes.
 pub fn discover_local_runners_read_only(session_homes: Vec<PathBuf>) -> DiscoveryReport {
+    let service = WindowsServiceDiscoverySource::default();
+    let session = ConfiguredSessionDiscoverySource::new(session_homes);
+    let process_status = session.last_process_status();
+    // Do not force current-user identity onto Service runners: their execution
+    // identity is the service account. Session homes already carry current-user
+    // opaque refs when available.
     let inventory = RunnerDiscoveryInventory::new(
-        WindowsServiceDiscoverySource,
-        ConfiguredSessionDiscoverySource::new(session_homes),
+        service,
+        session,
         EmptyUnsupportedDiscoverySource,
         DiscoveryIdentityFilter {
             expected_execution_identity: None,
         },
     );
-    inventory.discover()
+    inventory.discover_with_process_status(process_status)
+}
+
+/// Privacy-safe summary of a live discovery pass. Never includes paths, names,
+/// service identities, or host topology.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivacySafeDiscoverySummary {
+    pub candidate_count: usize,
+    pub observed_only_count: usize,
+    pub refused_count: usize,
+    pub identity_complete_count: usize,
+    pub service_enumeration: DiscoveryEnumerationStatus,
+    pub session_enumeration: DiscoveryEnumerationStatus,
+    pub process_observation: DiscoveryEnumerationStatus,
+    pub incomplete: bool,
+}
+
+impl PrivacySafeDiscoverySummary {
+    pub fn from_report(report: &DiscoveryReport) -> Self {
+        Self {
+            candidate_count: report.candidates.len(),
+            observed_only_count: report.observed_only().count(),
+            refused_count: report.refused().count(),
+            identity_complete_count: report.identity_complete_count(),
+            service_enumeration: report.service_enumeration,
+            session_enumeration: report.session_enumeration,
+            process_observation: report.process_observation,
+            incomplete: report.is_incomplete(),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -33,7 +76,7 @@ const ACTIONS_RUNNER_PREFIX: &str = "actions.runner.";
 pub fn host_service_discovery_source() -> Box<dyn ServiceDiscoverySource> {
     #[cfg(windows)]
     {
-        Box::new(WindowsServiceDiscoverySource)
+        Box::new(WindowsServiceDiscoverySource::default())
     }
     #[cfg(not(windows))]
     {
@@ -41,28 +84,80 @@ pub fn host_service_discovery_source() -> Box<dyn ServiceDiscoverySource> {
     }
 }
 
+fn current_user_identity_optional() -> Option<OpaqueIdentityReference> {
+    #[cfg(windows)]
+    {
+        crate::current_windows_identity_reference().ok()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
+    let normalized = account.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let digest = hex_sha256(normalized.as_bytes());
+    OpaqueIdentityReference::new(SERVICE_ACCOUNT_IDENTITY_PROVIDER, digest).ok()
+}
+
+#[cfg(windows)]
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Session discovery over explicitly configured runner homes (read-only).
 #[derive(Clone, Default)]
 pub struct ConfiguredSessionDiscoverySource {
     homes: Vec<PathBuf>,
+    last_process_status: std::sync::Arc<Mutex<DiscoveryEnumerationStatus>>,
 }
 
 impl ConfiguredSessionDiscoverySource {
     pub fn new(homes: Vec<PathBuf>) -> Self {
-        Self { homes }
+        Self {
+            homes,
+            last_process_status: std::sync::Arc::new(Mutex::new(DiscoveryEnumerationStatus::Ok)),
+        }
+    }
+
+    pub fn last_process_status(&self) -> DiscoveryEnumerationStatus {
+        *self
+            .last_process_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 impl SessionDiscoverySource for ConfiguredSessionDiscoverySource {
     fn list_session_candidates(&self) -> Vec<SessionCandidateFact> {
-        self.homes
+        let mut process_status = DiscoveryEnumerationStatus::Ok;
+        let facts = self
+            .homes
             .iter()
-            .filter_map(|home| observe_session_home(home))
-            .collect()
+            .filter_map(|home| observe_session_home(home, &mut process_status))
+            .collect();
+        *self
+            .last_process_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = process_status;
+        facts
+    }
+
+    fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+        DiscoveryEnumerationStatus::Ok
     }
 }
 
-fn observe_session_home(runner_home: &Path) -> Option<SessionCandidateFact> {
+fn observe_session_home(
+    runner_home: &Path,
+    process_status: &mut DiscoveryEnumerationStatus,
+) -> Option<SessionCandidateFact> {
     if !runner_home.is_dir() {
         return Some(SessionCandidateFact {
             runner_home: runner_home.to_path_buf(),
@@ -89,29 +184,82 @@ fn observe_session_home(runner_home: &Path) -> Option<SessionCandidateFact> {
                 runner_home.join(path)
             }
         });
-    let listener_present = runner_home
-        .join("bin")
-        .join("Runner.Listener.exe")
-        .is_file();
-    // Presence of binary image is not proof the process is running; keep state
-    // Unknown unless metadata + home are coherent enough for ObservedOnly.
-    let state = if meta.is_some() {
+    let (listener_running, worker_running, snapshot_ok) =
+        observe_runner_processes_for_home(runner_home);
+    if !snapshot_ok {
+        *process_status = DiscoveryEnumerationStatus::Unavailable;
+    }
+    // Binary presence is not process evidence. Prefer live process attribution.
+    let state = if worker_running {
+        DiscoveredLifecycle::Busy
+    } else if listener_running {
+        DiscoveredLifecycle::Listening
+    } else if snapshot_ok {
+        // Snapshot succeeded and no matching process was found.
         DiscoveredLifecycle::Stopped
     } else {
         DiscoveredLifecycle::Unknown
     };
+    let identity = current_user_identity_optional();
     Some(SessionCandidateFact {
         runner_home: runner_home.to_path_buf(),
         work_root,
         registration_scope: meta.as_ref().and_then(|m| m.scope.clone()),
         runner_id: meta.as_ref().and_then(|m| m.agent_id),
         expected_runner_name: meta.as_ref().and_then(|m| m.agent_name.clone()),
-        execution_identity_ref: None,
+        execution_identity_ref: identity,
         current_user_owned: true,
-        listener_present,
-        worker_present: false,
+        listener_present: listener_running,
+        worker_present: worker_running,
         state,
     })
+}
+
+fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+    #[cfg(windows)]
+    {
+        match crate::process_snapshot::executable_images() {
+            Ok(images) => {
+                let home = normalize_path_key(runner_home);
+                let mut listener = false;
+                let mut worker = false;
+                for image in images {
+                    let Some(path) = image.executable_path.as_ref() else {
+                        continue;
+                    };
+                    let path_key = normalize_path_key(path);
+                    if !path_key.starts_with(&home) {
+                        continue;
+                    }
+                    // Require current-user ownership evidence when available.
+                    if image.user_matches_current == Some(false) {
+                        continue;
+                    }
+                    let name = image.executable_name.to_ascii_lowercase();
+                    if name == "runner.listener.exe" {
+                        listener = true;
+                    } else if name == "runner.worker.exe" {
+                        worker = true;
+                    }
+                }
+                (listener, worker, true)
+            }
+            Err(_) => (false, false, false),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = runner_home;
+        (false, false, true)
+    }
+}
+
+#[cfg(windows)]
+fn normalize_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
 }
 
 #[derive(Clone, Default)]
@@ -155,44 +303,88 @@ fn read_runner_metadata(runner_home: &Path) -> Option<RunnerMetadataLite> {
 }
 
 fn scope_from_github_url(url: &str) -> Option<RegistrationScope> {
-    let trimmed = url.trim_end_matches('/');
-    let parts: Vec<&str> = trimmed.split('/').collect();
-    // https://github.com/{owner}/{repo} or org URL shapes.
-    if parts.len() >= 5 && parts[2].eq_ignore_ascii_case("github.com") {
-        let owner = parts[3].to_owned();
-        if parts.len() >= 5 && !parts[4].is_empty() {
-            return Some(RegistrationScope::Repository {
-                owner,
-                repository: parts[4].to_owned(),
-            });
-        }
-        return Some(RegistrationScope::Organization {
-            organization: owner,
-        });
+    let trimmed = url.trim().trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+    // Accept https://github.com/... and http://github.com/... without requiring
+    // a brittle index-based split that mis-classifies org landing URLs.
+    let without_scheme = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))?;
+    let mut parts = without_scheme.split('/');
+    let host = parts.next()?;
+    if host != "github.com" {
+        return None;
     }
-    None
+    let first = parts.next()?.to_owned();
+    if first.is_empty() {
+        return None;
+    }
+    match first.as_str() {
+        "orgs" => {
+            let organization = parts.next()?.to_owned();
+            if organization.is_empty() {
+                return None;
+            }
+            Some(RegistrationScope::Organization { organization })
+        }
+        "enterprises" => {
+            // Enterprise landing URLs are not repository scopes; keep Unknown.
+            None
+        }
+        other => {
+            let repository = parts.next().unwrap_or("").to_owned();
+            if repository.is_empty() {
+                Some(RegistrationScope::Organization {
+                    organization: other.to_owned(),
+                })
+            } else {
+                Some(RegistrationScope::Repository {
+                    owner: other.to_owned(),
+                    repository,
+                })
+            }
+        }
+    }
 }
 
 /// Live Windows Service enumerator for official runner service names.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WindowsServiceDiscoverySource;
+#[derive(Clone, Debug, Default)]
+pub struct WindowsServiceDiscoverySource {
+    last_status: std::sync::Arc<Mutex<DiscoveryEnumerationStatus>>,
+}
 
 impl ServiceDiscoverySource for WindowsServiceDiscoverySource {
     fn list_service_candidates(&self) -> Vec<ServiceCandidateFact> {
         #[cfg(windows)]
         {
-            enumerate_actions_runner_services()
+            let (status, facts) = enumerate_actions_runner_services();
+            *self
+                .last_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
+            facts
         }
         #[cfg(not(windows))]
         {
+            *self
+                .last_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = DiscoveryEnumerationStatus::Ok;
             Vec::new()
         }
+    }
+
+    fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+        *self
+            .last_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 #[cfg(windows)]
-fn enumerate_actions_runner_services() -> Vec<ServiceCandidateFact> {
-    use std::{mem, ptr};
+fn enumerate_actions_runner_services() -> (DiscoveryEnumerationStatus, Vec<ServiceCandidateFact>) {
+    use std::ptr;
     use windows_sys::Win32::{
         Foundation::ERROR_MORE_DATA,
         System::Services::{
@@ -209,7 +401,7 @@ fn enumerate_actions_runner_services() -> Vec<ServiceCandidateFact> {
             SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE,
         );
         if scm.is_null() {
-            return Vec::new();
+            return (DiscoveryEnumerationStatus::Unavailable, Vec::new());
         }
 
         let mut bytes_needed: u32 = 0;
@@ -228,11 +420,12 @@ fn enumerate_actions_runner_services() -> Vec<ServiceCandidateFact> {
             ptr::null(),
         );
         let mut out = Vec::new();
+        let mut incomplete = false;
         if first == 0 {
             let err = windows_sys::Win32::Foundation::GetLastError();
             if err != ERROR_MORE_DATA {
                 CloseServiceHandle(scm);
-                return Vec::new();
+                return (DiscoveryEnumerationStatus::Unavailable, Vec::new());
             }
         }
         let mut buffer = vec![0u8; bytes_needed as usize];
@@ -251,7 +444,7 @@ fn enumerate_actions_runner_services() -> Vec<ServiceCandidateFact> {
         );
         if ok == 0 {
             CloseServiceHandle(scm);
-            return Vec::new();
+            return (DiscoveryEnumerationStatus::Unavailable, Vec::new());
         }
 
         let statuses = buffer.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW;
@@ -263,13 +456,18 @@ fn enumerate_actions_runner_services() -> Vec<ServiceCandidateFact> {
             }
             let display = wide_to_string(entry.lpDisplayName);
             let state = map_service_state(entry.ServiceStatusProcess);
-            if let Some(fact) = service_fact_from_scm(scm, &name, Some(display), state) {
-                out.push(fact);
+            match service_fact_from_scm(scm, &name, Some(display), state) {
+                Some(fact) => out.push(fact),
+                None => incomplete = true,
             }
         }
         CloseServiceHandle(scm);
-        let _ = mem::size_of::<u8>();
-        out
+        let status = if incomplete {
+            DiscoveryEnumerationStatus::Incomplete
+        } else {
+            DiscoveryEnumerationStatus::Ok
+        };
+        (status, out)
     }
 }
 
@@ -293,10 +491,6 @@ fn service_fact_from_scm(
             .collect();
         let service = OpenServiceW(scm, wide_name.as_ptr(), SERVICE_QUERY_CONFIG);
         if service.is_null() {
-            // Incomplete SCM evidence must not invent a runner home or promote
-            // an unverified candidate into ObservedOnly/Enrolled paths.
-            let _ = display_name;
-            let _ = state;
             return None;
         }
         let mut needed = 0u32;
@@ -308,12 +502,14 @@ fn service_fact_from_scm(
             needed,
             &mut needed,
         );
-        CloseServiceHandle(service);
         if ok == 0 {
+            CloseServiceHandle(service);
             return None;
         }
         let config = &*(buffer.as_ptr() as *const QUERY_SERVICE_CONFIGW);
         let image = wide_to_string(config.lpBinaryPathName);
+        let start_name = wide_to_string(config.lpServiceStartName);
+        CloseServiceHandle(service);
         let image_path = PathBuf::from(image.trim_matches('"'));
         let runner_home = runner_home_from_image(&image_path)
             .unwrap_or_else(|| image_path.parent().unwrap_or(Path::new(".")).to_path_buf());
@@ -328,6 +524,9 @@ fn service_fact_from_scm(
                 }
             })
         });
+        // When the service account cannot be hashed, leave identity missing
+        // rather than inventing current-user ownership for a Service runner.
+        let execution_identity_ref = opaque_from_account_name(&start_name);
         Some(ServiceCandidateFact {
             service_name: service_name.to_owned(),
             display_name,
@@ -337,7 +536,7 @@ fn service_fact_from_scm(
             registration_scope: meta.as_ref().and_then(|m| m.scope.clone()),
             runner_id: meta.as_ref().and_then(|m| m.agent_id),
             expected_runner_name: meta.as_ref().and_then(|m| m.agent_name.clone()),
-            execution_identity_ref: None,
+            execution_identity_ref,
             state,
         })
     }
@@ -420,11 +619,65 @@ mod tests {
                 repository: "fixture-repo".to_owned(),
             })
         );
+        // Binary on disk alone must not claim Listening.
+        assert_ne!(facts[0].state, DiscoveredLifecycle::Listening);
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn host_service_source_is_constructible_on_all_targets() {
-        let _ = host_service_discovery_source().list_service_candidates();
+    fn scope_parser_accepts_org_landing_and_repo_urls() {
+        assert_eq!(
+            scope_from_github_url("https://github.com/fixture-org"),
+            Some(RegistrationScope::Organization {
+                organization: "fixture-org".to_owned()
+            })
+        );
+        assert_eq!(
+            scope_from_github_url("https://github.com/orgs/fixture-org"),
+            Some(RegistrationScope::Organization {
+                organization: "fixture-org".to_owned()
+            })
+        );
+        assert_eq!(
+            scope_from_github_url("https://github.com/fixture-owner/fixture-repo"),
+            Some(RegistrationScope::Repository {
+                owner: "fixture-owner".to_owned(),
+                repository: "fixture-repo".to_owned()
+            })
+        );
+        assert_eq!(
+            scope_from_github_url("https://github.com/enterprises/fixture-ent"),
+            None
+        );
+    }
+
+    #[test]
+    fn host_service_source_reports_status_not_false_empty_success() {
+        let source = WindowsServiceDiscoverySource::default();
+        let _ = source.list_service_candidates();
+        let status = source.enumeration_status();
+        // On a normal developer host this is Ok or Incomplete; Unavailable must
+        // never be silently rewritten into an Ok empty success by callers.
+        assert!(matches!(
+            status,
+            DiscoveryEnumerationStatus::Ok
+                | DiscoveryEnumerationStatus::Incomplete
+                | DiscoveryEnumerationStatus::Unavailable
+        ));
+        let report = discover_local_runners_read_only(Vec::new());
+        let summary = PrivacySafeDiscoverySummary::from_report(&report);
+        assert_eq!(summary.incomplete, report.is_incomplete());
+        assert!(
+            !report.is_false_empty_success()
+                || summary.service_enumeration == DiscoveryEnumerationStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn privacy_safe_summary_omits_private_fields() {
+        let report = DiscoveryReport::empty_ok();
+        let summary = PrivacySafeDiscoverySummary::from_report(&report);
+        assert_eq!(summary.candidate_count, 0);
+        assert!(!summary.incomplete);
     }
 }

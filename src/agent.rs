@@ -1113,6 +1113,9 @@ mod tests {
                 schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
                 read_only: true,
                 exhaustive: false,
+                service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+                session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+                process_observation: crate::DiscoveryEnumerationStatus::Ok,
                 candidates: vec![
                     candidate("runner-a", "repo-a", 1),
                     candidate("runner-b", "repo-b", 2),

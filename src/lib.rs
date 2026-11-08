@@ -11,6 +11,7 @@ mod github_transport;
 mod h1_artifact;
 mod h1_live;
 mod host;
+mod hux_sandbox;
 mod installation;
 mod ipc;
 mod lrm_integration;
@@ -32,6 +33,7 @@ mod runner_session_backend;
 mod runtime;
 mod runtime_binding;
 mod scoped_admission_sim;
+mod service_control_contract;
 mod supervisor;
 mod tray;
 mod update;
@@ -87,6 +89,9 @@ pub use host::{
     RecoveryDirective, RecoveryObservation, RecoveryReconstructor, RecoverySnapshot,
     RecoverySource, RecoveryTrigger, SessionState, WindowsHostSource,
 };
+pub use hux_sandbox::{
+    assert_registry_intent_round_trip, prepare_two_runner_sandbox, HuxSandboxLayout,
+};
 #[cfg(windows)]
 pub use installation::WindowsUserStartupBackend;
 pub use installation::{
@@ -129,13 +134,13 @@ pub use runner_commands::{
 };
 pub use runner_discovery::{
     DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity, DiscoveredServiceBinding,
-    DiscoveredSessionBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryIdentityFilter,
-    DiscoveryRefusalReason, DiscoveryReport, EmptyServiceDiscoverySource,
-    EmptySessionDiscoverySource, EmptyUnsupportedDiscoverySource, RunnerBackendKind,
-    RunnerDiscoveryInventory, ServiceCandidateFact, ServiceDiscoverySource, SessionCandidateFact,
-    SessionDiscoverySource, SyntheticServiceDiscoverySource, SyntheticSessionDiscoverySource,
-    SyntheticUnsupportedDiscoverySource, UnsupportedCandidateFact, UnsupportedDiscoverySource,
-    RUNNER_DISCOVERY_SCHEMA_VERSION,
+    DiscoveredSessionBinding, DiscoveryCapabilities, DiscoveryDisposition,
+    DiscoveryEnumerationStatus, DiscoveryIdentityFilter, DiscoveryRefusalReason, DiscoveryReport,
+    EmptyServiceDiscoverySource, EmptySessionDiscoverySource, EmptyUnsupportedDiscoverySource,
+    RunnerBackendKind, RunnerDiscoveryInventory, ServiceCandidateFact, ServiceDiscoverySource,
+    SessionCandidateFact, SessionDiscoverySource, SyntheticServiceDiscoverySource,
+    SyntheticSessionDiscoverySource, SyntheticUnsupportedDiscoverySource, UnsupportedCandidateFact,
+    UnsupportedDiscoverySource, RUNNER_DISCOVERY_SCHEMA_VERSION,
 };
 pub use runner_observer::{
     ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
@@ -181,6 +186,11 @@ pub use scoped_admission_sim::{
     ScopedSelectorMigrationPlan, SelectorCompatibility, SimulatedAdmissionBinding,
     PROPOSED_SCOPED_SELECTOR_PREFIX,
 };
+pub use service_control_contract::{
+    achieved_from_observation, capture_restore_plan, mutation_rights, next_control_phase,
+    read_only_rights, AchievedServiceControl, DesiredServiceLifecycle, ServiceControlPhase,
+    ServiceControlRight, ServicePrestateCapture, ServiceRestorePlan,
+};
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
     SupervisorOutcome, SupervisorRefusal, SupervisorRequest, SyntheticProcessBackend,
@@ -201,7 +211,7 @@ pub use windows_github::{
 };
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source,
-    ConfiguredSessionDiscoverySource, WindowsServiceDiscoverySource,
+    ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
