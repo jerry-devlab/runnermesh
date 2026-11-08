@@ -664,9 +664,14 @@ fn runners_entries(
             Some(false) => text(language, Text::ItemFailed),
             None => text(language, Text::ItemPending),
         };
+        let intent = if record.desired_enabled {
+            text(language, Text::IntentEnabled)
+        } else {
+            text(language, Text::IntentDisabled)
+        };
         entries.push(item(
             TrayMenuId::RunnerToggle(record.local_runner_key.clone()),
-            format!("{} · {status}", record.local_runner_key),
+            format!("{} · {intent}", record.local_runner_key),
             Some(record.desired_enabled),
             true,
         ));
@@ -821,6 +826,8 @@ enum Text {
     RunnersEmpty,
     RunnersPartialFailure,
     RunnerStatus,
+    IntentEnabled,
+    IntentDisabled,
     ItemApplied,
     ItemFailed,
     ItemPending,
@@ -854,7 +861,9 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (false, Text::RunnersRefresh) => "Refresh runners",
         (false, Text::RunnersEmpty) => "No enrolled runners yet",
         (false, Text::RunnersPartialFailure) => "Partial failure — inspect item results",
-        (false, Text::RunnerStatus) => "Status",
+        (false, Text::RunnerStatus) => "Observed",
+        (false, Text::IntentEnabled) => "intent: enabled",
+        (false, Text::IntentDisabled) => "intent: disabled",
         (false, Text::ItemApplied) => "applied",
         (false, Text::ItemFailed) => "failed",
         (false, Text::ItemPending) => "pending",
@@ -883,7 +892,9 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (true, Text::RunnersRefresh) => "刷新运行器",
         (true, Text::RunnersEmpty) => "尚未登记运行器",
         (true, Text::RunnersPartialFailure) => "部分失败 — 请查看单项结果",
-        (true, Text::RunnerStatus) => "状态",
+        (true, Text::RunnerStatus) => "观察状态",
+        (true, Text::IntentEnabled) => "意图: 已启用",
+        (true, Text::IntentDisabled) => "意图: 已禁用",
         (true, Text::ItemApplied) => "已应用",
         (true, Text::ItemFailed) => "失败",
         (true, Text::ItemPending) => "待处理",

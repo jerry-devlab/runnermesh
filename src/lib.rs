@@ -20,6 +20,7 @@ mod policy;
 mod probe;
 mod process_snapshot;
 mod qualification;
+mod resource_policy_probe;
 mod runner_commands;
 mod runner_discovery;
 mod runner_observer;
@@ -30,6 +31,7 @@ mod runner_service_backend;
 mod runner_session_backend;
 mod runtime;
 mod runtime_binding;
+mod scoped_admission_sim;
 mod supervisor;
 mod tray;
 mod update;
@@ -37,6 +39,7 @@ mod update;
 mod windows_github;
 #[cfg(windows)]
 pub mod windows_preferences;
+mod windows_runner_discovery;
 #[cfg(windows)]
 pub mod windows_supervisor;
 #[cfg(windows)]
@@ -120,6 +123,7 @@ pub use qualification::{
     ReadinessDisposition, RestoreDisposition, H1_READINESS_SCHEMA_VERSION,
     H1_TRANSACTION_FAMILY_ID, H1_TRANSACTION_SCHEMA_VERSION,
 };
+pub use resource_policy_probe::{probe_resource_policy_capabilities, ResourcePolicyCapability};
 pub use runner_commands::{
     handle_runners_command, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
 };
@@ -172,6 +176,11 @@ pub use runtime_binding::{
     InstalledRuntimeBinding, INSTALLED_RUNTIME_BINDING_SCHEMA_VERSION,
     WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
+pub use scoped_admission_sim::{
+    evaluate_v01_selector_compatibility, propose_scoped_selector_migration,
+    ScopedSelectorMigrationPlan, SelectorCompatibility, SimulatedAdmissionBinding,
+    PROPOSED_SCOPED_SELECTOR_PREFIX,
+};
 pub use supervisor::{
     ProcessOwnership, SupervisorAction, SupervisorCore, SupervisorError, SupervisorObservation,
     SupervisorOutcome, SupervisorRefusal, SupervisorRequest, SyntheticProcessBackend,
@@ -189,6 +198,10 @@ pub use windows_github::{
     windows_github_admission_backend, windows_github_repository_access_client,
     windows_github_workflow_client, WindowsGithubAdmissionBackend,
     WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient,
+};
+pub use windows_runner_discovery::{
+    discover_local_runners_read_only, host_service_discovery_source,
+    ConfiguredSessionDiscoverySource, WindowsServiceDiscoverySource,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
