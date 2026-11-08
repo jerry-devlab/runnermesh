@@ -24,6 +24,7 @@ mod runner_discovery;
 mod runner_observer;
 mod runner_registry;
 mod runner_service_backend;
+mod runner_session_backend;
 mod runtime;
 mod runtime_binding;
 mod supervisor;
@@ -135,6 +136,10 @@ pub use runner_registry::{
 pub use runner_service_backend::{
     PreparedServiceAction, ServiceBackendRefusal, ServiceObservation, ServicePrepareOutcome,
     ServiceStartMode, SyntheticWindowsServiceBackend,
+};
+pub use runner_session_backend::{
+    PreparedSessionAction, SessionBackendRefusal, SessionObservation, SessionPrepareOutcome,
+    SyntheticUserSessionBackend,
 };
 pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
