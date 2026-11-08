@@ -11,8 +11,8 @@ IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 CODE_ANCHOR=7bf1f47a6b5699ee7cece7a6100aaa7e2c2d5190
-LAST_PASS_ALL=a1d9be09071fe30dfcb5c76ea10c4d29e7102e21
-REMOTE_TIP=a1d9be09071fe30dfcb5c76ea10c4d29e7102e21
+LAST_PASS_ALL=ddf34b483720e1c8ec2d090298ca9398662b6516
+REMOTE_TIP=ddf34b483720e1c8ec2d090298ca9398662b6516
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
@@ -84,6 +84,7 @@ INDEPENDENT_SECURITY_REVIEW=PENDING
    - `distinct_scopes_or_unmanaged_runners_coexist_without_collision`: proves runners in distinct scopes or unmanaged runners coexist cleanly without triggering collision refusal.
 4. **Validation**:
    - Local: all 319 tests pass (303 lib, 3 package, 13 admission model).
+   - Hosted CI: Run `42500546644` on `ddf34b4` PASS_ALL.
 
 ## Next safe goal
 
@@ -93,5 +94,5 @@ BUDGET_USED_GT03≈estimate_3.5h
 BUDGET_REMAINING_GT03≈estimate_20.5h
 WAITING_FOR_OWNER=true
 STOP_BEFORE=H2 cutover; HUX-2; real SCM; labels; H3 publish
-RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=a1d9be09071fe30dfcb5c76ea10c4d29e7102e21; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=ddf34b483720e1c8ec2d090298ca9398662b6516; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
 ```
