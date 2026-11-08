@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::{OpaqueIdentityReference, RegistrationScope};
 
 /// Schema marker for the pure discovery inventory contract.
@@ -406,10 +408,18 @@ fn draft_from_service(fact: ServiceCandidateFact) -> DiscoveredRunner {
     } else {
         DiscoveryDisposition::ObservedOnly
     };
-    let enrollment_eligible = disposition == DiscoveryDisposition::ObservedOnly;
+    let identity = DiscoveredRunnerIdentity {
+        registration_scope: fact.registration_scope,
+        runner_id: fact.runner_id,
+        expected_runner_name: fact.expected_runner_name,
+        runner_home: fact.runner_home,
+        work_root: fact.work_root,
+        execution_identity_ref: fact.execution_identity_ref,
+    };
+    let enrollment_eligible = enrollment_eligible_for(disposition, backend, &identity);
     let key = discovery_key(
         backend,
-        &fact.runner_home,
+        &identity.runner_home,
         Some(fact.service_name.as_str()),
         None,
     );
@@ -418,14 +428,7 @@ fn draft_from_service(fact: ServiceCandidateFact) -> DiscoveredRunner {
         backend,
         disposition,
         refusal,
-        identity: DiscoveredRunnerIdentity {
-            registration_scope: fact.registration_scope,
-            runner_id: fact.runner_id,
-            expected_runner_name: fact.expected_runner_name,
-            runner_home: fact.runner_home,
-            work_root: fact.work_root,
-            execution_identity_ref: fact.execution_identity_ref,
-        },
+        identity,
         service: Some(DiscoveredServiceBinding {
             service_name: fact.service_name,
             display_name: fact.display_name,
@@ -452,30 +455,29 @@ fn draft_from_session(fact: SessionCandidateFact) -> DiscoveredRunner {
     } else {
         DiscoveryDisposition::ObservedOnly
     };
-    let enrollment_eligible = disposition == DiscoveryDisposition::ObservedOnly;
-    let lifecycle = if fact.state != DiscoveredLifecycle::Unknown {
-        fact.state
-    } else if fact.worker_present {
-        DiscoveredLifecycle::Busy
-    } else if fact.listener_present {
-        DiscoveredLifecycle::Listening
-    } else {
-        DiscoveredLifecycle::Stopped
+    // Positive process evidence may refine Unknown into Busy/Listening, but
+    // absence must not invent Stopped from Unknown.
+    let lifecycle = match fact.state {
+        DiscoveredLifecycle::Unknown if fact.worker_present => DiscoveredLifecycle::Busy,
+        DiscoveredLifecycle::Unknown if fact.listener_present => DiscoveredLifecycle::Listening,
+        other => other,
     };
-    let key = discovery_key(backend, &fact.runner_home, None, None);
+    let identity = DiscoveredRunnerIdentity {
+        registration_scope: fact.registration_scope,
+        runner_id: fact.runner_id,
+        expected_runner_name: fact.expected_runner_name,
+        runner_home: fact.runner_home,
+        work_root: fact.work_root,
+        execution_identity_ref: fact.execution_identity_ref,
+    };
+    let enrollment_eligible = enrollment_eligible_for(disposition, backend, &identity);
+    let key = discovery_key(backend, &identity.runner_home, None, None);
     DiscoveredRunner {
         local_discovery_key: key,
         backend,
         disposition,
         refusal,
-        identity: DiscoveredRunnerIdentity {
-            registration_scope: fact.registration_scope,
-            runner_id: fact.runner_id,
-            expected_runner_name: fact.expected_runner_name,
-            runner_home: fact.runner_home,
-            work_root: fact.work_root,
-            execution_identity_ref: fact.execution_identity_ref,
-        },
+        identity,
         service: None,
         session: Some(DiscoveredSessionBinding {
             current_user_owned: fact.current_user_owned,
@@ -629,6 +631,30 @@ fn scope_key(scope: Option<&RegistrationScope>) -> Option<String> {
     }
 }
 
+fn enrollment_eligible_for(
+    disposition: DiscoveryDisposition,
+    backend: RunnerBackendKind,
+    identity: &DiscoveredRunnerIdentity,
+) -> bool {
+    if disposition != DiscoveryDisposition::ObservedOnly {
+        return false;
+    }
+    if !matches!(
+        backend,
+        RunnerBackendKind::WindowsService | RunnerBackendKind::UserSession
+    ) {
+        return false;
+    }
+    exact_identity_present(identity)
+}
+
+fn exact_identity_present(identity: &DiscoveredRunnerIdentity) -> bool {
+    identity.registration_scope.is_some()
+        && identity.runner_id.is_some()
+        && identity.execution_identity_ref.is_some()
+        && path_usable(&identity.runner_home)
+}
+
 fn discovery_key(
     backend: RunnerBackendKind,
     runner_home: &Path,
@@ -641,18 +667,29 @@ fn discovery_key(
         RunnerBackendKind::ScheduledTask => "scheduled-task",
         RunnerBackendKind::Unknown => "unknown",
     };
-    let home = normalize_path_key(runner_home);
+    // Hash path material so local filesystem paths never appear in keys that
+    // may later surface in public receipts or shared evidence.
+    let home_token = opaque_path_token(runner_home);
     match (service_name, unsupported_label) {
         (Some(service), _) => format!(
-            "{backend_token}|{home}|svc:{}",
-            service.to_ascii_lowercase()
+            "{backend_token}|home:{home_token}|svc:{}",
+            opaque_token(service)
         ),
         (_, Some(label)) => format!(
-            "{backend_token}|{home}|label:{}",
-            label.to_ascii_lowercase()
+            "{backend_token}|home:{home_token}|label:{}",
+            opaque_token(label)
         ),
-        _ => format!("{backend_token}|{home}"),
+        _ => format!("{backend_token}|home:{home_token}"),
     }
+}
+
+fn opaque_path_token(path: &Path) -> String {
+    opaque_token(&normalize_path_key(path))
+}
+
+fn opaque_token(value: &str) -> String {
+    let digest = Sha256::digest(value.to_ascii_lowercase().as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn normalize_path_key(path: &Path) -> String {
@@ -689,6 +726,8 @@ pub mod read_only_boundary {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER;
 
@@ -1071,22 +1110,65 @@ mod tests {
             report.candidates[0].refusal,
             Some(DiscoveryRefusalReason::IdentityEvidenceMissing)
         );
+        assert!(!report.candidates[0].capabilities.enrollment_eligible);
     }
 
     #[test]
-    fn read_only_boundary_constants_forbid_mutation_and_credential_access() {
-        use super::read_only_boundary::ReadOnlyDiscovery;
+    fn incomplete_server_identity_is_observed_but_not_enrollment_eligible() {
+        // Without an expected-identity filter, incomplete server identity remains
+        // visible as ObservedOnly but must not be enrollment-eligible.
+        let mut fact = service_fact(
+            "actions.runner.fixture-incomplete",
+            r"C:\fixture\runners\incomplete",
+            repo_scope("fixture-owner", "repo-incomplete"),
+            3,
+            DiscoveredLifecycle::Listening,
+        );
+        fact.runner_id = None;
+        let report = RunnerDiscoveryInventory::new(
+            SyntheticServiceDiscoverySource::new(vec![fact]),
+            SyntheticSessionDiscoverySource::new(vec![]),
+            SyntheticUnsupportedDiscoverySource::new(vec![]),
+            DiscoveryIdentityFilter::default(),
+        )
+        .discover();
+        assert_eq!(
+            report.candidates[0].disposition,
+            DiscoveryDisposition::ObservedOnly
+        );
+        assert!(report.candidates[0].refusal.is_none());
+        assert!(!report.candidates[0].capabilities.enrollment_eligible);
+    }
+
+    #[test]
+    fn unknown_session_without_process_evidence_stays_unknown() {
+        let report = inventory(
+            vec![],
+            vec![session_fact(
+                r"C:\fixture\runners\unknown-session",
+                repo_scope("fixture-owner", "repo-unknown-session"),
+                66,
+                true,
+                DiscoveredLifecycle::Unknown,
+            )],
+            vec![],
+        )
+        .discover();
+        let candidate = &report.candidates[0];
+        assert_eq!(candidate.observed_lifecycle, DiscoveredLifecycle::Unknown);
+        assert_ne!(candidate.observed_lifecycle, DiscoveredLifecycle::Stopped);
+    }
+
+    #[test]
+    fn read_only_boundary_is_enforced_through_discovery_helper() {
         type Inventory = RunnerDiscoveryInventory<
             SyntheticServiceDiscoverySource,
             SyntheticSessionDiscoverySource,
             SyntheticUnsupportedDiscoverySource,
         >;
-        assert!(Inventory::READ_ONLY);
-        assert!(!Inventory::MAY_MUTATE_SERVICE);
-        assert!(!Inventory::MAY_MUTATE_REGISTRATION);
-        assert!(!Inventory::MAY_READ_CREDENTIALS);
-        // Synthetic sources expose only list_* APIs; discover() must not claim
-        // mutation authority even when control contracts are advertised.
+        // Exercise the helper rather than asserting bare associated constants
+        // (clippy::assertions_on_constants).
+        assert!(super::read_only_boundary::discovery_is_read_only::<Inventory>());
         let report = inventory(
             vec![service_fact(
                 "actions.runner.fixture-boundary",
@@ -1105,11 +1187,12 @@ mod tests {
     }
 
     #[test]
-    fn discovery_keys_are_stable_and_not_process_ids() {
+    fn discovery_keys_are_stable_opaque_and_not_process_ids() {
+        let home = r"C:\fixture\runners\key";
         let report = inventory(
             vec![service_fact(
                 "actions.runner.fixture-key",
-                r"C:\fixture\runners\key",
+                home,
                 repo_scope("fixture-owner", "repo-key"),
                 12,
                 DiscoveredLifecycle::Listening,
@@ -1119,8 +1202,17 @@ mod tests {
         )
         .discover();
         let key = &report.candidates[0].local_discovery_key;
-        assert!(key.contains("windows-service"));
-        assert!(key.contains("c:/fixture/runners/key"));
+        let again = discovery_key(
+            RunnerBackendKind::WindowsService,
+            Path::new(home),
+            Some("actions.runner.fixture-key"),
+            None,
+        );
+        assert_eq!(key, &again);
+        assert!(key.starts_with("windows-service|home:"));
+        assert!(!key.contains('\\'));
+        assert!(!key.to_ascii_lowercase().contains("fixture"));
+        assert!(!key.to_ascii_lowercase().contains("runners"));
         assert!(!key.chars().all(|ch| ch.is_ascii_digit()));
     }
 
