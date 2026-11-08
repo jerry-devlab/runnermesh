@@ -20,6 +20,7 @@ mod policy;
 mod probe;
 mod process_snapshot;
 mod qualification;
+mod resource_policy_probe;
 mod runner_commands;
 mod runner_discovery;
 mod runner_observer;
@@ -122,6 +123,7 @@ pub use qualification::{
     ReadinessDisposition, RestoreDisposition, H1_READINESS_SCHEMA_VERSION,
     H1_TRANSACTION_FAMILY_ID, H1_TRANSACTION_SCHEMA_VERSION,
 };
+pub use resource_policy_probe::{probe_resource_policy_capabilities, ResourcePolicyCapability};
 pub use runner_commands::{
     handle_runners_command, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
 };
