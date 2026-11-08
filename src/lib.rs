@@ -23,6 +23,7 @@ mod runner_commands;
 mod runner_discovery;
 mod runner_observer;
 mod runner_registry;
+mod runner_service_backend;
 mod runtime;
 mod runtime_binding;
 mod supervisor;
@@ -130,6 +131,10 @@ pub use runner_registry::{
     EnrollmentState, FileRegistryStore, MemoryRegistryStore, RegistryBackendBinding, RegistryError,
     RegistryStore, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
     RUNNER_REGISTRY_SCHEMA_VERSION,
+};
+pub use runner_service_backend::{
+    PreparedServiceAction, ServiceBackendRefusal, ServiceObservation, ServicePrepareOutcome,
+    ServiceStartMode, SyntheticWindowsServiceBackend,
 };
 pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,

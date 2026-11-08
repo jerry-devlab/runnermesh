@@ -30,7 +30,8 @@ pub enum RunnerBackendKind {
 /// Lifecycle hint reconstructed from read-only observation facts.
 ///
 /// `Unknown` is neither `Stopped` nor a safe-to-stop signal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DiscoveredLifecycle {
     Stopped,
     Listening,
