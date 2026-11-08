@@ -42,9 +42,10 @@ COMPLETED_GOALS=P00-partial(PENDING ZenBookDuo); P02-path-boundary+session-adopt
 CANDIDATE_PR=65
 # HEAD bound by hosted CI after push; avoid self-embedding this file's commit.
 NEXT_SAFE_GOAL=GT-02 P01 remaining Owner packet polish OR P03 trusted-auth design docs; no live gates
-BUDGET_USED≈estimate_3.5h
-BUDGET_LEFT≈12.5h_of_GT01
-CI_STATUS=awaiting_after_discover_views_push
+BUDGET_USED≈estimate_4.0h
+BUDGET_LEFT≈12.0h_of_GT01
+CI_STATUS=local_ahead_push_blocked_network; remote_tip_65a921b_CI_was_PASS_then_Format_fail_on_next
+LOCAL_UNPUSHED=P03_design+fmt_fix
 OWNER_GATES=HUX1_ZENBOOKDUO; H2; HUX2_LIVE; TRUSTED_SCM
-RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; do not touch feat/lrm-09 or overwrite productization tip worktree
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; git push origin HEAD when network restores; do not touch feat/lrm-09 or overwrite productization tip worktree
 ```
