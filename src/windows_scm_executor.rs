@@ -1863,4 +1863,20 @@ mod tests {
         // Withdrawal remains observed; restore did not partially flip presence.
         assert!(admission.observe_selector_absent().expect("absent"));
     }
+
+    #[test]
+    fn fake_github_link_loss_during_readback_is_unavailable_not_false_absent() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.withdraw_capacity().expect("withdraw");
+        admission.set_disconnected(true);
+        assert!(matches!(
+            admission.observe_selector_absent(),
+            Err(ScmApiError::Unavailable)
+        ));
+        // Reconnect must not invent absence without a fresh successful observe.
+        admission.set_disconnected(false);
+        assert!(admission
+            .observe_selector_absent()
+            .expect("absent after reconnect"));
+    }
 }
