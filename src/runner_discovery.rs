@@ -161,16 +161,61 @@ pub struct DiscoveredRunner {
     pub capabilities: DiscoveryCapabilities,
 }
 
+/// Host-side enumeration health. Empty candidate lists are only trustworthy
+/// when every related status is `Ok`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DiscoveryEnumerationStatus {
+    /// Enumeration completed; zero candidates may be a true empty inventory.
+    #[default]
+    Ok,
+    /// Some evidence was collected, but gaps remain (skipped services, missing
+    /// process snapshot, partial identity).
+    Incomplete,
+    /// The host API could not be queried. Must never be presented as success.
+    Unavailable,
+}
+
 /// Inventory result. `exhaustive` is always false by contract.
 #[derive(Clone, Eq, PartialEq)]
 pub struct DiscoveryReport {
     pub schema_version: u32,
     pub read_only: bool,
     pub exhaustive: bool,
+    pub service_enumeration: DiscoveryEnumerationStatus,
+    pub session_enumeration: DiscoveryEnumerationStatus,
+    pub process_observation: DiscoveryEnumerationStatus,
     pub candidates: Vec<DiscoveredRunner>,
 }
 
 impl DiscoveryReport {
+    pub fn empty_ok() -> Self {
+        Self {
+            schema_version: RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: DiscoveryEnumerationStatus::Ok,
+            session_enumeration: DiscoveryEnumerationStatus::Ok,
+            process_observation: DiscoveryEnumerationStatus::Ok,
+            candidates: Vec::new(),
+        }
+    }
+
+    /// True when any enumeration channel failed or was incomplete.
+    pub fn is_incomplete(&self) -> bool {
+        !matches!(self.service_enumeration, DiscoveryEnumerationStatus::Ok)
+            || !matches!(self.session_enumeration, DiscoveryEnumerationStatus::Ok)
+            || !matches!(self.process_observation, DiscoveryEnumerationStatus::Ok)
+    }
+
+    /// False empty success: unavailable service enumeration with zero candidates.
+    pub fn is_false_empty_success(&self) -> bool {
+        self.candidates.is_empty()
+            && matches!(
+                self.service_enumeration,
+                DiscoveryEnumerationStatus::Unavailable
+            )
+    }
+
     pub fn observed_only(&self) -> impl Iterator<Item = &DiscoveredRunner> {
         self.candidates
             .iter()
@@ -181,6 +226,13 @@ impl DiscoveryReport {
         self.candidates
             .iter()
             .filter(|candidate| candidate.disposition == DiscoveryDisposition::Refused)
+    }
+
+    pub fn identity_complete_count(&self) -> usize {
+        self.candidates
+            .iter()
+            .filter(|candidate| exact_identity_present(&candidate.identity))
+            .count()
     }
 }
 
@@ -230,11 +282,18 @@ pub struct UnsupportedCandidateFact {
 /// start/stop/configure operations.
 pub trait ServiceDiscoverySource {
     fn list_service_candidates(&self) -> Vec<ServiceCandidateFact>;
+    /// Host enumeration health. Defaults to `Ok` for synthetic fixtures.
+    fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+        DiscoveryEnumerationStatus::Ok
+    }
 }
 
 /// Read-only user-session discovery source.
 pub trait SessionDiscoverySource {
     fn list_session_candidates(&self) -> Vec<SessionCandidateFact>;
+    fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+        DiscoveryEnumerationStatus::Ok
+    }
 }
 
 /// Read-only unsupported-mode discovery source (scheduled tasks, etc.).
@@ -393,8 +452,22 @@ where
             schema_version: RUNNER_DISCOVERY_SCHEMA_VERSION,
             read_only: true,
             exhaustive: false,
+            service_enumeration: self.service_source.enumeration_status(),
+            session_enumeration: self.session_source.enumeration_status(),
+            process_observation: DiscoveryEnumerationStatus::Ok,
             candidates: drafts,
         }
+    }
+
+    /// Like [`discover`](Self::discover), but allows the Windows adapter to
+    /// override process-observation health after a live process snapshot.
+    pub fn discover_with_process_status(
+        &self,
+        process_observation: DiscoveryEnumerationStatus,
+    ) -> DiscoveryReport {
+        let mut report = self.discover();
+        report.process_observation = process_observation;
+        report
     }
 }
 

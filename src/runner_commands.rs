@@ -196,18 +196,17 @@ pub fn handle_runners_command(
             0,
         )),
         crate::AgentCommand::RunnersDiscover => {
-            let report = discovery.cloned().unwrap_or(DiscoveryReport {
-                schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
-                read_only: true,
-                exhaustive: false,
-                candidates: Vec::new(),
-            });
+            let report = discovery.cloned().unwrap_or_else(DiscoveryReport::empty_ok);
             Ok(RunnerCommandReport {
                 schema_version: crate::RUNNER_REGISTRY_SCHEMA_VERSION,
                 read_only: true,
                 prepare_only: false,
                 applied: false,
-                reason_code: None,
+                reason_code: if report.is_incomplete() {
+                    ReasonCode::new("discovery-incomplete").ok()
+                } else {
+                    None
+                },
                 records: editor
                     .registry()
                     .records
@@ -225,7 +224,9 @@ pub fn handle_runners_command(
                     .filter(|candidate| candidate.same_scope_collision)
                     .count(),
                 resource_aggregate: None,
-                partial_failure: false,
+                // Unavailable/Incomplete host evidence is a partial observation,
+                // never a clean empty success.
+                partial_failure: report.is_incomplete(),
             })
         }
         crate::AgentCommand::RunnersInspect { local_runner_key } => {
@@ -454,6 +455,9 @@ mod tests {
             schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
             read_only: true,
             exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
             candidates: vec![DiscoveredRunner {
                 local_discovery_key: "key-a".to_owned(),
                 backend: RunnerBackendKind::UserSession,
