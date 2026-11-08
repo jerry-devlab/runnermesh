@@ -10,8 +10,8 @@ BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 PRODUCTION_MUTATION=false
 CANDIDATE_PR=65
-REMOTE_TIP=8f92ef0ed9b81a04953b636e1299d73563cc8a50
-CI_STATUS=awaiting_on_8f92ef0
+REMOTE_TIP=2d66050ad440ab2c43ea48ba302d33c7d92996a3
+CI_STATUS=awaiting_on_2d66050
 ```
 
 ## Host
@@ -25,18 +25,18 @@ HUX1_ZENBOOKDUO=PENDING
 ## Completed this train slice
 
 - P02 discovery identity/quoting/incomplete
-- P01 G17 / P03 SCM auth / P04 ADR0006 prep
+- P01/P03/P04 prep docs
 - P04-05 FakeGithub matrix PASS_SOURCE
-- P05 Zen A/B + selector-readback uncertainty sibling isolation
+- P05 A/B isolation + selector uncertainty + ambiguous ownership restart refuse
 - P06 partial-batch + Tray localized partial-failure
 - Public audit + API blob-size guards
 
 ## Next
 
 ```text
-NEXT_SAFE_GOAL=P05-05 remaining reboot/resume/stale-PID matrix OR P06 packaging sandbox; no live gates
-BUDGET_USED≈estimate_9.5h
-BUDGET_LEFT≈6.5h_of_GT01
+NEXT_SAFE_GOAL=P06 packaging/sandbox or remaining P05 resume matrix; no live gates
+BUDGET_USED≈estimate_10.0h
+BUDGET_LEFT≈6.0h_of_GT01
 OWNER_GATES=HUX1_ZENBOOKDUO; H2; HUX2_LIVE; TRUSTED_SCM; INDEPENDENT_SECURITY_REVIEW; G-ADR006
 RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; gh Git Data API if git HTTPS fails; verify blob size before ref patch; do not touch feat/lrm-09 or overwrite productization tip worktree
 ```
