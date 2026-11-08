@@ -221,6 +221,10 @@ fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
         match crate::process_snapshot::executable_images() {
             Ok(images) => {
                 let home = normalize_path_key(runner_home);
+                let expected_listener =
+                    normalize_path_key(&runner_home.join("bin").join("Runner.Listener.exe"));
+                let expected_worker =
+                    normalize_path_key(&runner_home.join("bin").join("Runner.Worker.exe"));
                 let mut listener = false;
                 let mut worker = false;
                 for image in images {
@@ -228,7 +232,8 @@ fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
                         continue;
                     };
                     let path_key = normalize_path_key(path);
-                    if !path_key.starts_with(&home) {
+                    // Path-boundary under home (never raw prefix: ...\a vs ...\abc).
+                    if !path_is_under_home_key(&path_key, &home) {
                         continue;
                     }
                     // Require current-user ownership evidence when available.
@@ -236,9 +241,15 @@ fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
                         continue;
                     }
                     let name = image.executable_name.to_ascii_lowercase();
-                    if name == "runner.listener.exe" {
+                    if name == "runner.listener.exe"
+                        && (path_key == expected_listener
+                            || path_key.ends_with("\\bin\\runner.listener.exe"))
+                    {
                         listener = true;
-                    } else if name == "runner.worker.exe" {
+                    } else if name == "runner.worker.exe"
+                        && (path_key == expected_worker
+                            || path_key.ends_with("\\bin\\runner.worker.exe"))
+                    {
                         worker = true;
                     }
                 }
@@ -254,12 +265,24 @@ fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
     }
 }
 
-#[cfg(windows)]
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
         .to_ascii_lowercase()
+}
+
+/// True when `path_key` is `home` or a descendant separated by `\`.
+/// Rejects sibling prefix collisions (`home\a` vs `home\abc`).
+fn path_is_under_home_key(path_key: &str, home_key: &str) -> bool {
+    if path_key == home_key {
+        return true;
+    }
+    if home_key.is_empty() {
+        return false;
+    }
+    let boundary = format!("{home_key}\\");
+    path_key.starts_with(&boundary)
 }
 
 #[derive(Clone, Default)]
@@ -495,18 +518,22 @@ fn service_fact_from_scm(
         }
         let mut needed = 0u32;
         QueryServiceConfigW(service, ptr::null_mut(), 0, &mut needed);
-        let mut buffer = vec![0u8; needed as usize];
-        let ok = QueryServiceConfigW(
-            service,
-            buffer.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW,
-            needed,
-            &mut needed,
-        );
+        if needed == 0 {
+            CloseServiceHandle(service);
+            return None;
+        }
+        // QUERY_SERVICE_CONFIGW must be aligned; trailing strings live in the same buffer.
+        let align = std::mem::align_of::<QUERY_SERVICE_CONFIGW>();
+        let mut raw = vec![0u8; needed as usize + align];
+        let unaligned = raw.as_mut_ptr() as usize;
+        let aligned = (unaligned + align - 1) & !(align - 1);
+        let config_ptr = aligned as *mut QUERY_SERVICE_CONFIGW;
+        let ok = QueryServiceConfigW(service, config_ptr, needed, &mut needed);
         if ok == 0 {
             CloseServiceHandle(service);
             return None;
         }
-        let config = &*(buffer.as_ptr() as *const QUERY_SERVICE_CONFIGW);
+        let config = &*config_ptr;
         let image = wide_to_string(config.lpBinaryPathName);
         let start_name = wide_to_string(config.lpServiceStartName);
         CloseServiceHandle(service);
@@ -590,6 +617,52 @@ unsafe fn wide_to_string(ptr: *const u16) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_boundary_rejects_sibling_prefix_homes() {
+        let home = normalize_path_key(Path::new(r"C:\runners\a"));
+        assert!(path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\a\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(path_is_under_home_key(&home, &home));
+        // Sibling `a` vs `abc` must not match via raw prefix.
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\abc\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\a-extra\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\other\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\a\bin\Runner.Listener.exe")),
+            ""
+        ));
+    }
+
+    #[test]
+    fn listener_worker_attribution_requires_bin_image_under_home() {
+        let home = PathBuf::from(r"C:\fixture\runners\exact-home");
+        let home_key = normalize_path_key(&home);
+        let ok_listener = normalize_path_key(&home.join("bin").join("Runner.Listener.exe"));
+        let sibling = normalize_path_key(Path::new(
+            r"C:\fixture\runners\exact-home-sibling\bin\Runner.Listener.exe",
+        ));
+        let wrong_layout = normalize_path_key(&home.join("Runner.Listener.exe"));
+        assert!(path_is_under_home_key(&ok_listener, &home_key));
+        assert!(!path_is_under_home_key(&sibling, &home_key));
+        assert!(path_is_under_home_key(&wrong_layout, &home_key));
+        // Wrong layout under home is still filtered by the bin\ name suffix check
+        // in observe_runner_processes_for_home.
+        assert!(!wrong_layout.ends_with("\\bin\\runner.listener.exe"));
+        assert!(ok_listener.ends_with("\\bin\\runner.listener.exe"));
+    }
 
     #[test]
     fn configured_session_source_observes_explicit_homes_read_only() {

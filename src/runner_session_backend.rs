@@ -93,6 +93,13 @@ impl SyntheticUserSessionBackend {
         if let Some(refusal) = common_refusal(record, observed) {
             return SessionPrepareOutcome::Refused(refusal);
         }
+        if observed.worker_present || observed.lifecycle == DiscoveredLifecycle::Busy {
+            // Adoption never claims a Busy Worker is idle ownership evidence.
+            return SessionPrepareOutcome::Refused(SessionBackendRefusal::BusyWorker);
+        }
+        if matches!(observed.lifecycle, DiscoveredLifecycle::Unknown) {
+            return SessionPrepareOutcome::Refused(SessionBackendRefusal::StateUnknown);
+        }
         if !observed.listener_present {
             return SessionPrepareOutcome::Refused(SessionBackendRefusal::NoListenerToAdopt);
         }
@@ -232,6 +239,48 @@ mod tests {
         assert!(matches!(
             backend.prepare_launch(&record, &unowned),
             SessionPrepareOutcome::Refused(SessionBackendRefusal::WorkRootNotOwned)
+        ));
+    }
+
+    #[test]
+    fn adopt_refuses_busy_unknown_and_missing_listener() {
+        let backend = SyntheticUserSessionBackend;
+        let record = record();
+        assert!(matches!(
+            backend.prepare_adopt(&record, &observation(DiscoveredLifecycle::Busy)),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::BusyWorker)
+        ));
+        assert!(matches!(
+            backend.prepare_adopt(&record, &observation(DiscoveredLifecycle::Unknown)),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::StateUnknown)
+        ));
+        let mut stopped_no_listener = observation(DiscoveredLifecycle::Stopped);
+        stopped_no_listener.listener_present = false;
+        assert!(matches!(
+            backend.prepare_adopt(&record, &stopped_no_listener),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::NoListenerToAdopt)
+        ));
+        assert_eq!(
+            backend.prepare_adopt(&record, &observation(DiscoveredLifecycle::Listening)),
+            SessionPrepareOutcome::Planned(PreparedSessionAction::AdoptVerifiedListener)
+        );
+    }
+
+    #[test]
+    fn missing_home_or_entrypoint_refuses_launch() {
+        let backend = SyntheticUserSessionBackend;
+        let record = record();
+        let mut no_home = observation(DiscoveredLifecycle::Stopped);
+        no_home.runner_home_present = false;
+        assert!(matches!(
+            backend.prepare_launch(&record, &no_home),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::RunnerHomeMissing)
+        ));
+        let mut no_entry = observation(DiscoveredLifecycle::Stopped);
+        no_entry.entrypoint_present = false;
+        assert!(matches!(
+            backend.prepare_launch(&record, &no_entry),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::EntrypointMissing)
         ));
     }
 }
