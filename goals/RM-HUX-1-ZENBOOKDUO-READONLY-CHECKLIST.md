@@ -53,7 +53,13 @@ incomplete=false
 ```
 
 Disposition: local empty inventory with honest Ok channels.
-`HUX1_NONEMPTY_ZENBOOKDUO=UNPROVEN` until ZenBookDuo itself is observed.
+
+```text
+HUX1_NONEMPTY_LOCAL=EMPTY_OK
+HUX1_NONEMPTY_ZENBOOKDUO=PENDING
+```
+
+Do not mark ZenBookDuo PASS until that host itself is observed.
 
 ## Disposition mapping
 

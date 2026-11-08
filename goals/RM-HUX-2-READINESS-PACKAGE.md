@@ -7,11 +7,12 @@ authorize live SCM mutation. Cursor self-review is not independent security
 review.
 
 ```text
-INDEPENDENT_SECURITY_REVIEW=PENDING
-LIVE_QUALIFICATION=NOT_AUTHORIZED
-QUALIFICATION_SYNTHETIC=PASS  # mock-backed; same candidate HEAD after push
-RESTORE_SYNTHETIC=PASS
-CURSOR_SELF_REVIEW=SOURCE_LOCAL_PASS
+SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub
+SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
+INDEPENDENT_REVIEW_PENDING=true
+LIVE_NOT_AUTHORIZED=true
+CURSOR_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
+TRUSTED_OWNER_AUTH=UNISSUED
 ```
 
 ## 1. Exact Service / Runner identity + Owner authorization scope
@@ -45,7 +46,8 @@ Source surfaces requiring independent review:
 
 | Area | Path | Review focus |
 |---|---|---|
-| Sealed Owner gate | `src/windows_scm_executor.rs` (`OwnerScmAuthorizationProof`, `LiveScmExecutionGate`) | no public bool open; seal binds name+image+rights |
+| Synthetic vs trusted auth | `src/windows_scm_executor.rs` (`SyntheticScmTestGrant`, `TrustedOwnerAuthorizationVerifier`, `UnissuedOwnerAuthorizationVerifier`) | synthetic ≠ Owner; trusted path unissued |
+| Sealed gate | `src/windows_scm_executor.rs` (`LiveScmExecutionGate`) | no public bool open; grant kind tracked |
 | Exact executor | `src/windows_scm_executor.rs` (`ScmControlExecutor`) | identity binding; observe does not rewrite trust flags; restore_pass independent |
 | Windows adapter | `src/windows_scm_executor.rs` (`WindowsScmBackend`) | query-only API; Start/Stop/ChangeConfig inert until authorized path exists |
 | Control contract | `src/service_control_contract.rs` | withdraw→idle→stop; Busy never skip; restore plan binds transaction |

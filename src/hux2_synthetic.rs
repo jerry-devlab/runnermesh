@@ -1,12 +1,16 @@
-//! Full synthetic HUX-2 qualification matrix (never live SCM).
+//! Full synthetic HUX-2 qualification matrix (never live SCM / never live GitHub).
 //!
-//! Reports QUALIFICATION_SYNTHETIC / RESTORE_SYNTHETIC separately from any live
-//! disposition. LIVE_QUALIFICATION remains NOT_AUTHORIZED in this Train.
+//! Evidence classes (do not cross-promote):
+//! - SYNTHETIC_PASS — mock SCM + fake GitHub
+//! - SOURCE_READY — Windows write paths exist but inert; trusted auth unissued
+//! - INDEPENDENT_REVIEW_PENDING
+//! - LIVE_NOT_AUTHORIZED
 
 use crate::{
-    AchievedServiceControl, DesiredServiceLifecycle, DiscoveredLifecycle, LiveScmExecutionGate,
-    MockScmBackend, MockServiceRecord, OwnerScmAuthorizationProof, ScmApiError, ScmControlExecutor,
-    ScmTransactionStage, ServiceObservation, ServiceStartMode,
+    AchievedServiceControl, DesiredServiceLifecycle, DiscoveredLifecycle,
+    FakeGithubAdmissionBackend, LiveScmExecutionGate, MockScmBackend, MockServiceRecord,
+    ScmApiError, ScmControlExecutor, ScmTransactionStage, ServiceObservation, ServiceStartMode,
+    SyntheticScmTestGrant, TrustedOwnerAuthorizationRequest, UnissuedOwnerAuthorizationVerifier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,6 +24,7 @@ pub enum SyntheticDisposition {
 pub struct Hux2SyntheticReceipt {
     pub qualification_synthetic: SyntheticDisposition,
     pub restore_synthetic: SyntheticDisposition,
+    pub source_ready: bool,
     pub live_qualification: &'static str,
     pub independent_security_review: &'static str,
     pub notes: Vec<&'static str>,
@@ -45,21 +50,19 @@ fn fixture_record(
     }
 }
 
-fn sealed_gate(
+fn synthetic_gate(
     allow_start: bool,
     allow_stop: bool,
     allow_change_config: bool,
 ) -> LiveScmExecutionGate {
-    LiveScmExecutionGate::from_owner_authorization(
-        &OwnerScmAuthorizationProof::synthetic_for_tests(
-            "fixture.scm.hux2",
-            "hux2-image",
-            allow_start,
-            allow_stop,
-            allow_change_config,
-        ),
-    )
-    .expect("synthetic seal")
+    LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        "fixture.scm.hux2",
+        "hux2-image",
+        allow_start,
+        allow_stop,
+        allow_change_config,
+    ))
+    .expect("synthetic grant")
 }
 
 fn executor(
@@ -75,7 +78,7 @@ fn executor(
     )
 }
 
-/// Runs the canonical synthetic lifecycle with an open mock gate.
+/// Canonical synthetic lifecycle with Mock SCM + Fake GitHub admission.
 pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
     let mock = MockScmBackend::new();
     mock.insert(fixture_record(
@@ -84,24 +87,17 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
         ServiceStartMode::Automatic,
         false,
     ));
-    let gate = sealed_gate(true, true, true);
+    let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+    let gate = synthetic_gate(true, true, true);
     let executor = executor(mock.clone(), gate);
 
-    // 1–2 prestate + identity
     let prestate = match executor.capture_prestate(false, false) {
         Ok(prestate) => prestate,
         Err(_) => {
-            return Hux2SyntheticReceipt {
-                qualification_synthetic: SyntheticDisposition::Fail,
-                restore_synthetic: SyntheticDisposition::Fail,
-                live_qualification: "NOT_AUTHORIZED",
-                independent_security_review: "PENDING",
-                notes: vec!["prestate-capture-failed"],
-            };
+            return fail_receipt(vec!["prestate-capture-failed"]);
         }
     };
 
-    // 3 withdraw admission (managed)
     let withdraw = executor.advance(
         DesiredServiceLifecycle::DrainThenStop,
         false,
@@ -110,16 +106,26 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
         &prestate,
     );
     if withdraw.stage != ScmTransactionStage::WithdrawingAdmission {
-        return Hux2SyntheticReceipt {
-            qualification_synthetic: SyntheticDisposition::Fail,
-            restore_synthetic: SyntheticDisposition::Blocked,
-            live_qualification: "NOT_AUTHORIZED",
-            independent_security_review: "PENDING",
-            notes: vec!["admission-withdraw-phase-missing"],
-        };
+        return fail_receipt(vec!["admission-withdraw-phase-missing"]);
+    }
+    if admission.withdraw_capacity().is_err() {
+        return fail_receipt(vec!["fake-github-withdraw-failed"]);
     }
 
-    // 4–6 idle + stop + readback
+    // Busy appears after withdraw — must wait, never stop.
+    mock.set_worker_busy("fixture.scm.hux2", true);
+    let busy = executor.advance(
+        DesiredServiceLifecycle::DrainThenStop,
+        true,
+        true,
+        true,
+        &prestate,
+    );
+    if busy.stage != ScmTransactionStage::WaitingIdle || mock.stop_calls() != 0 {
+        return fail_receipt(vec!["busy-wait-failed"]);
+    }
+    mock.set_worker_busy("fixture.scm.hux2", false);
+
     let stop = executor.advance(
         DesiredServiceLifecycle::DrainThenStop,
         true,
@@ -130,16 +136,9 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
     if stop.stage != ScmTransactionStage::StopReadback
         || stop.achieved != AchievedServiceControl::Stopped
     {
-        return Hux2SyntheticReceipt {
-            qualification_synthetic: SyntheticDisposition::Fail,
-            restore_synthetic: SyntheticDisposition::Blocked,
-            live_qualification: "NOT_AUTHORIZED",
-            independent_security_review: "PENDING",
-            notes: vec!["stop-readback-failed"],
-        };
+        return fail_receipt(vec!["stop-readback-failed"]);
     }
 
-    // 7–8 start + readback
     let start = executor.advance(
         DesiredServiceLifecycle::RemainRunning,
         true,
@@ -150,25 +149,25 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
     if start.stage != ScmTransactionStage::StartReadback
         || start.achieved != AchievedServiceControl::Running
     {
-        return Hux2SyntheticReceipt {
-            qualification_synthetic: SyntheticDisposition::Fail,
-            restore_synthetic: SyntheticDisposition::Blocked,
-            live_qualification: "NOT_AUTHORIZED",
-            independent_security_review: "PENDING",
-            notes: vec!["start-readback-failed"],
-        };
+        return fail_receipt(vec!["start-readback-failed"]);
     }
 
-    // 9–10 restore to original Automatic+Running with independent admission readback
+    // Restore admission to match original prestate (selector was present).
+    if admission.restore_capacity().is_err() {
+        return fail_receipt(vec!["fake-github-restore-failed"]);
+    }
+
     let plan = stop
         .restore
         .clone()
         .or(start.restore.clone())
         .expect("plan");
-    let restored = executor.restore(&plan, plan.admission_selector_absent);
+    let restored = executor.restore(&plan, &mut admission);
     let restore_ok = restored.restore_pass
         && restored.stage == ScmTransactionStage::Completed
-        && restored.achieved == AchievedServiceControl::Running;
+        && restored.achieved == AchievedServiceControl::Running
+        && admission.withdraw_calls() == 1
+        && admission.restore_calls() == 1;
 
     Hux2SyntheticReceipt {
         qualification_synthetic: SyntheticDisposition::Pass,
@@ -177,9 +176,21 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
         } else {
             SyntheticDisposition::Fail
         },
+        source_ready: true,
         live_qualification: "NOT_AUTHORIZED",
         independent_security_review: "PENDING",
-        notes: vec!["synthetic-happy-path"],
+        notes: vec!["synthetic-happy-path-mock-scm-fake-github"],
+    }
+}
+
+fn fail_receipt(notes: Vec<&'static str>) -> Hux2SyntheticReceipt {
+    Hux2SyntheticReceipt {
+        qualification_synthetic: SyntheticDisposition::Fail,
+        restore_synthetic: SyntheticDisposition::Blocked,
+        source_ready: true,
+        live_qualification: "NOT_AUTHORIZED",
+        independent_security_review: "PENDING",
+        notes,
     }
 }
 
@@ -197,7 +208,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
             false,
         ));
         mock.set_fail_next(ScmApiError::AccessDenied);
-        let executor = executor(mock, sealed_gate(true, true, false));
+        let executor = executor(mock, synthetic_gate(true, true, false));
         let disposition = match executor.observe_verified() {
             Err(ScmApiError::AccessDenied) => SyntheticDisposition::Pass,
             _ => SyntheticDisposition::Fail,
@@ -205,7 +216,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         out.push(("access-denied", disposition));
     }
 
-    // Busy worker sudden appearance blocks stop
+    // Busy worker blocks stop
     {
         let mock = MockScmBackend::new();
         mock.insert(fixture_record(
@@ -214,7 +225,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
             ServiceStartMode::Manual,
             true,
         ));
-        let executor = executor(mock.clone(), sealed_gate(false, true, false));
+        let executor = executor(mock.clone(), synthetic_gate(false, true, false));
         let prestate = executor.capture_prestate(true, true).unwrap();
         let receipt = executor.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -249,7 +260,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         out.push(("service-name-drift", disposition));
     }
 
-    // Closed gate must not mutate even when phase wants stop
+    // Closed gate
     {
         let mock = MockScmBackend::new();
         mock.insert(fixture_record(
@@ -278,7 +289,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         out.push(("closed-gate-no-mutation", disposition));
     }
 
-    // Incomplete observation flags must not be overwritten into trust
+    // Incomplete image flag
     {
         let mock = MockScmBackend::new();
         let mut record = fixture_record(
@@ -297,7 +308,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         out.push(("incomplete-image-flag-refused", disposition));
     }
 
-    // Restore must not PASS when change-config fails mid-restore
+    // Restore change-config fail
     {
         let mock = MockScmBackend::new();
         mock.insert(fixture_record(
@@ -307,10 +318,11 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
             false,
         ));
         mock.set_fail_change(ScmApiError::Timeout);
-        let executor = executor(mock, sealed_gate(true, true, true));
+        let executor = executor(mock, synthetic_gate(true, true, true));
         let prestate = executor.capture_prestate(false, true).unwrap();
         let plan = crate::capture_restore_plan(&prestate);
-        let receipt = executor.restore(&plan, true);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt = executor.restore(&plan, &mut admission);
         let disposition = if !receipt.restore_pass
             && receipt.stage == ScmTransactionStage::RestoreFailed
             && receipt.reason.as_deref() == Some("scm.timeout")
@@ -320,6 +332,139 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
             SyntheticDisposition::Fail
         };
         out.push(("restore-change-config-fail", disposition));
+    }
+
+    // Identity race: image token changes mid-flight
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock.clone(), synthetic_gate(true, true, true));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        // Drift image after prestate
+        let mut drifted = fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        );
+        drifted.image_token = "drifted-image".to_owned();
+        mock.insert(drifted);
+        let receipt = executor.advance(
+            DesiredServiceLifecycle::DrainThenStop,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        let disposition = if receipt.reason.as_deref() == Some("scm.identity-mismatch")
+            && mock.stop_calls() == 0
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("identity-race-mid-flight", disposition));
+    }
+
+    // Admission disconnect during restore verification
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Automatic,
+            false,
+        ));
+        let executor = executor(mock, synthetic_gate(true, true, true));
+        let prestate = executor.capture_prestate(false, false).unwrap();
+        let plan = crate::capture_restore_plan(&prestate);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        admission.set_disconnected(true);
+        let receipt = executor.restore(&plan, &mut admission);
+        let disposition =
+            if !receipt.restore_pass && receipt.reason.as_deref() == Some("scm.unavailable") {
+                SyntheticDisposition::Pass
+            } else {
+                SyntheticDisposition::Fail
+            };
+        out.push(("admission-disconnect-on-restore", disposition));
+    }
+
+    // Duplicate stop command after already stopped is Observe, not second stop
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Stopped,
+            ServiceStartMode::Manual,
+            false,
+        ));
+        let executor = executor(mock.clone(), synthetic_gate(true, true, true));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        let receipt = executor.advance(
+            DesiredServiceLifecycle::DrainThenStop,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        let disposition =
+            if receipt.stage == ScmTransactionStage::Completed && mock.stop_calls() == 0 {
+                SyntheticDisposition::Pass
+            } else {
+                SyntheticDisposition::Fail
+            };
+        out.push(("duplicate-stop-is-observe", disposition));
+    }
+
+    // Trusted verifier never issues in this Train
+    {
+        let request = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.hux2".to_owned(),
+            image_token: "hux2-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: b"attempt".to_vec(),
+        };
+        let disposition = match LiveScmExecutionGate::from_trusted_owner_authorization(
+            &UnissuedOwnerAuthorizationVerifier,
+            &request,
+        ) {
+            Err(ScmApiError::AuthorizationNotIssued) => SyntheticDisposition::Pass,
+            _ => SyntheticDisposition::Fail,
+        };
+        out.push(("trusted-auth-unissued", disposition));
+    }
+
+    // Partial restore: admission restored but observer still mismatches plan
+    {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_record(
+            "fixture.scm.hux2",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Automatic,
+            false,
+        ));
+        let executor = executor(mock, synthetic_gate(true, true, true));
+        let prestate = executor.capture_prestate(false, true).unwrap();
+        let plan = crate::capture_restore_plan(&prestate);
+        // Plan expects absent=true; after "partial" restore selector is present again.
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        let receipt = executor.restore(&plan, &mut admission);
+        let disposition = if !receipt.restore_pass
+            && receipt.reason.as_deref() == Some("scm.admission-readback-mismatch")
+        {
+            SyntheticDisposition::Pass
+        } else {
+            SyntheticDisposition::Fail
+        };
+        out.push(("partial-admission-restore-mismatch", disposition));
     }
 
     out
@@ -334,6 +479,7 @@ mod tests {
         let receipt = run_hux2_synthetic_happy_path();
         assert_eq!(receipt.qualification_synthetic, SyntheticDisposition::Pass);
         assert_eq!(receipt.restore_synthetic, SyntheticDisposition::Pass);
+        assert!(receipt.source_ready);
         assert_eq!(receipt.live_qualification, "NOT_AUTHORIZED");
         assert_eq!(receipt.independent_security_review, "PENDING");
     }

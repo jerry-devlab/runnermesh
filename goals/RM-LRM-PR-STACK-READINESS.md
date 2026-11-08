@@ -24,16 +24,16 @@ main
 ```
 
 `#60` (`feat/g15r-requalification-from-main` → `main`) is a **parallel G15R/H2
-docs lane**, not an LRM stack parent. Its CI failure must not be used as
-productization evidence and must not gate LRM tip merges wrongly—or be ignored
-for the H2 lane.
+docs lane**, not an LRM stack parent. It is **MERGED** at
+`ca1dd96e75a606b80d1978f83e973bd2586d36e4`. Keep v0.1/H2 and LRM productization
+lanes independent — do not fold LRM tip into frozen v0.1 RC.
 
 ## Tip status (at readiness train start)
 
 | PR | Draft | CI | Role |
 |---|---|---|---|
 | #51–#59 | Draft | PASS | stacked source foundations |
-| #60 | Ready | FAIL | G15R docs; separate lane |
+| #60 | MERGED | main@ca1dd96 | G15R docs; separate lane |
 | #61–#63 | Draft | PASS | runtime + HUX + productization tip |
 
 Tip baseline before this readiness commit: `#63` @ `3fd2816e24cb…`
@@ -59,17 +59,17 @@ Tip baseline before this readiness commit: `#63` @ `3fd2816e24cb…`
    - never enable live Start/Stop in the same merge.
 4. Do not fold LRM tip into frozen v0.1 RC cutover; H2 remains a separate Owner
    transaction on the G15R lane.
-5. `#60` resolve independently for G15R; do not batch-merge with `#63`.
+5. `#60` already merged; do not reopen it as an LRM dependency.
 
 ## Remaining blockers
 
 ```text
 INDEPENDENT_SECURITY_REVIEW=PENDING   # live SCM surface
-HUX1_NONEMPTY_ZENBOOKDUO=UNPROVEN     # host unreachable / not observed here
+HUX1_NONEMPTY_ZENBOOKDUO=PENDING      # ZenBookDuo not observed this Train
 HUMAN_TRAY_VISUAL=PENDING_OWNER
 HUX2_LIVE=NOT_AUTHORIZED
+TRUSTED_OWNER_AUTH=UNISSUED
 H2=WAITING_FOR_OWNER                  # separate lane
-#60 CI=FAIL                           # G15R docs lane
 ```
 
 ## Non-goals

@@ -1,9 +1,13 @@
-//! Windows SCM control executor for future HUX-2 (mutation gate sealed closed).
+//! Windows SCM control executor for future HUX-2 (mutation arm sealed closed).
 //!
-//! Real Start/Stop/ChangeConfig require a sealed [`OwnerScmAuthorizationProof`].
-//! Arbitrary `LiveScmExecutionGate { allow_*: true }` construction is impossible.
-//! Unit/integration tests inject [`MockScmBackend`] or use
-//! [`OwnerScmAuthorizationProof::synthetic_for_tests`].
+//! Authorization model:
+//! - [`SyntheticScmTestGrant`] opens a gate usable **only** with mock/synthetic
+//!   flows. It is forgeable by design and must never be treated as Owner auth.
+//! - [`TrustedOwnerAuthorizationVerifier`] is the sole live-auth entry. This
+//!   Train ships [`UnissuedOwnerAuthorizationVerifier`], which always refuses.
+//!
+//! Win32 `QueryServiceStatusEx(SC_STATUS_PROCESS_INFO)` returns
+//! [`SERVICE_STATUS_PROCESS`], not `ENUM_SERVICE_STATUS_PROCESSW`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -18,89 +22,92 @@ use crate::{
     ServiceObservation, ServicePrestateCapture, ServiceRestorePlan, ServiceStartMode,
 };
 
-/// Sealed owner authorization for live SCM mutation.
+/// Independent GitHub admission selector observation used by restore verification.
 ///
-/// Production callers cannot invent open gates from public bool fields. The seal
-/// binds service name + image token + requested rights.
+/// Callers must not pass a bare boolean as accepted fact; the observer performs
+/// a fresh read (fake or live) at verification time.
+pub trait AdmissionSelectorObserver {
+    fn observe_selector_absent(&mut self) -> Result<bool, ScmApiError>;
+}
+
+/// Request presented to a trusted Owner authorization verifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OwnerScmAuthorizationProof {
+pub struct TrustedOwnerAuthorizationRequest {
+    pub service_name: String,
+    pub image_token: String,
+    pub allow_start: bool,
+    pub allow_stop: bool,
+    pub allow_change_config: bool,
+    /// Opaque Owner material (never logged). Empty in this Train.
+    pub owner_material: Vec<u8>,
+}
+
+/// Live/trusted authorization entry. Implementations must not accept synthetic grants.
+pub trait TrustedOwnerAuthorizationVerifier {
+    fn verify(
+        &self,
+        request: &TrustedOwnerAuthorizationRequest,
+    ) -> Result<LiveScmExecutionGate, ScmApiError>;
+}
+
+/// Default verifier for SOURCE_AND_SANDBOX_ONLY: never issues live rights.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnissuedOwnerAuthorizationVerifier;
+
+impl TrustedOwnerAuthorizationVerifier for UnissuedOwnerAuthorizationVerifier {
+    fn verify(
+        &self,
+        _request: &TrustedOwnerAuthorizationRequest,
+    ) -> Result<LiveScmExecutionGate, ScmApiError> {
+        Err(ScmApiError::AuthorizationNotIssued)
+    }
+}
+
+/// Explicitly forgeable test grant. Not Owner authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntheticScmTestGrant {
     service_name: String,
     image_token: String,
     allow_start: bool,
     allow_stop: bool,
     allow_change_config: bool,
-    seal: String,
 }
 
-impl OwnerScmAuthorizationProof {
-    const SEAL_DOMAIN: &'static str = "runnermesh-scm-owner-auth-v1";
-
-    /// Synthetic/test authorization only. Never treat as production Owner token.
-    pub fn synthetic_for_tests(
+impl SyntheticScmTestGrant {
+    pub fn new(
         service_name: impl Into<String>,
         image_token: impl Into<String>,
         allow_start: bool,
         allow_stop: bool,
         allow_change_config: bool,
     ) -> Self {
-        let service_name = service_name.into();
-        let image_token = image_token.into();
-        let seal = Self::compute_seal(
-            &service_name,
-            &image_token,
-            allow_start,
-            allow_stop,
-            allow_change_config,
-        );
         Self {
-            service_name,
-            image_token,
+            service_name: service_name.into(),
+            image_token: image_token.into(),
             allow_start,
             allow_stop,
             allow_change_config,
-            seal,
         }
-    }
-
-    fn compute_seal(
-        service_name: &str,
-        image_token: &str,
-        allow_start: bool,
-        allow_stop: bool,
-        allow_change_config: bool,
-    ) -> String {
-        let material = format!(
-            "{}|{}|{}|{}|{}|{}",
-            Self::SEAL_DOMAIN,
-            service_name.to_ascii_lowercase(),
-            image_token.to_ascii_lowercase(),
-            allow_start as u8,
-            allow_stop as u8,
-            allow_change_config as u8
-        );
-        let digest = Sha256::digest(material.as_bytes());
-        digest.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    fn is_seal_valid(&self) -> bool {
-        self.seal
-            == Self::compute_seal(
-                &self.service_name,
-                &self.image_token,
-                self.allow_start,
-                self.allow_stop,
-                self.allow_change_config,
-            )
     }
 }
 
-/// Hard gate for live SCM mutation. Fields are private; open only via sealed proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScmGrantKind {
+    Closed,
+    /// Forgeable; valid only for mock/synthetic qualification.
+    SyntheticTestOnly,
+    /// Reserved for future trusted verifier issuance (not constructed this Train).
+    #[allow(dead_code)]
+    TrustedLive,
+}
+
+/// Hard gate for SCM mutation. Public bool construction is impossible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveScmExecutionGate {
     allow_start: bool,
     allow_stop: bool,
     allow_change_config: bool,
-    sealed: bool,
+    grant_kind: ScmGrantKind,
     bound_service_name: String,
     bound_image_token: String,
 }
@@ -116,33 +123,45 @@ impl LiveScmExecutionGate {
         allow_start: false,
         allow_stop: false,
         allow_change_config: false,
-        sealed: true,
+        grant_kind: ScmGrantKind::Closed,
         bound_service_name: String::new(),
         bound_image_token: String::new(),
     };
 
-    /// Opens mutation rights only when the sealed Owner proof validates.
-    pub fn from_owner_authorization(
-        proof: &OwnerScmAuthorizationProof,
-    ) -> Result<Self, ScmApiError> {
-        if !proof.is_seal_valid() {
-            return Err(ScmApiError::GateClosed);
-        }
-        if proof.service_name.trim().is_empty() || proof.service_name.contains('*') {
+    /// Opens a **synthetic test** gate. Never use for live Windows mutation.
+    pub fn from_synthetic_test_grant(grant: &SyntheticScmTestGrant) -> Result<Self, ScmApiError> {
+        if grant.service_name.trim().is_empty() || grant.service_name.contains('*') {
             return Err(ScmApiError::NameDrift);
         }
         Ok(Self {
-            allow_start: proof.allow_start,
-            allow_stop: proof.allow_stop,
-            allow_change_config: proof.allow_change_config,
-            sealed: true,
-            bound_service_name: proof.service_name.clone(),
-            bound_image_token: proof.image_token.clone(),
+            allow_start: grant.allow_start,
+            allow_stop: grant.allow_stop,
+            allow_change_config: grant.allow_change_config,
+            grant_kind: ScmGrantKind::SyntheticTestOnly,
+            bound_service_name: grant.service_name.clone(),
+            bound_image_token: grant.image_token.clone(),
         })
     }
 
+    /// Live path: delegates to a trusted verifier (unissued this Train).
+    pub fn from_trusted_owner_authorization<V: TrustedOwnerAuthorizationVerifier>(
+        verifier: &V,
+        request: &TrustedOwnerAuthorizationRequest,
+    ) -> Result<Self, ScmApiError> {
+        verifier.verify(request)
+    }
+
     pub fn allows_mutation(&self) -> bool {
-        self.sealed && (self.allow_start || self.allow_stop || self.allow_change_config)
+        !matches!(self.grant_kind, ScmGrantKind::Closed)
+            && (self.allow_start || self.allow_stop || self.allow_change_config)
+    }
+
+    pub fn is_synthetic_test_only(&self) -> bool {
+        matches!(self.grant_kind, ScmGrantKind::SyntheticTestOnly)
+    }
+
+    pub fn is_trusted_live(&self) -> bool {
+        matches!(self.grant_kind, ScmGrantKind::TrustedLive)
     }
 
     fn authorizes(
@@ -153,7 +172,7 @@ impl LiveScmExecutionGate {
         need_stop: bool,
         need_config: bool,
     ) -> bool {
-        if !self.sealed {
+        if matches!(self.grant_kind, ScmGrantKind::Closed) {
             return false;
         }
         if !self.bound_service_name.is_empty()
@@ -223,6 +242,8 @@ pub enum ScmApiError {
     IdentityMismatch,
     StateUnknown,
     RestoreIncomplete,
+    AuthorizationNotIssued,
+    AdmissionObserveFailed,
 }
 
 impl ScmApiError {
@@ -238,6 +259,8 @@ impl ScmApiError {
             Self::IdentityMismatch => "scm.identity-mismatch",
             Self::StateUnknown => "scm.state-unknown",
             Self::RestoreIncomplete => "scm.restore-incomplete",
+            Self::AuthorizationNotIssued => "scm.authorization-not-issued",
+            Self::AdmissionObserveFailed => "scm.admission-observe-failed",
         }
     }
 }
@@ -432,7 +455,110 @@ impl ScmControlBackend for MockScmBackend {
     }
 }
 
-/// Exact-identity bound executor. Live mutation requires a sealed owner gate.
+/// Fake GitHub admission backend for synthetic HUX-2 (never talks to GitHub).
+#[derive(Clone, Default)]
+pub struct FakeGithubAdmissionBackend {
+    inner: Arc<Mutex<FakeGithubState>>,
+}
+
+#[derive(Clone, Debug)]
+struct FakeGithubState {
+    selector_present: bool,
+    fail_next_observe: Option<ScmApiError>,
+    disconnected: bool,
+    withdraw_calls: u32,
+    restore_calls: u32,
+    observe_calls: u32,
+}
+
+impl Default for FakeGithubState {
+    fn default() -> Self {
+        Self {
+            selector_present: true,
+            fail_next_observe: None,
+            disconnected: false,
+            withdraw_calls: 0,
+            restore_calls: 0,
+            observe_calls: 0,
+        }
+    }
+}
+
+impl FakeGithubAdmissionBackend {
+    pub fn new_with_selector_present(present: bool) -> Self {
+        let backend = Self::default();
+        backend
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .selector_present = present;
+        backend
+    }
+
+    pub fn set_fail_next_observe(&self, error: ScmApiError) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fail_next_observe = Some(error);
+    }
+
+    pub fn set_disconnected(&self, disconnected: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .disconnected = disconnected;
+    }
+
+    pub fn withdraw_capacity(&self) -> Result<(), ScmApiError> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.disconnected {
+            return Err(ScmApiError::Unavailable);
+        }
+        guard.selector_present = false;
+        guard.withdraw_calls = guard.withdraw_calls.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn restore_capacity(&self) -> Result<(), ScmApiError> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.disconnected {
+            return Err(ScmApiError::Unavailable);
+        }
+        guard.selector_present = true;
+        guard.restore_calls = guard.restore_calls.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn withdraw_calls(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .withdraw_calls
+    }
+
+    pub fn restore_calls(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .restore_calls
+    }
+}
+
+impl AdmissionSelectorObserver for FakeGithubAdmissionBackend {
+    fn observe_selector_absent(&mut self) -> Result<bool, ScmApiError> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard.observe_calls = guard.observe_calls.saturating_add(1);
+        if let Some(error) = guard.fail_next_observe.take() {
+            return Err(error);
+        }
+        if guard.disconnected {
+            return Err(ScmApiError::Unavailable);
+        }
+        Ok(!guard.selector_present)
+    }
+}
+
+/// Exact-identity bound executor. Live mutation requires a trusted Owner gate.
 pub struct ScmControlExecutor<B> {
     backend: B,
     gate: LiveScmExecutionGate,
@@ -497,8 +623,6 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
         {
             return Err(ScmApiError::NameDrift);
         }
-        // Never overwrite observation flags — refuse when evidence is incomplete
-        // or disagrees with the bound executor identity.
         if !snap.observation.ownership_verified {
             return Err(ScmApiError::IdentityMismatch);
         }
@@ -545,8 +669,7 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
         Ok(())
     }
 
-    /// Advances one prepare/execute step. Stop/Start only run when the sealed
-    /// gate authorizes the exact bound service/image.
+    /// Advances one prepare/execute step.
     pub fn advance(
         &self,
         desired: DesiredServiceLifecycle,
@@ -703,12 +826,12 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
 
     /// Applies restore plan under a sealed gate with independent step readback.
     ///
-    /// `admission_selector_absent_now` is an independent admission observation
-    /// supplied by the caller (never inferred from SCM alone).
-    pub fn restore(
+    /// Admission result is obtained from [`AdmissionSelectorObserver`] at
+    /// verification time — never from a caller-supplied boolean fact.
+    pub fn restore<A: AdmissionSelectorObserver>(
         &self,
         plan: &ServiceRestorePlan,
-        admission_selector_absent_now: bool,
+        admission: &mut A,
     ) -> ScmTransactionReceipt {
         let restore = Some(plan.clone());
         if let Err(error) = self.plan_matches_binding(plan) {
@@ -829,7 +952,22 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
                 restore_pass: false,
             };
         }
-        if admission_selector_absent_now != plan.admission_selector_absent {
+
+        let admission_absent = match admission.observe_selector_absent() {
+            Ok(absent) => absent,
+            Err(error) => {
+                return ScmTransactionReceipt {
+                    service_name: plan.service_name.clone(),
+                    stage: ScmTransactionStage::RestoreFailed,
+                    api_accepted: true,
+                    achieved: achieved_from_observation(&after, false),
+                    reason: Some(error.as_str().to_owned()),
+                    restore,
+                    restore_pass: false,
+                };
+            }
+        };
+        if admission_absent != plan.admission_selector_absent {
             return ScmTransactionReceipt {
                 service_name: plan.service_name.clone(),
                 stage: ScmTransactionStage::RestoreFailed,
@@ -883,30 +1021,49 @@ pub fn opaque_image_token(image_path: &str) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Windows SCM backend: read-only query may run; mutation always honors the gate.
-///
-/// This Train never opens a gate from Owner bools. Even when compiled, Start/Stop/
-/// ChangeConfig return [`ScmApiError::GateClosed`] unless a sealed proof opened
-/// the executor gate (still not exercised against live SCM here).
+/// Unconstructable mutation arm. Public API never produces a live arm this Train.
+#[derive(Clone, Debug)]
+pub struct ScmMutationArm {
+    _private: (),
+}
+
+/// Windows SCM backend with real query source and sealed write paths.
 #[derive(Clone, Debug)]
 pub struct WindowsScmBackend {
-    /// When false, even QueryStatus returns GateClosed (default for safety).
     allow_read_only_query: bool,
+    /// Always `None` via [`WindowsScmBackend::mutation_inert`]. Write APIs exist
+    /// in source for review but refuse without an arm.
+    mutation_arm: Option<ScmMutationArm>,
 }
 
 impl Default for WindowsScmBackend {
     fn default() -> Self {
-        Self {
-            // Read-only query is available for future Owner-prepared observation,
-            // but mutation paths remain inert without a sealed executor gate.
-            allow_read_only_query: true,
-        }
+        Self::mutation_inert()
     }
 }
 
 impl WindowsScmBackend {
     pub fn mutation_inert() -> Self {
-        Self::default()
+        Self {
+            allow_read_only_query: true,
+            mutation_arm: None,
+        }
+    }
+
+    /// Future Owner-transaction entry. Not callable without a privately minted arm.
+    #[allow(dead_code)]
+    fn with_mutation_arm(arm: ScmMutationArm) -> Self {
+        Self {
+            allow_read_only_query: true,
+            mutation_arm: Some(arm),
+        }
+    }
+
+    fn require_exact_name(service_name: &str) -> Result<(), ScmApiError> {
+        if service_name.contains('*') || service_name.trim().is_empty() {
+            return Err(ScmApiError::NameDrift);
+        }
+        Ok(())
     }
 }
 
@@ -915,9 +1072,7 @@ impl ScmControlBackend for WindowsScmBackend {
         if !self.allow_read_only_query {
             return Err(ScmApiError::GateClosed);
         }
-        if service_name.contains('*') || service_name.trim().is_empty() {
-            return Err(ScmApiError::NameDrift);
-        }
+        Self::require_exact_name(service_name)?;
         #[cfg(windows)]
         {
             windows_query_exact(service_name)
@@ -929,66 +1084,95 @@ impl ScmControlBackend for WindowsScmBackend {
         }
     }
 
-    fn start(&self, _service_name: &str) -> Result<(), ScmApiError> {
-        // Hard stop: this adapter never issues Start in SOURCE_AND_SANDBOX_ONLY.
-        Err(ScmApiError::GateClosed)
+    fn start(&self, service_name: &str) -> Result<(), ScmApiError> {
+        Self::require_exact_name(service_name)?;
+        if self.mutation_arm.is_none() {
+            return Err(ScmApiError::GateClosed);
+        }
+        #[cfg(windows)]
+        {
+            windows_start_service(service_name)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = service_name;
+            Err(ScmApiError::Unavailable)
+        }
     }
 
-    fn stop(&self, _service_name: &str) -> Result<(), ScmApiError> {
-        Err(ScmApiError::GateClosed)
+    fn stop(&self, service_name: &str) -> Result<(), ScmApiError> {
+        Self::require_exact_name(service_name)?;
+        if self.mutation_arm.is_none() {
+            return Err(ScmApiError::GateClosed);
+        }
+        #[cfg(windows)]
+        {
+            windows_stop_service(service_name)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = service_name;
+            Err(ScmApiError::Unavailable)
+        }
     }
 
     fn change_start_mode(
         &self,
-        _service_name: &str,
-        _mode: ServiceStartMode,
+        service_name: &str,
+        mode: ServiceStartMode,
     ) -> Result<(), ScmApiError> {
-        Err(ScmApiError::GateClosed)
+        Self::require_exact_name(service_name)?;
+        if self.mutation_arm.is_none() {
+            return Err(ScmApiError::GateClosed);
+        }
+        #[cfg(windows)]
+        {
+            windows_change_start_mode(service_name, mode)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (service_name, mode);
+            Err(ScmApiError::Unavailable)
+        }
     }
 }
 
 #[cfg(windows)]
 fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiError> {
+    use std::mem::{align_of, size_of, MaybeUninit};
     use std::ptr;
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST};
     use windows_sys::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
-        QueryServiceStatusEx, ENUM_SERVICE_STATUS_PROCESSW, QUERY_SERVICE_CONFIGW,
-        SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS,
+        QueryServiceStatusEx, QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
+        SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_STATUS_PROCESS,
     };
 
     unsafe {
         let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
         if scm.is_null() {
-            return Err(ScmApiError::AccessDenied);
+            return Err(map_last_error_open());
         }
-        let wide: Vec<u16> = service_name
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide = to_wide(service_name);
         let service = OpenServiceW(
             scm,
             wide.as_ptr(),
             SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG,
         );
         if service.is_null() {
+            let err = map_last_error_open();
             CloseServiceHandle(scm);
-            return Err(ScmApiError::NotFound);
+            return Err(err);
         }
 
+        // SC_STATUS_PROCESS_INFO returns SERVICE_STATUS_PROCESS (fixed size).
+        let mut status = MaybeUninit::<SERVICE_STATUS_PROCESS>::zeroed();
         let mut needed = 0u32;
-        QueryServiceStatusEx(
-            service,
-            SC_STATUS_PROCESS_INFO,
-            ptr::null_mut(),
-            0,
-            &mut needed,
-        );
-        let mut status_buf = vec![0u8; needed as usize];
         let status_ok = QueryServiceStatusEx(
             service,
             SC_STATUS_PROCESS_INFO,
-            status_buf.as_mut_ptr(),
-            needed,
+            status.as_mut_ptr().cast::<u8>(),
+            size_of::<SERVICE_STATUS_PROCESS>() as u32,
             &mut needed,
         );
         if status_ok == 0 {
@@ -996,36 +1180,46 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
             CloseServiceHandle(scm);
             return Err(ScmApiError::Unavailable);
         }
-        let status = &*(status_buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW);
-        let state = map_dw_state(status.ServiceStatusProcess.dwCurrentState);
+        let status = status.assume_init();
+        let state = map_dw_state(status.dwCurrentState);
 
         needed = 0;
         QueryServiceConfigW(service, ptr::null_mut(), 0, &mut needed);
-        let mut config_buf = vec![0u8; needed as usize];
-        let config_ok = QueryServiceConfigW(
-            service,
-            config_buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW,
-            needed,
-            &mut needed,
-        );
+        if needed == 0 {
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return Err(ScmApiError::Unavailable);
+        }
+        let align = align_of::<QUERY_SERVICE_CONFIGW>();
+        let size = needed as usize;
+        let mut raw = vec![0u8; size + align];
+        let unaligned = raw.as_mut_ptr() as usize;
+        let aligned = (unaligned + align - 1) & !(align - 1);
+        let config_ptr = aligned as *mut QUERY_SERVICE_CONFIGW;
+        let config_ok = QueryServiceConfigW(service, config_ptr, needed, &mut needed);
+        let last_cfg_err = windows_sys::Win32::Foundation::GetLastError();
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         if config_ok == 0 {
-            return Err(ScmApiError::Unavailable);
+            return Err(if last_cfg_err == ERROR_ACCESS_DENIED {
+                ScmApiError::AccessDenied
+            } else {
+                ScmApiError::Unavailable
+            });
         }
-        let config = &*(config_buf.as_ptr() as *const QUERY_SERVICE_CONFIGW);
+        let config = &*config_ptr;
         let image = wide_to_string(config.lpBinaryPathName);
         let start_name = wide_to_string(config.lpServiceStartName);
         let image_token = opaque_image_token(image.trim_matches('"'));
         let execution_identity_token = opaque_image_token(&start_name);
         let start_mode = map_start_type(config.dwStartType);
 
+        let _ = ERROR_SERVICE_DOES_NOT_EXIST;
         Ok(ScmExactSnapshot {
             observation: ServiceObservation {
                 service_name: service_name.to_owned(),
                 state,
                 start_mode,
-                // Honest flags from successful query — caller/executor compares tokens.
                 image_path_matches: !image.trim().is_empty(),
                 ownership_verified: !start_name.trim().is_empty(),
             },
@@ -1033,6 +1227,134 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
             execution_identity_token,
         })
     }
+}
+
+/// Real StartServiceW path — only reachable with a privately minted mutation arm.
+#[cfg(windows)]
+fn windows_start_service(service_name: &str) -> Result<(), ScmApiError> {
+    use std::ptr;
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, StartServiceW, SC_MANAGER_CONNECT,
+        SERVICE_START,
+    };
+    unsafe {
+        let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return Err(map_last_error_open());
+        }
+        let wide = to_wide(service_name);
+        let service = OpenServiceW(scm, wide.as_ptr(), SERVICE_START);
+        if service.is_null() {
+            let err = map_last_error_open();
+            CloseServiceHandle(scm);
+            return Err(err);
+        }
+        let ok = StartServiceW(service, 0, ptr::null());
+        CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        if ok == 0 {
+            return Err(ScmApiError::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_stop_service(service_name: &str) -> Result<(), ScmApiError> {
+    use std::mem::MaybeUninit;
+    use std::ptr;
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
+        SERVICE_CONTROL_STOP, SERVICE_STATUS, SERVICE_STOP,
+    };
+    unsafe {
+        let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return Err(map_last_error_open());
+        }
+        let wide = to_wide(service_name);
+        let service = OpenServiceW(scm, wide.as_ptr(), SERVICE_STOP);
+        if service.is_null() {
+            let err = map_last_error_open();
+            CloseServiceHandle(scm);
+            return Err(err);
+        }
+        let mut status = MaybeUninit::<SERVICE_STATUS>::zeroed();
+        let ok = ControlService(service, SERVICE_CONTROL_STOP, status.as_mut_ptr());
+        CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        if ok == 0 {
+            return Err(ScmApiError::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_change_start_mode(
+    service_name: &str,
+    mode: ServiceStartMode,
+) -> Result<(), ScmApiError> {
+    use std::ptr;
+    use windows_sys::Win32::System::Services::{
+        ChangeServiceConfigW, CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
+        SERVICE_CHANGE_CONFIG, SERVICE_NO_CHANGE,
+    };
+    let start_type = match mode {
+        ServiceStartMode::Automatic => windows_sys::Win32::System::Services::SERVICE_AUTO_START,
+        ServiceStartMode::Manual => windows_sys::Win32::System::Services::SERVICE_DEMAND_START,
+        ServiceStartMode::Disabled => windows_sys::Win32::System::Services::SERVICE_DISABLED,
+        ServiceStartMode::Unknown => return Err(ScmApiError::StateUnknown),
+    };
+    unsafe {
+        let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return Err(map_last_error_open());
+        }
+        let wide = to_wide(service_name);
+        let service = OpenServiceW(scm, wide.as_ptr(), SERVICE_CHANGE_CONFIG);
+        if service.is_null() {
+            let err = map_last_error_open();
+            CloseServiceHandle(scm);
+            return Err(err);
+        }
+        let ok = ChangeServiceConfigW(
+            service,
+            SERVICE_NO_CHANGE,
+            start_type,
+            SERVICE_NO_CHANGE,
+            ptr::null(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        );
+        CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        if ok == 0 {
+            return Err(ScmApiError::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn map_last_error_open() -> ScmApiError {
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST,
+    };
+    match unsafe { GetLastError() } {
+        ERROR_ACCESS_DENIED => ScmApiError::AccessDenied,
+        ERROR_SERVICE_DOES_NOT_EXIST => ScmApiError::NotFound,
+        _ => ScmApiError::Unavailable,
+    }
+}
+
+#[cfg(windows)]
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(windows)]
@@ -1106,6 +1428,20 @@ impl ScmControlBackend for GatedWindowsScmBackend {
 mod tests {
     use super::*;
 
+    struct StaticAdmission {
+        absent: bool,
+        fail: Option<ScmApiError>,
+    }
+
+    impl AdmissionSelectorObserver for StaticAdmission {
+        fn observe_selector_absent(&mut self) -> Result<bool, ScmApiError> {
+            if let Some(error) = self.fail.take() {
+                return Err(error);
+            }
+            Ok(self.absent)
+        }
+    }
+
     fn fixture_listening() -> MockServiceRecord {
         MockServiceRecord {
             observation: ServiceObservation {
@@ -1121,16 +1457,14 @@ mod tests {
         }
     }
 
-    fn open_gate() -> LiveScmExecutionGate {
-        LiveScmExecutionGate::from_owner_authorization(
-            &OwnerScmAuthorizationProof::synthetic_for_tests(
-                "fixture.scm.a",
-                "fixture-image",
-                true,
-                true,
-                true,
-            ),
-        )
+    fn open_synthetic_gate() -> LiveScmExecutionGate {
+        LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            true,
+        ))
         .unwrap()
     }
 
@@ -1174,19 +1508,29 @@ mod tests {
     }
 
     #[test]
-    fn tampered_owner_proof_cannot_open_gate() {
-        let mut proof = OwnerScmAuthorizationProof::synthetic_for_tests(
-            "fixture.scm.a",
-            "fixture-image",
-            true,
-            true,
-            true,
-        );
-        proof.seal = "deadbeef".to_owned();
+    fn unissued_trusted_verifier_never_opens_live_gate() {
+        let request = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: b"not-a-real-token".to_vec(),
+        };
         assert!(matches!(
-            LiveScmExecutionGate::from_owner_authorization(&proof),
-            Err(ScmApiError::GateClosed)
+            LiveScmExecutionGate::from_trusted_owner_authorization(
+                &UnissuedOwnerAuthorizationVerifier,
+                &request
+            ),
+            Err(ScmApiError::AuthorizationNotIssued)
         ));
+    }
+
+    #[test]
+    fn synthetic_grant_is_marked_test_only() {
+        let gate = open_synthetic_gate();
+        assert!(gate.is_synthetic_test_only());
+        assert!(!gate.is_trusted_live());
     }
 
     #[test]
@@ -1211,7 +1555,7 @@ mod tests {
     fn open_gate_stop_readback_reports_stopped() {
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
-        let exec = executor(mock.clone(), open_gate());
+        let exec = executor(mock.clone(), open_synthetic_gate());
         let prestate = exec.capture_prestate(false, true).unwrap();
         let receipt = exec.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -1226,53 +1570,73 @@ mod tests {
     }
 
     #[test]
+    fn restore_requires_independent_admission_observation() {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_listening());
+        let exec = executor(mock, open_synthetic_gate());
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        let plan = capture_restore_plan(&prestate);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt = exec.restore(&plan, &mut admission);
+        assert!(receipt.restore_pass);
+        assert_eq!(receipt.stage, ScmTransactionStage::Completed);
+    }
+
+    #[test]
+    fn restore_fails_when_admission_observer_disagrees() {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_listening());
+        let exec = executor(mock, open_synthetic_gate());
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        let plan = capture_restore_plan(&prestate);
+        // Plan expects absent=true; observer still sees present.
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        let receipt = exec.restore(&plan, &mut admission);
+        assert!(!receipt.restore_pass);
+        assert_eq!(receipt.stage, ScmTransactionStage::RestoreFailed);
+    }
+
+    #[test]
+    fn restore_fails_when_admission_observe_errors() {
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_listening());
+        let exec = executor(mock, open_synthetic_gate());
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        let plan = capture_restore_plan(&prestate);
+        let mut admission = StaticAdmission {
+            absent: true,
+            fail: Some(ScmApiError::Unavailable),
+        };
+        let receipt = exec.restore(&plan, &mut admission);
+        assert!(!receipt.restore_pass);
+        assert_eq!(receipt.reason.as_deref(), Some("scm.unavailable"));
+    }
+
+    #[test]
     fn restore_fails_when_change_config_errors() {
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
         mock.set_fail_change(ScmApiError::AccessDenied);
-        let exec = executor(mock, open_gate());
+        let exec = executor(mock, open_synthetic_gate());
         let prestate = exec.capture_prestate(false, true).unwrap();
         let plan = capture_restore_plan(&prestate);
-        let receipt = exec.restore(&plan, true);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt = exec.restore(&plan, &mut admission);
         assert_eq!(receipt.stage, ScmTransactionStage::RestoreFailed);
         assert!(!receipt.restore_pass);
         assert_eq!(receipt.reason.as_deref(), Some("scm.access-denied"));
     }
 
     #[test]
-    fn restore_fails_when_admission_readback_mismatches() {
-        let mock = MockScmBackend::new();
-        mock.insert(fixture_listening());
-        let exec = executor(mock, open_gate());
-        let prestate = exec.capture_prestate(false, true).unwrap();
-        let plan = capture_restore_plan(&prestate);
-        // Plan expects selector absent=true; supply false independent readback.
-        let receipt = exec.restore(&plan, false);
-        assert_eq!(receipt.stage, ScmTransactionStage::RestoreFailed);
-        assert!(!receipt.restore_pass);
-    }
-
-    #[test]
-    fn restore_pass_requires_full_independent_readback() {
-        let mock = MockScmBackend::new();
-        mock.insert(fixture_listening());
-        let exec = executor(mock, open_gate());
-        let prestate = exec.capture_prestate(false, true).unwrap();
-        let plan = capture_restore_plan(&prestate);
-        let receipt = exec.restore(&plan, true);
-        assert!(receipt.restore_pass);
-        assert_eq!(receipt.stage, ScmTransactionStage::Completed);
-    }
-
-    #[test]
     fn restore_rejects_plan_for_different_service_binding() {
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
-        let exec = executor(mock, open_gate());
+        let exec = executor(mock, open_synthetic_gate());
         let mut prestate = exec.capture_prestate(false, true).unwrap();
         prestate.service_name = "fixture.scm.other".to_owned();
         let plan = capture_restore_plan(&prestate);
-        let receipt = exec.restore(&plan, true);
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt = exec.restore(&plan, &mut admission);
         assert!(!receipt.restore_pass);
         assert_eq!(receipt.stage, ScmTransactionStage::RestoreFailed);
     }
@@ -1284,7 +1648,7 @@ mod tests {
         record.worker_busy = true;
         record.observation.state = DiscoveredLifecycle::Busy;
         mock.insert(record);
-        let exec = executor(mock.clone(), open_gate());
+        let exec = executor(mock.clone(), open_synthetic_gate());
         let prestate = exec.capture_prestate(true, true).unwrap();
         let receipt = exec.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -1298,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_backend_mutations_are_inert() {
+    fn windows_backend_mutations_are_inert_without_arm() {
         let backend = WindowsScmBackend::mutation_inert();
         assert!(matches!(
             backend.start("fixture.scm.a"),
@@ -1311,6 +1675,51 @@ mod tests {
         assert!(matches!(
             backend.change_start_mode("fixture.scm.a", ServiceStartMode::Manual),
             Err(ScmApiError::GateClosed)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readonly_query_eventlog_returns_identity() {
+        let backend = WindowsScmBackend::mutation_inert();
+        let snap = backend
+            .query_exact("EventLog")
+            .expect("EventLog should be queryable read-only");
+        assert!(snap
+            .observation
+            .service_name
+            .eq_ignore_ascii_case("EventLog"));
+        assert!(snap.observation.image_path_matches);
+        assert!(snap.observation.ownership_verified);
+        assert!(!snap.image_token.is_empty());
+        assert!(!snap.execution_identity_token.is_empty());
+        assert!(!matches!(
+            snap.observation.state,
+            DiscoveredLifecycle::Unknown
+        ));
+        assert!(!matches!(
+            snap.observation.start_mode,
+            ServiceStartMode::Unknown
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readonly_query_missing_service_is_not_found() {
+        let backend = WindowsScmBackend::mutation_inert();
+        assert!(matches!(
+            backend.query_exact("runnermesh.fixture.missing.service.zz"),
+            Err(ScmApiError::NotFound)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readonly_query_rejects_wildcard_name() {
+        let backend = WindowsScmBackend::mutation_inert();
+        assert!(matches!(
+            backend.query_exact("Event*"),
+            Err(ScmApiError::NameDrift)
         ));
     }
 }

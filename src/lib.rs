@@ -221,10 +221,11 @@ pub use windows_runner_discovery::{
     ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
-    opaque_image_token, GatedWindowsScmBackend, LiveScmExecutionGate, MockScmBackend,
-    MockServiceRecord, OwnerScmAuthorizationProof, ScmApiError, ScmControlBackend,
-    ScmControlExecutor, ScmExactSnapshot, ScmTransactionReceipt, ScmTransactionStage,
-    WindowsScmBackend,
+    opaque_image_token, AdmissionSelectorObserver, FakeGithubAdmissionBackend,
+    GatedWindowsScmBackend, LiveScmExecutionGate, MockScmBackend, MockServiceRecord, ScmApiError,
+    ScmControlBackend, ScmControlExecutor, ScmExactSnapshot, ScmTransactionReceipt,
+    ScmTransactionStage, SyntheticScmTestGrant, TrustedOwnerAuthorizationRequest,
+    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
