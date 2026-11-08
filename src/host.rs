@@ -462,6 +462,25 @@ mod tests {
     }
 
     #[test]
+    fn restart_refuses_foreign_worker_without_destructive_adoption() {
+        let mut foreign = runner(RunnerPhase::Busy);
+        foreign.worker = ProcessOwnership::Foreign;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: foreign,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::ForeignProcessObserved)
+        );
+        assert_eq!(recovered.directive, RecoveryDirective::Reobserve);
+    }
+
+    #[test]
     fn resume_refuses_ambiguous_home_and_interruption_only_directs_reconnect() {
         let source = QueueRecoverySource::new(vec![
             RecoveryObservation {
