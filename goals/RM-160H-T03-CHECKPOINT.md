@@ -10,9 +10,9 @@ BRANCH=feat/160h-gt01-field-baseline
 IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
-CODE_ANCHOR=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec
-LAST_PASS_ALL=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec
-REMOTE_TIP=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec
+CODE_ANCHOR=077344bea22c9a373f390a80cf3131b682d7f45a
+LAST_PASS_ALL=e2c889617ad3000b0946059d643a6d45903b4172
+REMOTE_TIP=e2c889617ad3000b0946059d643a6d45903b4172
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
@@ -51,15 +51,32 @@ INDEPENDENT_SECURITY_REVIEW=PENDING
    - Proved that if `change_start_mode` succeeds but subsequent readback fails, `restore()` returns `stage=RestoreFailed`, `restore_pass=false`, and `achieved=Unknown`.
 4. **Validation**:
    - Local: all 311 tests pass (295 lib, 3 package, 13 admission model).
-   - Hosted CI: Run `42497980765` on `2f42098` PASS_ALL.
+   - Hosted CI: Run `42497980765` on `2f42098` PASS_ALL; Run `42498262451` on `e2c8896` PASS_ALL.
+
+## Completed in GT-03 leaf 2
+
+1. **P03-05/06 SCM synthetic failure matrix hardening** (`src/hux2_synthetic.rs`):
+   - Added `interrupted-stop-readback-fail`: stop accepted, query fails → `Interrupted`, `restore_pass=false`, `achieved=Unknown`.
+   - Added `interrupted-start-readback-fail`: start accepted, query fails → `Interrupted`, `restore_pass=false`, `achieved=Unknown`.
+   - Added `restore-start-mode-readback-interrupted`: mode change accepted, query fails → `RestoreFailed`, `restore_pass=false`, `achieved=Unknown`.
+   - Added `concurrent-agent-state-drift`: concurrent worker start during observe → `WaitIdle`, `stop_calls=0`.
+2. **P04-06 Admission barrier & state separation** (`src/runner_reconcile.rs`):
+   - Proved selector removal alone is not a job assignment barrier (`worker_present = true` keeps achieved at `Transitional`, plan `HoldBusy`).
+   - Achieved `Drained` reached only when worker is absent; `Drained` does not require Listener stopped under Work mode (ADR 0004).
+   - Zen/Offline policy strictly requires Listener `Stopped` before achieved `Offline` is asserted.
+3. **P05-03/06 Service vs Session multi-backend reconcile & no auto-re-enable** (`src/runner_reconcile.rs`):
+   - Proved mixed `WindowsService` and `UserSession` multi-runner reconciliation.
+   - Proved disabled runner is never auto-re-enabled across multiple reconcile ticks and worker is never killed destructively.
+4. **Validation**:
+   - Local: all 313 tests pass (297 lib, 3 package, 13 admission model).
 
 ## Next safe goal
 
 ```text
-NEXT_SAFE_GOAL=GT-03 leaf 2: P04/P05 multi-runner admission & policy fail-closed matrices OR await Owner gates
-BUDGET_USED_GT03≈estimate_1.5h
-BUDGET_REMAINING_GT03≈estimate_22.5h
+NEXT_SAFE_GOAL=GT-03-LEAF-03: P04 ADR 0006 unapproved preservation / FakeGithub matrix / packaging sandbox OR await Owner gates
+BUDGET_USED_GT03≈estimate_2.5h
+BUDGET_REMAINING_GT03≈estimate_21.5h
 WAITING_FOR_OWNER=true
 STOP_BEFORE=H2 cutover; HUX-2; real SCM; labels; H3 publish
-RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=2f42098b86af9e1956ac8c50c1dcbebe3a88d7ec; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=e2c889617ad3000b0946059d643a6d45903b4172; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
 ```
