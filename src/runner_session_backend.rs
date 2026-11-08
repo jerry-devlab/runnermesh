@@ -15,6 +15,9 @@ pub struct SessionObservation {
     pub work_root_owned: bool,
     pub listener_present: bool,
     pub worker_present: bool,
+    /// True when a recorded Listener PID no longer resolves to an owned process.
+    /// Stale PID evidence must never be adopted as a live Listener.
+    pub listener_pid_stale: bool,
     pub lifecycle: DiscoveredLifecycle,
 }
 
@@ -36,6 +39,7 @@ pub enum SessionBackendRefusal {
     BusyWorker,
     StateUnknown,
     NoListenerToAdopt,
+    StaleListenerPid,
 }
 
 impl SessionBackendRefusal {
@@ -49,6 +53,7 @@ impl SessionBackendRefusal {
             Self::BusyWorker => "session.busy-worker",
             Self::StateUnknown => "session.state-unknown",
             Self::NoListenerToAdopt => "session.no-listener-to-adopt",
+            Self::StaleListenerPid => "session.stale-listener-pid",
         }
     }
 }
@@ -151,6 +156,9 @@ fn common_refusal(
     if !observed.work_root_owned {
         return Some(SessionBackendRefusal::WorkRootNotOwned);
     }
+    if observed.listener_pid_stale {
+        return Some(SessionBackendRefusal::StaleListenerPid);
+    }
     None
 }
 
@@ -198,6 +206,7 @@ mod tests {
                 DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
             ),
             worker_present: lifecycle == DiscoveredLifecycle::Busy,
+            listener_pid_stale: false,
             lifecycle,
         }
     }
@@ -281,6 +290,30 @@ mod tests {
         assert!(matches!(
             backend.prepare_launch(&record, &no_entry),
             SessionPrepareOutcome::Refused(SessionBackendRefusal::EntrypointMissing)
+        ));
+    }
+
+    #[test]
+    fn stale_listener_pid_refuses_adopt_and_stop_without_launch_claim() {
+        let backend = SyntheticUserSessionBackend;
+        let record = record();
+        let mut stale = observation(DiscoveredLifecycle::Listening);
+        stale.listener_pid_stale = true;
+        assert!(matches!(
+            backend.prepare_adopt(&record, &stale),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::StaleListenerPid)
+        ));
+        assert!(matches!(
+            backend.prepare_graceful_stop(&record, &stale),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::StaleListenerPid)
+        ));
+        // Launch against a Stopped observation with a stale recorded PID still
+        // refuses — never treat a dead PID as ownership for a new plan.
+        let mut stale_stopped = observation(DiscoveredLifecycle::Stopped);
+        stale_stopped.listener_pid_stale = true;
+        assert!(matches!(
+            backend.prepare_launch(&record, &stale_stopped),
+            SessionPrepareOutcome::Refused(SessionBackendRefusal::StaleListenerPid)
         ));
     }
 }
