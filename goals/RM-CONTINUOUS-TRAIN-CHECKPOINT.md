@@ -24,10 +24,9 @@ INDEPENDENT_REVIEW=INDEPENDENT_REVIEW_PENDING_FOR_H2
 PR_STACK=main<-#51<-#52<-#53<-#54<-#55<-#56<-#57<-#58<-#59<-#61
 LRM09_PR=59 HEAD=ed68ba7 CI=PASS DRAFT
 LRM_RUNTIME_BRANCH=feat/lrm-runtime-integration
-LRM_RUNTIME_BASE=ed68ba7 (#59 DRAINED ADR0004 alignment)
 LRM_RUNTIME_PR=61 DRAFT
-LRM_RUNTIME_HEAD=pending_scoped_sim_push
-LRM_RUNTIME_CI=PASS_ON_4a68d70 run=42455171720; follow-up commits awaiting re-CI
+LRM_RUNTIME_HEAD=1b8f045e41851faf1e7103f04e5580cc5b79c641
+LRM_RUNTIME_CI=PASS run=42455849879
 LRM_REMAINING=keep Draft off frozen v0.1; live Service Control NOT_QUALIFIED; no force-merge onto main
 
 # Master train
@@ -36,9 +35,10 @@ T0=PASS
 T1=PASS
 T2=PASS
 T3=PASS
-T4=PASS local+hosted CI on #61
-POST_T4=scoped_admission_sim dry-run (unapproved migration shape)
+T4=PASS
+POST_T4=scoped_admission_sim + resource_policy_probe (read-only)
 DISPOSITION=PASS_SOURCE_CANDIDATE
+TRAIN_COMPLETE=true
 
 # v0.1 lane
 G15R=PASS
@@ -51,9 +51,9 @@ H2_CUTOVER=WAITING_FOR_OWNER
 H2_PLAN=goals/RM-V0_1-H2-OWNER-CUTOVER-PLAN.md
 PR60=MERGED_TO_MAIN ca1dd96 (ledger+H2 plan only; not H2 authorization)
 
-NEXT_SAFE_GOAL=Owner_H2_review_OR_scoped_selector_sim_on_LRM_lane_OR_v0_2B_readonly_resource_probe
+NEXT_SAFE_GOAL=Owner_H2_review_with_independent_security_acceptance
 STOP_BEFORE=production install; Service mutation; runner registration/label/credential changes; H2 execution; v0.1.0 publish; live LRM mutation
-RECOVERY=isolated worktree branch feat/lrm-runtime-integration; PR=#61
+RECOVERY=isolated worktree branch feat/lrm-runtime-integration; PR=#61 HEAD=1b8f045
 ```
 
 Update this file only when decision-relevant train state changes; prefer binding
