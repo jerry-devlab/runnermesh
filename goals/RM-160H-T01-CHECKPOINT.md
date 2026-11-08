@@ -38,11 +38,13 @@ Local copies matched main hash; not re-committed on this tip.
 ## Remaining / next
 
 ```text
-COMPLETED_GOALS=P00-partial(PENDING ZenBookDuo); P02-path-boundary+config-align
-NEXT_SAFE_GOAL=P02 continue owned Session backend source + enrollment fail-closed matrix; then GT-02 P01 Owner-prep docs (no H2 mutation)
-BUDGET_USED≈estimate_1.5h
-BUDGET_LEFT≈14.5h_of_GT01
-CI_STATUS=pending_push
+COMPLETED_GOALS=P00-partial(PENDING ZenBookDuo); P02-path-boundary+config-align+session-adopt; P01-preflight-doc
+CANDIDATE_PR=65
+# HEAD bound by hosted CI after push; avoid self-embedding this file's commit.
+NEXT_SAFE_GOAL=P02 enrollment/doctor clarity + GT-02 remaining Owner-prep; no live gates
+BUDGET_USED≈estimate_2.5h
+BUDGET_LEFT≈13.5h_of_GT01
+CI_STATUS=repair_pushed
 OWNER_GATES=HUX1_ZENBOOKDUO; H2; HUX2_LIVE; TRUSTED_SCM
 RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; do not touch feat/lrm-09 or overwrite productization tip worktree
 ```
