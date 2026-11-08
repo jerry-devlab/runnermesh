@@ -1881,6 +1881,23 @@ mod tests {
     }
 
     #[test]
+    fn fake_github_identity_or_name_drift_observe_fails_closed() {
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        admission.set_fail_next_observe(ScmApiError::IdentityMismatch);
+        assert!(matches!(
+            admission.observe_selector_absent(),
+            Err(ScmApiError::IdentityMismatch)
+        ));
+        admission.set_fail_next_observe(ScmApiError::NameDrift);
+        assert!(matches!(
+            admission.observe_selector_absent(),
+            Err(ScmApiError::NameDrift)
+        ));
+        // After drift errors clear, honest absence remains observable.
+        assert!(admission.observe_selector_absent().expect("absent"));
+    }
+
+    #[test]
     fn fake_github_racing_observe_error_during_lag_does_not_claim_absence() {
         let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
         admission.set_eventual_visibility_lag(1);
