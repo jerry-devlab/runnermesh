@@ -68,6 +68,45 @@ impl PrivacySafeDiscoverySummary {
     }
 }
 
+/// Privacy-safe one-command operator card for ZenBookDuo HUX-1 collection.
+/// Does not invent host counts; keeps disposition `PENDING` until that host runs
+/// `discover-readonly`. Safe to print in public receipts.
+pub fn hux1_zenbookduo_operator_card() -> String {
+    [
+        "# HUX-1 ZenBookDuo read-only operator card",
+        "",
+        "PRODUCTION_MUTATION=false",
+        "HUX1_ZENBOOKDUO=PENDING",
+        "HOST_LABEL=ZenBookDuo",
+        "",
+        "## One command (run only on ZenBookDuo)",
+        "",
+        "```text",
+        "runnermesh-hux-sandbox discover-readonly",
+        "```",
+        "",
+        "## Record only these fields",
+        "",
+        "- candidate_count",
+        "- observed_only_count",
+        "- refused_count",
+        "- identity_complete_count",
+        "- service_enumeration",
+        "- session_enumeration",
+        "- process_observation",
+        "- incomplete",
+        "",
+        "## Rules",
+        "",
+        "- Do not substitute a development-host empty result for ZenBookDuo.",
+        "- EMPTY_OK is valid when that host truly has zero candidates.",
+        "- Never paste Service names, runner homes, work roots, SIDs, or tokens.",
+        "- Do not register, install, start, stop, or label anything for this card.",
+        "",
+    ]
+    .join("\n")
+}
+
 #[cfg(windows)]
 const ACTIONS_RUNNER_PREFIX: &str = "actions.runner.";
 
@@ -790,6 +829,20 @@ mod tests {
         let summary = PrivacySafeDiscoverySummary::from_report(&report);
         assert_eq!(summary.candidate_count, 0);
         assert!(!summary.incomplete);
+    }
+
+    #[test]
+    fn hux1_operator_card_stays_pending_and_privacy_safe() {
+        let card = hux1_zenbookduo_operator_card();
+        assert!(card.contains("HUX1_ZENBOOKDUO=PENDING"));
+        assert!(card.contains("discover-readonly"));
+        assert!(card.contains("PRODUCTION_MUTATION=false"));
+        assert!(!card.contains("C:\\Users\\"));
+        assert!(!card.contains("/Users/"));
+        assert!(!card.contains("ghp_"));
+        // Must not invent a nonempty host disposition.
+        assert!(!card.contains("PASS_NONEMPTY"));
+        assert!(!card.contains("candidate_count=0"));
     }
 
     #[test]

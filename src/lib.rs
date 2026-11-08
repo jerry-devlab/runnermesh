@@ -218,7 +218,7 @@ pub use windows_github::{
     WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient,
 };
 pub use windows_runner_discovery::{
-    discover_local_runners_read_only, host_service_discovery_source,
+    discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
     ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
