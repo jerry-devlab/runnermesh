@@ -9,7 +9,7 @@ This file defines the workflow for the **sole Cursor Desktop Implementer**. It g
 - `TRAIN_BUDGETS=16,24,24,24,24,24,24h`; recover at each stop instead of claiming one uninterrupted session.
 - `SOURCE_AND_SANDBOX_ONLY`; `PRODUCTION_MUTATION=false`.
 - GitHub project: `jerry-devlab/runnermesh`. Planning main `ca1dd96e75a606b80d1978f83e973bd2586d36e4`; planning LRM Draft tip PR #63 `8cd996acfee23e5f2006e7801139c70d0d67551d`. **Always re-check exact refs before using.**
-- Existing HUX-0 human Tray verdict is Owner PASS. **Current recorded zero-runner HUX-1 is from laptop-zenbook14, not ZenBookDuo.**
+- Existing HUX-0 human Tray verdict is Owner PASS. **Current recorded zero-runner HUX-1 is from the non-target development Windows host, not ZenBookDuo.**
 - v0.1 H2 remains Owner-gated; previous H2 token is consumed; HUX-2 independent SCM security review and trusted auth unissued.
 - **Cursor is sole Implementer. Do not call AGY, Codex CLI, or a second coding Agent.**
 
@@ -27,7 +27,7 @@ This file defines the workflow for the **sole Cursor Desktop Implementer**. It g
 
 Begin GT-01 (16h active cap), then automatically continue GT-02…GT-07 within the legal scope if the environment/session remains available. A lost session is **not** background execution; next Cursor chat reads the checkpoint and resumes remaining leaves. Do not deliberately sleep to reach budget. Stop at 160h used, all eligible tasks completed, or actual hard blockers. All Owner-controlled mutations must be suspended until separate explicit authorization.
 
-If ZenBookDuo cannot be accessed, do not substitute ZenBook14 result; prepare a one-command read-only operator card and continue P02–P06 source. If independent review/Owner token is unavailable, finish remaining safe source and return gate-ready package.
+If ZenBookDuo cannot be accessed, do not substitute the development host result; prepare a one-command read-only operator card and continue P02–P06 source. If independent review/Owner token is unavailable, finish remaining safe source and return gate-ready package.
 
 ## Explicit hard stops
 
