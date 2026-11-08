@@ -22,6 +22,7 @@ mod qualification;
 mod runner_commands;
 mod runner_discovery;
 mod runner_observer;
+mod runner_reconcile;
 mod runner_registry;
 mod runner_service_backend;
 mod runner_session_backend;
@@ -127,6 +128,11 @@ pub use runner_discovery::{
 pub use runner_observer::{
     ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
     RunnerLocalEvidence, RunnerObservation, RunnerSource, WindowsRunnerSource,
+};
+pub use runner_reconcile::{
+    mark_same_scope_collisions, reconcile_multi_runners, GlobalPolicyInputs,
+    MultiRunnerReconcileReport, PerRunnerAchieved, PerRunnerDesired, PerRunnerObservation,
+    PerRunnerPlan, PerRunnerReconcileResult,
 };
 pub use runner_registry::{
     EnrollmentState, FileRegistryStore, MemoryRegistryStore, RegistryBackendBinding, RegistryError,
