@@ -539,7 +539,7 @@ mod tests {
     fn fixture_listening() -> MockServiceRecord {
         MockServiceRecord {
             observation: ServiceObservation {
-                service_name: "actions.runner.fixture.a".to_owned(),
+                service_name: "fixture.scm.a".to_owned(),
                 state: DiscoveredLifecycle::Listening,
                 start_mode: ServiceStartMode::Manual,
                 image_path_matches: true,
@@ -556,7 +556,7 @@ mod tests {
         mock.insert(fixture_listening());
         let executor = ScmControlExecutor::new(
             mock.clone(),
-            "actions.runner.fixture.a",
+            "fixture.scm.a",
             "fixture-image",
             true,
             LiveScmExecutionGate::CLOSED,
@@ -585,7 +585,7 @@ mod tests {
         };
         let executor = ScmControlExecutor::new(
             mock.clone(),
-            "actions.runner.fixture.a",
+            "fixture.scm.a",
             "fixture-image",
             true,
             gate,
@@ -617,7 +617,7 @@ mod tests {
         };
         let executor = ScmControlExecutor::new(
             mock.clone(),
-            "actions.runner.fixture.a",
+            "fixture.scm.a",
             "fixture-image",
             true,
             gate,
@@ -639,7 +639,7 @@ mod tests {
         let mock = MockScmBackend::new();
         let executor = ScmControlExecutor::new(
             mock,
-            "actions.runner.*",
+            "fixture.scm.*",
             "fixture-image",
             true,
             LiveScmExecutionGate::CLOSED,
@@ -657,7 +657,7 @@ mod tests {
         mock.set_fail_next(ScmApiError::AccessDenied);
         let executor = ScmControlExecutor::new(
             mock.clone(),
-            "actions.runner.fixture.a",
+            "fixture.scm.a",
             "fixture-image",
             true,
             LiveScmExecutionGate {
@@ -672,7 +672,7 @@ mod tests {
         ));
         mock.set_fail_next(ScmApiError::Timeout);
         let prestate = ServicePrestateCapture {
-            service_name: "actions.runner.fixture.a".to_owned(),
+            service_name: "fixture.scm.a".to_owned(),
             state: DiscoveredLifecycle::Listening,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,

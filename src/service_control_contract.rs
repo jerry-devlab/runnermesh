@@ -214,7 +214,7 @@ mod tests {
 
     fn observation(state: DiscoveredLifecycle, busy_safe: bool) -> ServiceObservation {
         ServiceObservation {
-            service_name: "actions.runner.fixture".to_owned(),
+            service_name: "fixture.scm.generic".to_owned(),
             state,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn restore_plan_always_requires_owner_gate() {
         let prestate = ServicePrestateCapture {
-            service_name: "actions.runner.fixture".to_owned(),
+            service_name: "fixture.scm.generic".to_owned(),
             state: DiscoveredLifecycle::Listening,
             start_mode: ServiceStartMode::Automatic,
             image_path_matches: true,

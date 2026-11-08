@@ -30,7 +30,7 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
     let mock = MockScmBackend::new();
     mock.insert(MockServiceRecord {
         observation: ServiceObservation {
-            service_name: "actions.runner.fixture.hux2".to_owned(),
+            service_name: "fixture.scm.hux2".to_owned(),
             state: DiscoveredLifecycle::Listening,
             start_mode: ServiceStartMode::Automatic,
             image_path_matches: true,
@@ -46,7 +46,7 @@ pub fn run_hux2_synthetic_happy_path() -> Hux2SyntheticReceipt {
     };
     let executor = ScmControlExecutor::new(
         mock.clone(),
-        "actions.runner.fixture.hux2",
+        "fixture.scm.hux2",
         "hux2-image",
         true,
         gate,
@@ -156,7 +156,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         let mock = MockScmBackend::new();
         mock.insert(MockServiceRecord {
             observation: ServiceObservation {
-                service_name: "actions.runner.fixture.hux2".to_owned(),
+                service_name: "fixture.scm.hux2".to_owned(),
                 state: DiscoveredLifecycle::Listening,
                 start_mode: ServiceStartMode::Manual,
                 image_path_matches: true,
@@ -168,7 +168,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         mock.set_fail_next(ScmApiError::AccessDenied);
         let executor = ScmControlExecutor::new(
             mock,
-            "actions.runner.fixture.hux2",
+            "fixture.scm.hux2",
             "hux2-image",
             true,
             LiveScmExecutionGate {
@@ -189,7 +189,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         let mock = MockScmBackend::new();
         mock.insert(MockServiceRecord {
             observation: ServiceObservation {
-                service_name: "actions.runner.fixture.hux2".to_owned(),
+                service_name: "fixture.scm.hux2".to_owned(),
                 state: DiscoveredLifecycle::Busy,
                 start_mode: ServiceStartMode::Manual,
                 image_path_matches: true,
@@ -200,7 +200,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         });
         let executor = ScmControlExecutor::new(
             mock.clone(),
-            "actions.runner.fixture.hux2",
+            "fixture.scm.hux2",
             "hux2-image",
             true,
             LiveScmExecutionGate {
@@ -231,7 +231,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         let mock = MockScmBackend::new();
         mock.insert(MockServiceRecord {
             observation: ServiceObservation {
-                service_name: "actions.runner.other".to_owned(),
+                service_name: "fixture.scm.other".to_owned(),
                 state: DiscoveredLifecycle::Listening,
                 start_mode: ServiceStartMode::Manual,
                 image_path_matches: true,
@@ -242,7 +242,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         });
         let executor = ScmControlExecutor::new(
             mock,
-            "actions.runner.fixture.hux2",
+            "fixture.scm.hux2",
             "hux2-image",
             true,
             LiveScmExecutionGate::CLOSED,
@@ -259,7 +259,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         let mock = MockScmBackend::new();
         mock.insert(MockServiceRecord {
             observation: ServiceObservation {
-                service_name: "actions.runner.fixture.hux2".to_owned(),
+                service_name: "fixture.scm.hux2".to_owned(),
                 state: DiscoveredLifecycle::Listening,
                 start_mode: ServiceStartMode::Manual,
                 image_path_matches: true,
@@ -270,7 +270,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         });
         let executor = ScmControlExecutor::new(
             mock.clone(),
-            "actions.runner.fixture.hux2",
+            "fixture.scm.hux2",
             "hux2-image",
             true,
             LiveScmExecutionGate::CLOSED,

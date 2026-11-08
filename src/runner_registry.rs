@@ -725,7 +725,7 @@ mod tests {
     fn migrate_v01_binding_round_trips_without_credential_material() {
         let mut editor = RunnerRegistryEditor::empty();
         let record = editor
-            .migrate_v01_binding(&v01_binding(), Some("actions.runner.fixture"))
+            .migrate_v01_binding(&v01_binding(), Some("fixture.scm.generic"))
             .unwrap()
             .clone();
         assert_eq!(record.enrollment_state, EnrollmentState::Enrolled);
