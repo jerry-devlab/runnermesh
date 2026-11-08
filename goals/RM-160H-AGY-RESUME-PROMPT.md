@@ -6,7 +6,7 @@ Copy everything below the line into AGY CLI.
 
 继续 RunnerMesh 160H Goal Train。你是唯一 AGY Implementer。
 
-GT-03 leaf 2 已完成：代码锚 `077344b…`。**立即进入 GT-03-LEAF-03**，不要空等 Owner。
+GT-03 leaf 2 已完成：代码锚 `54fa9cc…`。**立即进入 GT-03-LEAF-03**，不要空等 Owner。
 
 ```text
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
@@ -15,8 +15,8 @@ LEAF=GT-03-LEAF-03
 ROOT_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=65
-REMOTE_TIP=077344bea22c9a373f390a80cf3131b682d7f45a
-CODE_ANCHOR=077344bea22c9a373f390a80cf3131b682d7f45a
+REMOTE_TIP=54fa9cc6d618dea830701f2f0d720035f692f59f
+CODE_ANCHOR=54fa9cc6d618dea830701f2f0d720035f692f59f
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
