@@ -564,6 +564,114 @@ mod tests {
     }
 
     #[test]
+    fn runners_json_renders_faithful_machine_contract_and_respects_prepare_flags() {
+        use crate::{
+            DiscoveredCandidateView, EnrollmentState, RunnerCommandReport,
+            RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let sample_report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: false,
+            prepare_only: true,
+            applied: false,
+            reason_code: Some(ReasonCode::new("runners-dry-run-prepared").unwrap()),
+            records: vec![RunnerRecordView {
+                local_runner_key: "runner-test".to_owned(),
+                runner_id: 101,
+                expected_runner_name: "test-runner".to_owned(),
+                desired_enabled: true,
+                enrollment_state: EnrollmentState::Enrolled,
+                managed_admission: true,
+                backend_kind: "user-session".to_owned(),
+                presentation_status: RunnerPresentationStatus::Enabled,
+                memory_samples: Vec::new(),
+                item_applied: Some(true),
+                item_reason_code: None,
+            }],
+            discovered_keys: vec!["disc-1".to_owned()],
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: false,
+            discovered_candidates: vec![DiscoveredCandidateView {
+                local_discovery_key: "disc-1".to_owned(),
+                backend_kind: "user-session".to_owned(),
+                disposition: "OBSERVED_ONLY".to_owned(),
+                refusal_reason: None,
+                enrollment_eligible: true,
+                same_scope_collision: false,
+            }],
+        };
+
+        // Test runners status --json
+        let transport = FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        let output = execute_cli(
+            &arguments(["runners", "status", "--json"]),
+            &transport,
+            "0.1.0",
+        )
+        .unwrap();
+        let deserialized: RunnerCommandReport = serde_json::from_str(&output).unwrap();
+        assert_eq!(deserialized, sample_report);
+        assert_eq!(
+            transport.requests(),
+            vec![AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            }]
+        );
+
+        // Test runners list --json
+        let transport_list =
+            FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        let output_list = execute_cli(
+            &arguments(["runners", "list", "--json"]),
+            &transport_list,
+            "0.1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<RunnerCommandReport>(&output_list).unwrap(),
+            sample_report
+        );
+        assert_eq!(transport_list.requests(), vec![AgentCommand::RunnersList]);
+
+        // Test runners enroll with --prepare
+        let transport_enroll =
+            FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        execute_cli(
+            &arguments(["runners", "enroll", "runner-test", "--prepare"]),
+            &transport_enroll,
+            "0.1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            transport_enroll.requests(),
+            vec![AgentCommand::RunnersEnroll {
+                local_runner_key: "runner-test".to_owned(),
+                prepare_only: true,
+            }]
+        );
+
+        // Test runners disable with --when-idle
+        let transport_disable =
+            FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        execute_cli(
+            &arguments(["runners", "disable", "runner-test", "--when-idle"]),
+            &transport_disable,
+            "0.1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            transport_disable.requests(),
+            vec![AgentCommand::RunnersDisable {
+                local_runner_key: "runner-test".to_owned(),
+                when_idle: true,
+                prepare_only: false,
+            }]
+        );
+    }
+
+    #[test]
     fn controls_use_agent_commands_and_do_not_claim_runner_control() {
         let mode_transport = FakeTransport::with_response(AgentResponse::Accepted {
             snapshot: snapshot(),

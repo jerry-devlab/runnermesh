@@ -734,9 +734,10 @@ mod tests {
 
     use super::{PackageError, RUNTIME_NAMES, WINDOWS_X64_TARGET};
     use crate::{
-        payload_sha256, HealthObservation, Installation, PackageDoctor, PackageInput,
-        PackageProvenance, PackageVerifier, ProductizationCheckStatus, SafePointObservation,
-        SandboxAutostartBackend, UpdateCoordinator, UpdateOutcome, UpdateRequest,
+        payload_sha256, AutostartEntry, HealthObservation, Installation, PackageDoctor,
+        PackageInput, PackageProvenance, PackageVerifier, ProductizationCheckStatus,
+        SafePointObservation, SandboxAutostartBackend, UpdateCoordinator, UpdateOutcome,
+        UpdateRequest,
     };
 
     fn root(name: &str) -> PathBuf {
@@ -1012,6 +1013,99 @@ mod tests {
             PackageVerifier::verify(&path),
             Err(PackageError::UnexpectedArchiveContents)
         );
+    }
+
+    #[test]
+    fn package_doctor_reports_fail_on_autostart_drift_and_tampered_active_version() {
+        let root = root("doctor-fail");
+        let pkg =
+            PackageVerifier::create(&candidate(&root, "0.1.0", "one"), &root.join("archives"))
+                .unwrap();
+        let payload = root.join("payload");
+        PackageVerifier::extract_runtime(&pkg.archive, &payload).unwrap();
+        let installation = Installation::new(root.join("installed"));
+        installation.install("0.1.0", &payload).unwrap();
+        let autostart = SandboxAutostartBackend::new(root.join("autostart.json"));
+        installation.enable_autostart(&autostart).unwrap();
+        let updates = UpdateCoordinator::new(installation.clone());
+
+        // Baseline: core installation, package, and autostart checks pass
+        let baseline = PackageDoctor::inspect(&pkg.archive, &installation, &updates, &autostart);
+        for id in [
+            "package-validity",
+            "installed-state-validity",
+            "active-version-validity",
+            "autostart-ownership",
+        ] {
+            let check = baseline.checks.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(check.status, ProductizationCheckStatus::Pass);
+        }
+
+        // 1. Simulate third-party autostart drift: write foreign command entry
+        let foreign_entry = AutostartEntry {
+            owner: "foreign-process".to_owned(),
+            command: "/third_party/foreign_agent.exe".to_owned(),
+        };
+        let mut entries = BTreeMap::new();
+        entries.insert("RunnerMesh".to_owned(), foreign_entry);
+        fs::write(autostart.path(), serde_json::to_vec(&entries).unwrap()).unwrap();
+
+        let drift_report =
+            PackageDoctor::inspect(&pkg.archive, &installation, &updates, &autostart);
+        let autostart_check = drift_report
+            .checks
+            .iter()
+            .find(|c| c.id == "autostart-ownership")
+            .unwrap();
+        assert_eq!(autostart_check.status, ProductizationCheckStatus::Fail);
+
+        // Re-enabling autostart over foreign drift is strictly refused
+        assert!(matches!(
+            installation.enable_autostart(&autostart),
+            Err(crate::InstallError::AutostartDrift)
+        ));
+
+        // Restore autostart to clean expected entry
+        let mut clean_entries = BTreeMap::new();
+        clean_entries.insert(
+            "RunnerMesh".to_owned(),
+            installation.expected_autostart_entry(),
+        );
+        fs::write(
+            autostart.path(),
+            serde_json::to_vec(&clean_entries).unwrap(),
+        )
+        .unwrap();
+
+        // 2. Simulate tampered/missing active agent binary
+        let agent_path = installation.active_agent_path().unwrap();
+        fs::remove_file(&agent_path).unwrap();
+        let binary_report =
+            PackageDoctor::inspect(&pkg.archive, &installation, &updates, &autostart);
+        let installed_check = binary_report
+            .checks
+            .iter()
+            .find(|c| c.id == "installed-state-validity")
+            .unwrap();
+        assert_eq!(installed_check.status, ProductizationCheckStatus::Fail);
+        let active_check = binary_report
+            .checks
+            .iter()
+            .find(|c| c.id == "active-version-validity")
+            .unwrap();
+        assert_eq!(active_check.status, ProductizationCheckStatus::Unknown);
+
+        // 3. Corrupt package archive
+        let corrupt_archive = root.join("corrupt.zip");
+        fs::write(&corrupt_archive, b"corrupted bytes").unwrap();
+        let corrupt_report =
+            PackageDoctor::inspect(&corrupt_archive, &installation, &updates, &autostart);
+        let pkg_check = corrupt_report
+            .checks
+            .iter()
+            .find(|c| c.id == "package-validity")
+            .unwrap();
+        assert_eq!(pkg_check.status, ProductizationCheckStatus::Fail);
     }
 
     fn write_duplicate_stored_zip(path: &Path, name: &str, bytes: &[u8]) {

@@ -1313,6 +1313,116 @@ mod tests {
     }
 
     #[test]
+    fn tray_multi_runner_entries_preserve_stable_ids_and_distinguish_service_and_session() {
+        use crate::{
+            EnrollmentState, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: true,
+            prepare_only: false,
+            applied: false,
+            reason_code: None,
+            records: vec![
+                RunnerRecordView {
+                    local_runner_key: "svc-runner".to_owned(),
+                    runner_id: 10,
+                    expected_runner_name: "fixture-svc".to_owned(),
+                    desired_enabled: false,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: true,
+                    backend_kind: "windows-service".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Disabled,
+                    memory_samples: Vec::new(),
+                    item_applied: None,
+                    item_reason_code: None,
+                },
+                RunnerRecordView {
+                    local_runner_key: "sess-runner".to_owned(),
+                    runner_id: 20,
+                    expected_runner_name: "fixture-sess".to_owned(),
+                    desired_enabled: true,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: false,
+                    backend_kind: "user-session".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Enabled,
+                    memory_samples: Vec::new(),
+                    item_applied: None,
+                    item_reason_code: None,
+                },
+            ],
+            discovered_keys: Vec::new(),
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: false,
+            discovered_candidates: Vec::new(),
+        };
+
+        let english_snapshot = sample_snapshot();
+        let mut chinese_snapshot = sample_snapshot();
+        chinese_snapshot.effective_ui_preferences.locale = EffectiveLocale::ZhCn;
+        chinese_snapshot.ui_preferences.language = LanguagePreference::ZhCn;
+
+        let english = render(&english_snapshot, Some(&report));
+        let chinese = render(&chinese_snapshot, Some(&report));
+
+        assert_eq!(collect_ids(&english.entries), collect_ids(&chinese.entries));
+        assert!(
+            collect_ids(&english.entries).contains(&"control.runners.toggle.svc-runner".to_owned())
+        );
+        assert!(collect_ids(&english.entries)
+            .contains(&"control.runners.toggle.sess-runner".to_owned()));
+
+        let transport = FakeTransport::new(AgentResponse::Runners(report.clone()));
+        let mut tray = NativeTrayEventLoop::new(transport.clone());
+        tray.apply(TrayUiUpdate::Snapshot(english_snapshot.clone()))
+            .unwrap();
+
+        // 1. Initial refresh populates tray's cached runners report
+        let refresh = tray
+            .activate(&TrayMenuId::RunnersRefresh, &english_snapshot)
+            .unwrap();
+        assert!(matches!(refresh, TrayActionResult::Runners(_)));
+
+        // 2. Activating disabled svc-runner issues RunnersEnable
+        let action_enable = tray
+            .activate(
+                &TrayMenuId::RunnerToggle("svc-runner".to_owned()),
+                &english_snapshot,
+            )
+            .unwrap();
+        assert!(matches!(action_enable, TrayActionResult::Runners(_)));
+
+        // 3. Activating enabled sess-runner issues RunnersDisable { when_idle: true }
+        let action_disable = tray
+            .activate(
+                &TrayMenuId::RunnerToggle("sess-runner".to_owned()),
+                &english_snapshot,
+            )
+            .unwrap();
+        assert!(matches!(action_disable, TrayActionResult::Runners(_)));
+
+        assert_eq!(
+            transport.commands(),
+            vec![
+                AgentCommand::RunnersStatus {
+                    local_runner_key: None,
+                },
+                AgentCommand::RunnersEnable {
+                    local_runner_key: "svc-runner".to_owned(),
+                    prepare_only: false,
+                },
+                AgentCommand::RunnersDisable {
+                    local_runner_key: "sess-runner".to_owned(),
+                    when_idle: true,
+                    prepare_only: false,
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn runners_partial_failure_banner_and_item_failed_are_localized() {
         use crate::{
             EnrollmentState, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
