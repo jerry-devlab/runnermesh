@@ -3,26 +3,48 @@
 ```text
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 PHASE=RM-160H-PHASE-R-OWNER-CLOSEOUT
-TRAIN=R0-PACKET-POLISH
+TRAIN=R1-ZENBOOKDUO-READONLY
 R0=PASS
+R1_LOCAL_DEV_HOST=EMPTY_OK
+R1_ZENBOOKDUO=PENDING_NOT_RUN
 SOURCE_AND_SANDBOX_CLOSEOUT=PASS
 LIVE_DELIVERY=WAITING_FOR_OWNER
 WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=65
 CODE_ANCHOR=b221eaf57be5a0a3952ba0e30d1e3895e34749f9
-REMOTE_TIP=68eccdd6f57823c9142e7ca63ac30b217c58e50e
+REMOTE_TIP=6e6990b6b0c500a3c5b9dd10f0b5c8ee324e1236
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-HOSTED_CI_RUN=42612738829 (PASS_ALL 6/6 jobs)
+HOSTED_CI_RUN=42646514218 (PASS_ALL 6/6 jobs)
 PRODUCTION_MUTATION=false
 IMPLEMENTER=AGY
+```
+
+## R1 Observation Evidence
+
+```text
+HOST_IDENTIFIED=ZenbookS14 (ASUS Zenbook S 14 UX5406SA_UX5406SA)
+HOST_CLASS=DEVELOPMENT_HOST (not physical ZenBookDuo dual-screen UX8406)
+OBSERVATION_COMMAND=runnermesh-hux-sandbox discover-readonly
+candidate_count=0
+observed_only_count=0
+refused_count=0
+identity_complete_count=0
+service_enumeration=Ok
+session_enumeration=Ok
+process_observation=Ok
+incomplete=false
+LOCAL_HOST_DISPOSITION=EMPTY_OK
+ZENBOOKDUO_DISPOSITION=PENDING_NOT_RUN
+GOVERNANCE_RULE=Dev host empty result never substitutes for physical ZenBookDuo
 ```
 
 ## Standing Owner gate board
 
 ```text
 HUX0_HUMAN_TRAY_VISUAL=PASS_OWNER_ACCEPTED
-HUX1_ZENBOOKDUO=PENDING
+HUX1_LOCAL_DEV_HOST=EMPTY_OK
+HUX1_ZENBOOKDUO=PENDING_NOT_RUN
 H2=WAITING_FOR_OWNER
 HUX2_LIVE=WAITING_FOR_OWNER
 HUX3_LIVE=WAITING_FOR_OWNER
@@ -37,7 +59,8 @@ PR65_MERGED=false
 ```text
 NEXT_ACTION=WAITING_FOR_OWNER
 WAITING_FOR_OWNER=true
-AVAILABLE_OWNER_GATES=R1 (ZenBookDuo read-only) | R2 (Independent Security Review) | R3 (H2 v0.1 G15R) | R4 (HUX-2 live) | R5 (G-ADR006) | R6 (HUX-3 live) | R7 (PR #65 merge) | R8 (Publish)
+RECOMMENDED_NEXT=R2
+AVAILABLE_OWNER_GATES=R2 (Independent Security Review) | R3 (H2 v0.1 G15R; needs R2) | R4 (HUX-2 live; needs R2) | R5 (G-ADR006) | R6 (HUX-3 live) | R7 (PR #65 merge) | R8 (Publish)
 STOP_BEFORE=any live mutation without exact Owner gate text
 RECOVERY_INSTRUCTION=read goals/RM-160H-REMAINING-ROADMAP.md + RM-160H-REMAINING-CHECKLIST.md + RM-160H-AGY-RESUME-PROMPT.md; keep branch feat/160h-gt01-field-baseline; never touch feat/lrm-09 or overwrite productization worktree
 ```

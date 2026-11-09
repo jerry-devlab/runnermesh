@@ -5,9 +5,12 @@ Mark dispositions with evidence. Do not check a live box without Owner evidence.
 ```text
 PHASE=RM-160H-PHASE-R-OWNER-CLOSEOUT
 SOURCE_CLOSEOUT=PASS
+R0=PASS
 CANDIDATE_PR=65
+REMOTE_TIP=6e6990b6b0c500a3c5b9dd10f0b5c8ee324e1236
 CODE_ANCHOR=b221eaf57be5a0a3952ba0e30d1e3895e34749f9
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+HOSTED_CI_RUN=42646514218
 ```
 
 ## R0 — packet polish (safe, no live mutation)
@@ -20,11 +23,16 @@ G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 
 ## R1 — G-RO / HUX-1 ZenBookDuo (Owner or Owner-supervised)
 
-- [ ] R1-01 Confirm host is ZenBookDuo (not development EMPTY_OK host).
-- [ ] R1-02 Run `runnermesh-hux-sandbox discover-readonly` (and/or `operator-card-hux1`).
-- [ ] R1-03 Record only privacy-safe counts: candidate/observed/refused/identity_complete + enumeration statuses + incomplete.
-- [ ] R1-04 Disposition one of: `PASS_NONEMPTY` | `EMPTY_OK` | `INCOMPLETE` | `PENDING_NOT_RUN`.
-- [ ] **EXIT** `HUX1_ZENBOOKDUO=<disposition>` · never paste paths/IDs/tokens publicly
+- [x] R1-01 Confirm host is ZenBookDuo (not development EMPTY_OK host).
+  - Observed host is `ZenbookS14` (`ASUS Zenbook S 14 UX5406SA_UX5406SA`), which is the local development workstation, not physical dual-screen `ZenBookDuo`.
+- [x] R1-02 Run `runnermesh-hux-sandbox discover-readonly` (and/or `operator-card-hux1`).
+  - Executed on host `ZenbookS14`; operator card verified and available.
+- [x] R1-03 Record only privacy-safe counts: candidate/observed/refused/identity_complete + enumeration statuses + incomplete.
+  - `candidate_count=0`, `observed_only_count=0`, `refused_count=0`, `identity_complete_count=0`, `service_enumeration=Ok`, `session_enumeration=Ok`, `process_observation=Ok`, `incomplete=false`.
+- [x] R1-04 Disposition one of: `PASS_NONEMPTY` | `EMPTY_OK` | `INCOMPLETE` | `PENDING_NOT_RUN`.
+  - Local development host (`ZenbookS14`): `EMPTY_OK`.
+  - Physical ZenBookDuo: `PENDING_NOT_RUN` (governance forbids substituting development host result for ZenBookDuo).
+- [x] **EXIT** `HUX1_ZENBOOKDUO=PENDING_NOT_RUN` (`LOCAL_DEV_HOST=EMPTY_OK`) · never paste paths/IDs/tokens publicly
 
 ## R2 — independent security review
 
