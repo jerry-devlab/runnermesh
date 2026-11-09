@@ -388,7 +388,12 @@ impl PackageDoctor {
         let autostart_status = match (&state, autostart.read()) {
             (Err(_), _) => ProductizationCheckStatus::Unknown,
             (Ok(_), Ok(None)) => ProductizationCheckStatus::NotConfigured,
-            (Ok(_), Ok(Some(entry))) if entry == installation.expected_autostart_entry() => {
+            (Ok(_), Ok(Some(entry)))
+                if entry == installation.expected_autostart_entry()
+                    && !crate::installation::is_development_or_worktree_path(
+                        &installation.stable_agent_entry(),
+                    ) =>
+            {
                 ProductizationCheckStatus::Pass
             }
             (Ok(_), Ok(Some(_))) | (Ok(_), Err(_)) => ProductizationCheckStatus::Fail,
@@ -1180,5 +1185,46 @@ mod tests {
             }
         }
         !value
+    }
+
+    #[test]
+    fn package_doctor_fails_autostart_when_pointing_to_development_binary() {
+        let root = root("dev-binary-autostart");
+        let pkg = PackageVerifier::create(
+            &candidate(&root, "0.1.0", "one"),
+            &root.join("archives-one"),
+        )
+        .unwrap();
+        let payload = root.join("payload-one");
+        PackageVerifier::extract_runtime(&pkg.archive, &payload).unwrap();
+        let installation = Installation::new(root.join("installed"));
+        installation.install("0.1.0", &payload).unwrap();
+        let autostart = SandboxAutostartBackend::new(root.join("autostart.json"));
+        installation.enable_autostart(&autostart).unwrap();
+        let updates = UpdateCoordinator::new(installation.clone());
+
+        let baseline = PackageDoctor::inspect(&pkg.archive, &installation, &updates, &autostart);
+        let check = baseline
+            .checks
+            .iter()
+            .find(|c| c.id == "autostart-ownership")
+            .unwrap();
+        assert_eq!(check.status, ProductizationCheckStatus::Pass);
+
+        let dev_entry = AutostartEntry {
+            owner: "RunnerMesh".to_owned(),
+            command: r#""C:\target\debug\runnermesh-agent.exe""#.to_owned(),
+        };
+        let mut entries = BTreeMap::new();
+        entries.insert("RunnerMesh".to_owned(), dev_entry);
+        fs::write(autostart.path(), serde_json::to_vec(&entries).unwrap()).unwrap();
+
+        let report = PackageDoctor::inspect(&pkg.archive, &installation, &updates, &autostart);
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "autostart-ownership")
+            .unwrap();
+        assert_eq!(check.status, ProductizationCheckStatus::Fail);
     }
 }

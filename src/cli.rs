@@ -10,8 +10,8 @@ use crate::{
 /// [`AgentCommand`] instead of owning operational state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
-    Status { json: bool },
-    Doctor { json: bool },
+    Status { json: bool, diagnostic: bool },
+    Doctor { json: bool, diagnostic: bool },
     Mode { mode: UserMode },
     Zen { zen: ZenOverride },
     ProbeList,
@@ -24,13 +24,53 @@ pub enum CliCommand {
 /// Parses arguments after the executable name into the stable G05 command set.
 pub fn parse_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
     match arguments {
-        [command] if command == "status" => Ok(CliCommand::Status { json: false }),
-        [command, format] if command == "status" && format == "--json" => {
-            Ok(CliCommand::Status { json: true })
+        [command] if command == "status" => Ok(CliCommand::Status {
+            json: false,
+            diagnostic: false,
+        }),
+        [command, format] if command == "status" && format == "--json" => Ok(CliCommand::Status {
+            json: true,
+            diagnostic: false,
+        }),
+        [command, format] if command == "status" && format == "--diagnostic" => {
+            Ok(CliCommand::Status {
+                json: false,
+                diagnostic: true,
+            })
         }
-        [command] if command == "doctor" => Ok(CliCommand::Doctor { json: false }),
-        [command, format] if command == "doctor" && format == "--json" => {
-            Ok(CliCommand::Doctor { json: true })
+        [command, f1, f2]
+            if command == "status"
+                && ((f1 == "--json" && f2 == "--diagnostic")
+                    || (f1 == "--diagnostic" && f2 == "--json")) =>
+        {
+            Ok(CliCommand::Status {
+                json: true,
+                diagnostic: true,
+            })
+        }
+        [command] if command == "doctor" => Ok(CliCommand::Doctor {
+            json: false,
+            diagnostic: false,
+        }),
+        [command, format] if command == "doctor" && format == "--json" => Ok(CliCommand::Doctor {
+            json: true,
+            diagnostic: false,
+        }),
+        [command, format] if command == "doctor" && format == "--diagnostic" => {
+            Ok(CliCommand::Doctor {
+                json: false,
+                diagnostic: true,
+            })
+        }
+        [command, f1, f2]
+            if command == "doctor"
+                && ((f1 == "--json" && f2 == "--diagnostic")
+                    || (f1 == "--diagnostic" && f2 == "--json")) =>
+        {
+            Ok(CliCommand::Doctor {
+                json: true,
+                diagnostic: true,
+            })
         }
         [command, mode] if command == "mode" => Ok(CliCommand::Mode {
             mode: mode.parse().map_err(CliError::InvalidMode)?,
@@ -143,18 +183,22 @@ pub fn execute_cli(
     version: &str,
 ) -> Result<String, CliError> {
     match parse_cli(arguments)? {
-        CliCommand::Status { json } => {
+        CliCommand::Status { json, diagnostic } => {
             let snapshot = request_snapshot(transport, AgentCommand::GetSnapshot)?;
             if json {
                 render_json(&snapshot)
+            } else if diagnostic {
+                Ok(render_snapshot_diagnostic_text(&snapshot))
             } else {
                 Ok(render_snapshot_text(&snapshot))
             }
         }
-        CliCommand::Doctor { json } => {
+        CliCommand::Doctor { json, diagnostic } => {
             let report = request_doctor(transport)?;
             if json {
                 render_json(&report)
+            } else if diagnostic {
+                Ok(render_doctor_diagnostic_text(&report))
             } else {
                 Ok(render_doctor_text(&report))
             }
@@ -309,7 +353,7 @@ fn render_json<T: serde::Serialize>(value: &T) -> Result<String, CliError> {
     serde_json::to_string_pretty(value).map_err(CliError::Json)
 }
 
-fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
+fn render_snapshot_text_with(snapshot: &AgentSnapshot, diagnostic: bool) -> String {
     let github = snapshot
         .links
         .iter()
@@ -326,7 +370,7 @@ fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
         .as_ref()
         .map(|reason| reason.as_str())
         .unwrap_or("none");
-    format!(
+    let mut text = format!(
         "Agent: {}\nDesired capacity: {} · {}\nAchieved capacity: {}\nAdmission control: {} · {} · {}\nRunner: {}\nGitHub: {}\nZen: {}",
         snapshot.health,
         snapshot.desired_node_state,
@@ -342,11 +386,32 @@ fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
         snapshot.runner_phase,
         github,
         snapshot.zen
-    )
+    );
+    if diagnostic {
+        text.push_str(&format!(
+            "\nDiagnostic: schema_version={} auto_idle_seconds={} probes={}",
+            snapshot.schema_version,
+            snapshot.auto_idle_threshold_seconds,
+            snapshot.probes.len()
+        ));
+    }
+    text
 }
 
-fn render_doctor_text(report: &DoctorReport) -> String {
-    let mut output = String::from("Doctor:");
+pub fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
+    render_snapshot_text_with(snapshot, false)
+}
+
+pub fn render_snapshot_diagnostic_text(snapshot: &AgentSnapshot) -> String {
+    render_snapshot_text_with(snapshot, true)
+}
+
+fn render_doctor_text_with(report: &DoctorReport, diagnostic: bool) -> String {
+    let mut output = if diagnostic {
+        String::from("Doctor (Diagnostic mode):")
+    } else {
+        String::from("Doctor:")
+    };
     for check in &report.checks {
         output.push_str(&format!("\n- {}: {}", check.id, check.status));
         if let Some(reason_code) = &check.reason_code {
@@ -354,6 +419,14 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         }
     }
     output
+}
+
+pub fn render_doctor_text(report: &DoctorReport) -> String {
+    render_doctor_text_with(report, false)
+}
+
+pub fn render_doctor_diagnostic_text(report: &DoctorReport) -> String {
+    render_doctor_text_with(report, true)
 }
 
 fn render_probe_list(snapshot: &AgentSnapshot) -> String {
@@ -447,7 +520,8 @@ fn render_runners_text(report: &crate::RunnerCommandReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_cli, parse_cli, render_doctor_text, render_runner_status, render_runners_text,
+        execute_cli, parse_cli, render_doctor_diagnostic_text, render_doctor_text,
+        render_runner_status, render_runners_text, render_snapshot_diagnostic_text,
         render_snapshot_text, AgentTransport, CliCommand,
     };
     use crate::{
@@ -839,5 +913,77 @@ mod tests {
         assert!(!runners_text.contains(r"C:\fixture"));
         assert!(!runners_text.contains("actions.runner."));
         assert!(!runners_text.contains("ghp_"));
+    }
+
+    #[test]
+    fn diagnostic_mode_parsing_and_privacy_boundary() {
+        assert_eq!(
+            parse_cli(&arguments(["status", "--diagnostic"])).unwrap(),
+            CliCommand::Status {
+                json: false,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["status", "--json", "--diagnostic"])).unwrap(),
+            CliCommand::Status {
+                json: true,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["status", "--diagnostic", "--json"])).unwrap(),
+            CliCommand::Status {
+                json: true,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["doctor", "--diagnostic"])).unwrap(),
+            CliCommand::Doctor {
+                json: false,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["doctor", "--json", "--diagnostic"])).unwrap(),
+            CliCommand::Doctor {
+                json: true,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["doctor", "--diagnostic", "--json"])).unwrap(),
+            CliCommand::Doctor {
+                json: true,
+                diagnostic: true,
+            }
+        );
+
+        let snap = snapshot();
+        let diag_text = render_snapshot_diagnostic_text(&snap);
+        assert!(diag_text.contains("Diagnostic:"));
+        assert!(diag_text.contains("schema_version="));
+        assert!(!diag_text.contains(r"C:\"));
+        assert!(!diag_text.contains("/Users/"));
+        assert!(!diag_text.contains("ghp_"));
+
+        let doctor = DoctorReport {
+            checks: vec![DoctorCheck {
+                id: ReasonCode::new("agent-health").unwrap(),
+                status: DoctorStatus::Pass,
+                reason_code: Some(ReasonCode::new("host-observed").unwrap()),
+            }],
+        };
+        let diag_doc = render_doctor_diagnostic_text(&doctor);
+        assert!(diag_doc.contains("Diagnostic mode"));
+        assert!(diag_doc.contains("agent-health"));
+        assert!(!diag_doc.contains(r"C:\"));
+        assert!(!diag_doc.contains("/Users/"));
+        assert!(!diag_doc.contains("ghp_"));
+
+        let transport = FakeTransport::with_response(AgentResponse::Snapshot(snap));
+        let out = execute_cli(&arguments(["status", "--diagnostic"]), &transport, "0.1.0").unwrap();
+        assert!(out.contains("Diagnostic:"));
     }
 }
