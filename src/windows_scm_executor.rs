@@ -10,6 +10,9 @@
 //! [`SERVICE_STATUS_PROCESS`], not `ENUM_SERVICE_STATUS_PROCESSW`.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1564,6 +1567,411 @@ impl ScmControlBackend for GatedWindowsScmBackend {
     }
 }
 
+/// Strongly typed narrow action supported by the privileged SCM helper.
+///
+/// Specifically excludes blanket elevation, broad service manager control,
+/// foreign service configuration, and generic process termination (kill_pid).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PrivilegedScmAction {
+    StartService,
+    StopService,
+    ChangeStartMode { mode: ServiceStartMode },
+}
+
+/// Request presented to the privileged SCM helper by the Agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivilegedScmRequest {
+    pub action: PrivilegedScmAction,
+    pub service_name: String,
+    pub expected_image_token: String,
+    pub expected_execution_identity_token: String,
+    pub transaction_id: String,
+}
+
+/// Verifiable report emitted by the privileged SCM helper.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivilegedScmReport {
+    pub service_name: String,
+    pub transaction_id: String,
+    pub applied: bool,
+    pub achieved_state: DiscoveredLifecycle,
+    pub achieved_start_mode: ServiceStartMode,
+    pub refusal_reason: Option<String>,
+}
+
+/// Narrow privileged helper executing strictly scoped Windows SCM mutations.
+///
+/// Ordinary user-session Agent delegates only exact, single-service actions here.
+/// Does not accept wildcards, foreign services, or blanket administrative elevation.
+pub struct PrivilegedScmHelper<B> {
+    backend: B,
+    gate: LiveScmExecutionGate,
+}
+
+impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
+    pub fn new(backend: B, gate: LiveScmExecutionGate) -> Self {
+        Self { backend, gate }
+    }
+
+    pub fn dispatch(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport {
+        let name = request.service_name.trim();
+        if name.is_empty()
+            || name.contains('*')
+            || name.contains('?')
+            || name.contains('\\')
+            || name.contains('/')
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::NameDrift.as_str().to_owned()),
+            };
+        }
+        if request.transaction_id.trim().is_empty() {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::RestoreIncomplete.as_str().to_owned()),
+            };
+        }
+
+        // 1. Verify gate permission for the specific action
+        let (need_start, need_stop, need_config) = match request.action {
+            PrivilegedScmAction::StartService => (true, false, false),
+            PrivilegedScmAction::StopService => (false, true, false),
+            PrivilegedScmAction::ChangeStartMode { .. } => (false, false, true),
+        };
+        if !self.gate.authorizes(
+            name,
+            &request.expected_image_token,
+            need_start,
+            need_stop,
+            need_config,
+        ) {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::GateClosed.as_str().to_owned()),
+            };
+        }
+
+        // 2. Query exact host state & verify identity (foreign service refusal)
+        let snapshot = match self.backend.query_exact(name) {
+            Ok(snap) => snap,
+            Err(error) => {
+                return PrivilegedScmReport {
+                    service_name: request.service_name.clone(),
+                    transaction_id: request.transaction_id.clone(),
+                    applied: false,
+                    achieved_state: DiscoveredLifecycle::Unknown,
+                    achieved_start_mode: ServiceStartMode::Disabled,
+                    refusal_reason: Some(error.as_str().to_owned()),
+                };
+            }
+        };
+
+        if !snapshot.observation.service_name.eq_ignore_ascii_case(name) {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: snapshot.observation.state,
+                achieved_start_mode: snapshot.observation.start_mode,
+                refusal_reason: Some(ScmApiError::NameDrift.as_str().to_owned()),
+            };
+        }
+        if !snapshot.observation.ownership_verified
+            || !snapshot.observation.image_path_matches
+            || !snapshot
+                .image_token
+                .eq_ignore_ascii_case(&request.expected_image_token)
+            || !snapshot
+                .execution_identity_token
+                .eq_ignore_ascii_case(&request.expected_execution_identity_token)
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: snapshot.observation.state,
+                achieved_start_mode: snapshot.observation.start_mode,
+                refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+            };
+        }
+
+        // 3. Worker Busy check for StopService
+        if matches!(request.action, PrivilegedScmAction::StopService)
+            && matches!(snapshot.observation.state, DiscoveredLifecycle::Busy)
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: snapshot.observation.state,
+                achieved_start_mode: snapshot.observation.start_mode,
+                refusal_reason: Some(ScmApiError::BusyWorker.as_str().to_owned()),
+            };
+        }
+
+        // 4. Perform narrow mutation
+        let mutate_result = match request.action {
+            PrivilegedScmAction::StartService => self.backend.start(name),
+            PrivilegedScmAction::StopService => self.backend.stop(name),
+            PrivilegedScmAction::ChangeStartMode { mode } => {
+                self.backend.change_start_mode(name, mode)
+            }
+        };
+        if let Err(error) = mutate_result {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: snapshot.observation.state,
+                achieved_start_mode: snapshot.observation.start_mode,
+                refusal_reason: Some(error.as_str().to_owned()),
+            };
+        }
+
+        // 5. Immediate post-action readback
+        let after = match self.backend.query_exact(name) {
+            Ok(snap) => snap,
+            Err(error) => {
+                return PrivilegedScmReport {
+                    service_name: request.service_name.clone(),
+                    transaction_id: request.transaction_id.clone(),
+                    applied: true,
+                    achieved_state: DiscoveredLifecycle::Unknown,
+                    achieved_start_mode: ServiceStartMode::Disabled,
+                    refusal_reason: Some(error.as_str().to_owned()),
+                };
+            }
+        };
+
+        // Verify transition succeeded
+        let matches_expectation = match request.action {
+            PrivilegedScmAction::StartService => matches!(
+                after.observation.state,
+                DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
+            ),
+            PrivilegedScmAction::StopService => {
+                matches!(after.observation.state, DiscoveredLifecycle::Stopped)
+            }
+            PrivilegedScmAction::ChangeStartMode { mode } => after.observation.start_mode == mode,
+        };
+
+        if !matches_expectation {
+            PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: true,
+                achieved_state: after.observation.state,
+                achieved_start_mode: after.observation.start_mode,
+                refusal_reason: Some(ScmApiError::RestoreIncomplete.as_str().to_owned()),
+            }
+        } else {
+            PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: true,
+                achieved_state: after.observation.state,
+                achieved_start_mode: after.observation.start_mode,
+                refusal_reason: None,
+            }
+        }
+    }
+}
+
+pub const SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION: u32 = 1;
+
+/// Durable transaction journal written to resilient private storage.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScmTransactionJournal {
+    pub schema_version: u32,
+    pub transaction_id: String,
+    pub service_name: String,
+    pub expected_image_token: String,
+    pub expected_execution_identity_token: String,
+    pub prestate: ServicePrestateCapture,
+    pub stage: ScmTransactionStage,
+    pub restore_plan: ServiceRestorePlan,
+    pub updated_at_unix_ms: u64,
+}
+
+impl ScmTransactionJournal {
+    pub fn new(
+        prestate: ServicePrestateCapture,
+        expected_image_token: impl Into<String>,
+        expected_execution_identity_token: impl Into<String>,
+        updated_at_unix_ms: u64,
+    ) -> Self {
+        let restore_plan = capture_restore_plan(&prestate);
+        Self {
+            schema_version: SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
+            transaction_id: prestate.transaction_id.clone(),
+            service_name: prestate.service_name.clone(),
+            expected_image_token: expected_image_token.into(),
+            expected_execution_identity_token: expected_execution_identity_token.into(),
+            stage: ScmTransactionStage::CapturedPrestate,
+            restore_plan,
+            prestate,
+            updated_at_unix_ms,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.stage,
+            ScmTransactionStage::Completed
+                | ScmTransactionStage::Refused
+                | ScmTransactionStage::RestoreFailed
+        )
+    }
+
+    pub fn record_stage(&mut self, stage: ScmTransactionStage, updated_at_unix_ms: u64) {
+        self.stage = stage;
+        self.updated_at_unix_ms = updated_at_unix_ms;
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        crate::installation::atomic_write(path, &bytes)
+    }
+
+    pub fn load_from_path(path: &Path) -> io::Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        if crate::installation::is_reparse_point(path)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing reparse journal {}", path.display()),
+            ));
+        }
+        let bytes = fs::read(path)?;
+        let journal: Self = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        if journal.schema_version != SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported journal schema version {}",
+                    journal.schema_version
+                ),
+            ));
+        }
+        Ok(Some(journal))
+    }
+
+    pub fn clear(path: &Path) -> io::Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        if crate::installation::is_reparse_point(path)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing reparse journal {}", path.display()),
+            ));
+        }
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+}
+
+/// Reconciles an interrupted transaction journal after an Agent crash or restart.
+///
+/// CRITICAL SAFETY CONTRACT:
+/// A restarted Agent resuming an in-flight journal NEVER marks `restore_pass: true`
+/// or reports `Completed` without fresh, independent readbacks confirming that
+/// the service state, start mode, AND admission presence truthfully match the restore plan.
+pub fn reconcile_interrupted_scm_journal<B: ScmControlBackend, A: AdmissionSelectorObserver>(
+    journal: &mut ScmTransactionJournal,
+    executor: &ScmControlExecutor<B>,
+    admission: &mut A,
+    current_time_unix_ms: u64,
+) -> ScmTransactionReceipt {
+    let current_observation = match executor.observe_verified() {
+        Ok(obs) => obs,
+        Err(error) => {
+            journal.record_stage(ScmTransactionStage::Interrupted, current_time_unix_ms);
+            return ScmTransactionReceipt {
+                service_name: journal.service_name.clone(),
+                stage: ScmTransactionStage::Interrupted,
+                api_accepted: false,
+                achieved: AchievedServiceControl::Unknown,
+                reason: Some(format!("resume-observe-failed: {}", error.as_str())),
+                restore: Some(journal.restore_plan.clone()),
+                restore_pass: false,
+            };
+        }
+    };
+
+    let admission_absent = match admission.observe_selector_absent() {
+        Ok(absent) => absent,
+        Err(error) => {
+            journal.record_stage(ScmTransactionStage::Interrupted, current_time_unix_ms);
+            return ScmTransactionReceipt {
+                service_name: journal.service_name.clone(),
+                stage: ScmTransactionStage::Interrupted,
+                api_accepted: false,
+                achieved: achieved_from_observation(&current_observation, false),
+                reason: Some(format!(
+                    "resume-admission-observe-failed: {}",
+                    error.as_str()
+                )),
+                restore: Some(journal.restore_plan.clone()),
+                restore_pass: false,
+            };
+        }
+    };
+
+    let running_now = matches!(
+        current_observation.state,
+        DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
+    );
+
+    // Check if the host is already in the fully restored state
+    let state_restored = running_now == journal.restore_plan.restore_running
+        && current_observation.start_mode == journal.restore_plan.restore_start_mode
+        && admission_absent == journal.restore_plan.admission_selector_absent;
+
+    if state_restored {
+        journal.record_stage(ScmTransactionStage::Completed, current_time_unix_ms);
+        return ScmTransactionReceipt {
+            service_name: journal.service_name.clone(),
+            stage: ScmTransactionStage::Completed,
+            api_accepted: true,
+            achieved: achieved_from_observation(&current_observation, false),
+            reason: None,
+            restore: Some(journal.restore_plan.clone()),
+            restore_pass: true,
+        };
+    }
+
+    // Otherwise, attempt recovery by executing the bound restore plan
+    journal.record_stage(ScmTransactionStage::Restoring, current_time_unix_ms);
+    let receipt = executor.restore(&journal.restore_plan, admission);
+    journal.record_stage(receipt.stage, current_time_unix_ms);
+    receipt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2155,5 +2563,295 @@ mod tests {
             .observe_selector_absent()
             .expect("restored present"));
         assert_eq!(admission.observe_calls(), 3);
+    }
+
+    fn test_fixture_record(
+        name: &str,
+        image_token: &str,
+        identity_token: &str,
+        state: DiscoveredLifecycle,
+        start_mode: ServiceStartMode,
+        busy: bool,
+    ) -> MockServiceRecord {
+        MockServiceRecord {
+            observation: ServiceObservation {
+                service_name: name.to_owned(),
+                state,
+                start_mode,
+                image_path_matches: true,
+                ownership_verified: true,
+            },
+            worker_busy: busy,
+            image_token: image_token.to_owned(),
+            execution_identity_token: identity_token.to_owned(),
+        }
+    }
+
+    fn test_synthetic_gate(
+        service_name: &str,
+        image_token: &str,
+        allow_start: bool,
+        allow_stop: bool,
+        allow_change_config: bool,
+    ) -> LiveScmExecutionGate {
+        LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+            service_name,
+            image_token,
+            allow_start,
+            allow_stop,
+            allow_change_config,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn privileged_scm_helper_enforces_narrow_actions_and_refuses_wildcards_and_foreign_services() {
+        let backend = MockScmBackend::new();
+        backend.insert(test_fixture_record(
+            "fixture.runner.svc",
+            "hux2-image",
+            "hux2-identity",
+            DiscoveredLifecycle::Stopped,
+            ServiceStartMode::Manual,
+            false,
+        ));
+
+        let full_gate = test_synthetic_gate("fixture.runner.svc", "hux2-image", true, true, true);
+        let helper = PrivilegedScmHelper::new(backend.clone(), full_gate);
+
+        // 1. Refuse wildcard service name
+        let report_wildcard = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.runner.*".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-1".to_owned(),
+        });
+        assert!(!report_wildcard.applied);
+        assert_eq!(
+            report_wildcard.refusal_reason.as_deref(),
+            Some("scm.name-drift")
+        );
+
+        // 2. Refuse empty transaction ID
+        let report_empty_tx = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "".to_owned(),
+        });
+        assert!(!report_empty_tx.applied);
+        assert_eq!(
+            report_empty_tx.refusal_reason.as_deref(),
+            Some("scm.restore-incomplete")
+        );
+
+        // 3. Refuse foreign service (image token mismatch)
+        let report_foreign = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "wrong-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-2".to_owned(),
+        });
+        assert!(!report_foreign.applied);
+        assert_eq!(
+            report_foreign.refusal_reason.as_deref(),
+            Some("scm.live-gate-closed") // Gate mismatch because expected_image_token diverged
+        );
+
+        // 4. Refuse when gate lacks permission (Start-only gate refuses StopService)
+        let start_only_gate =
+            test_synthetic_gate("fixture.runner.svc", "hux2-image", true, false, false);
+        let helper_start_only = PrivilegedScmHelper::new(backend.clone(), start_only_gate);
+        let report_denied_stop = helper_start_only.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StopService,
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-3".to_owned(),
+        });
+        assert!(!report_denied_stop.applied);
+        assert_eq!(
+            report_denied_stop.refusal_reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+
+        // 5. Refuse StopService when worker is busy
+        backend.set_worker_busy("fixture.runner.svc", true);
+        let report_busy = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StopService,
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-4".to_owned(),
+        });
+        assert!(!report_busy.applied);
+        assert_eq!(
+            report_busy.refusal_reason.as_deref(),
+            Some("scm.busy-worker")
+        );
+        backend.set_worker_busy("fixture.runner.svc", false);
+
+        // 6. Valid StartService succeeds and verifies post-mutation readback
+        let report_start = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-5".to_owned(),
+        });
+        assert!(report_start.applied);
+        assert_eq!(report_start.achieved_state, DiscoveredLifecycle::Listening);
+        assert_eq!(report_start.refusal_reason, None);
+
+        // 7. Valid ChangeStartMode succeeds
+        let report_mode = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::ChangeStartMode {
+                mode: ServiceStartMode::Automatic,
+            },
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-6".to_owned(),
+        });
+        assert!(report_mode.applied);
+        assert_eq!(report_mode.achieved_start_mode, ServiceStartMode::Automatic);
+        assert_eq!(report_mode.refusal_reason, None);
+    }
+
+    #[test]
+    fn privileged_scm_helper_requires_immediate_readback_confirmation() {
+        let backend = MockScmBackend::new();
+        backend.insert(test_fixture_record(
+            "fixture.runner.svc",
+            "hux2-image",
+            "hux2-identity",
+            DiscoveredLifecycle::Stopped,
+            ServiceStartMode::Manual,
+            false,
+        ));
+
+        let full_gate = test_synthetic_gate("fixture.runner.svc", "hux2-image", true, true, true);
+        let helper = PrivilegedScmHelper::new(backend.clone(), full_gate);
+
+        // Allow pre-mutation query to succeed, then fail immediate readback after start
+        backend.set_fail_after_queries(1, ScmApiError::Timeout);
+        let report = helper.dispatch(&PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.runner.svc".to_owned(),
+            expected_image_token: "hux2-image".to_owned(),
+            expected_execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-timeout".to_owned(),
+        });
+        assert!(report.applied);
+        assert_eq!(report.refusal_reason.as_deref(), Some("scm.timeout"));
+    }
+
+    #[test]
+    fn scm_transaction_journal_atomic_roundtrip_and_terminal_detection() {
+        let root =
+            std::env::temp_dir().join(format!("runnermesh-test-journal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("test-scm-journal.json");
+
+        let prestate = ServicePrestateCapture {
+            service_name: "fixture.runner.svc".to_owned(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Automatic,
+            image_path_matches: true,
+            ownership_verified: true,
+            worker_busy: false,
+            admission_selector_absent: false,
+            image_token: "hux2-image".to_owned(),
+            execution_identity_token: "hux2-identity".to_owned(),
+            transaction_id: "tx-journal-1".to_owned(),
+        };
+
+        let mut journal = ScmTransactionJournal::new(prestate, "hux2-image", "hux2-identity", 1000);
+        assert!(!journal.is_terminal());
+        assert_eq!(journal.stage, ScmTransactionStage::CapturedPrestate);
+
+        journal.save_to_path(&path).unwrap();
+
+        let loaded = ScmTransactionJournal::load_from_path(&path)
+            .unwrap()
+            .expect("loaded");
+        assert_eq!(loaded, journal);
+
+        journal.record_stage(ScmTransactionStage::Completed, 2000);
+        assert!(journal.is_terminal());
+
+        let cleared = ScmTransactionJournal::clear(&path).unwrap();
+        assert!(cleared);
+        assert!(ScmTransactionJournal::load_from_path(&path)
+            .unwrap()
+            .is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn interrupted_scm_journal_requires_independent_readback_and_never_assumes_restore_pass() {
+        let mock = MockScmBackend::new();
+        mock.insert(test_fixture_record(
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            DiscoveredLifecycle::Stopped, // Diverged: was Listening in prestate
+            ServiceStartMode::Automatic,
+            false,
+        ));
+
+        let prestate = ServicePrestateCapture {
+            service_name: "fixture.scm.a".to_owned(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Automatic,
+            image_path_matches: true,
+            ownership_verified: true,
+            worker_busy: false,
+            admission_selector_absent: false,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            transaction_id: "tx-interrupted-1".to_owned(),
+        };
+
+        let mut journal =
+            ScmTransactionJournal::new(prestate, "fixture-image", "fixture-identity", 1000);
+        journal.record_stage(ScmTransactionStage::RequestedStop, 1500);
+
+        let mut admission = FakeGithubAdmissionBackend::new_with_selector_present(true);
+        let gate = LiveScmExecutionGate::CLOSED;
+        let exec = executor(mock.clone(), gate);
+
+        // Scenario A: Gate CLOSED and host diverged -> restore fails closed, restore_pass=false
+        let receipt_refused =
+            reconcile_interrupted_scm_journal(&mut journal, &exec, &mut admission, 2000);
+        assert_eq!(receipt_refused.stage, ScmTransactionStage::RestoreFailed);
+        assert!(!receipt_refused.restore_pass);
+        assert_eq!(
+            receipt_refused.reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(journal.stage, ScmTransactionStage::RestoreFailed);
+
+        // Scenario B: Query readback fails -> Interrupted, restore_pass=false
+        mock.set_fail_next(ScmApiError::Unavailable);
+        let receipt_unavailable =
+            reconcile_interrupted_scm_journal(&mut journal, &exec, &mut admission, 2500);
+        assert_eq!(receipt_unavailable.stage, ScmTransactionStage::Interrupted);
+        assert!(!receipt_unavailable.restore_pass);
+        assert_eq!(journal.stage, ScmTransactionStage::Interrupted);
+
+        // Scenario C: Gate opens, restore succeeds and fresh readbacks confirm restored state
+        let open_gate = open_synthetic_gate();
+        let exec_open = executor(mock.clone(), open_gate);
+        let receipt_success =
+            reconcile_interrupted_scm_journal(&mut journal, &exec_open, &mut admission, 3000);
+        assert_eq!(receipt_success.stage, ScmTransactionStage::Completed);
+        assert!(receipt_success.restore_pass);
+        assert_eq!(journal.stage, ScmTransactionStage::Completed);
     }
 }
