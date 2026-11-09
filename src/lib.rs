@@ -164,8 +164,10 @@ pub use runner_registry::{
     RUNNER_REGISTRY_SCHEMA_VERSION,
 };
 pub use runner_resource::{
-    aggregate_runner_memory, format_resource_estimate, ResourceSampleConfidence,
-    RunnerMemorySample, RunnerResourceAggregate, RunnerResourceRole,
+    aggregate_runner_memory, aggregate_runner_resources, format_resource_estimate,
+    ProcessAttributionDisposition, ResourceSampleConfidence, RunnerAggregateSnapshot,
+    RunnerCpuSample, RunnerMemorySample, RunnerResourceAggregate, RunnerResourceRole,
+    RunnerResourceSample,
 };
 pub use runner_service_backend::{
     PreparedServiceAction, ServiceBackendRefusal, ServiceObservation, ServicePrepareOutcome,
