@@ -11,8 +11,8 @@ IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 CODE_ANCHOR=4179596bec1345296e35eff01681ccd761a8907e
-LAST_PASS_ALL=535a9b244dcf7d6e40995fa6667dbbb9592f1559
-REMOTE_TIP=535a9b244dcf7d6e40995fa6667dbbb9592f1559
+LAST_PASS_ALL=9bab37d6e4c45b7ee23c683b54fe3c80eb80fb05
+REMOTE_TIP=9bab37d6e4c45b7ee23c683b54fe3c80eb80fb05
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
@@ -99,14 +99,15 @@ INDEPENDENT_SECURITY_REVIEW=PENDING
    - Local: all 322 tests pass (306 lib, 3 package, 13 admission model).
    - Code formatting: `rustup run 1.98.1-x86_64-pc-windows-msvc cargo fmt -- --check` clean.
    - Public audit: zero sensitive paths or machine identities.
+   - Hosted CI: Run `42540734394` on `9bab37d` PASS_ALL.
 
 ## Next safe goal
 
 ```text
-NEXT_SAFE_GOAL=GT-03-CLOSEOUT: Push Leaf 04 to remote, verify PR #65 Hosted CI PASS_ALL, and reconcile T03 closeout receipt / await Owner gates
-BUDGET_USED_GT03≈estimate_4.5h
-BUDGET_REMAINING_GT03≈estimate_19.5h
+NEXT_SAFE_GOAL=await Owner gates (HUX1_ZENBOOKDUO, H2, HUX2_LIVE, TRUSTED_SCM, G-ADR006, H3) OR next authorized train
+BUDGET_USED_GT03≈estimate_5.0h
+BUDGET_REMAINING_GT03≈estimate_19.0h
 WAITING_FOR_OWNER=true
 STOP_BEFORE=H2 cutover; HUX-2; real SCM; labels; H3 publish
-RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline code_anchor=4179596bec1345296e35eff01681ccd761a8907e; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
 ```
