@@ -55,7 +55,7 @@ this public file.
 ```text
 P01_SOURCE_PREP=READY_FOR_OWNER_PACKET
 P01_LIVE=WAITING_FOR_OWNER
-BOUND_PASS_ALL_TIP=90740eef1250a2ce0ec5aba39b9738ba0ad15dcd
+BOUND_PASS_ALL_TIP=68eccdd6f57823c9142e7ca63ac30b217c58e50e
 ```
 
 Continue LRM P02–P06 / GT-02 source while H2 remains Owner-gated.
