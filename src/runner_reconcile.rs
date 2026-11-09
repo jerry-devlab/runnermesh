@@ -1010,4 +1010,143 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn resilience_and_failure_matrix_stale_pid_uncertain_readback_and_zero_worker_termination() {
+        let registry = build_registry(vec![
+            record("runner-svc", "repo-a", 1, true, false),
+            record("runner-sess", "repo-b", 2, true, false),
+        ]);
+
+        // Scenario 1: Stale PID / dead process recovery.
+        // Even if a stale PID was once associated with runner-svc, when fresh observation reports
+        // Stopped with no worker and selector absent under Drained policy (Work mode),
+        // it achieves Drained immediately without hang or inventing active workers.
+        let obs_stale_recovered = vec![
+            obs(
+                "runner-svc",
+                DiscoveredLifecycle::Stopped,
+                false,
+                Some(false),
+            ),
+            obs(
+                "runner-sess",
+                DiscoveredLifecycle::Listening,
+                false,
+                Some(true),
+            ),
+        ];
+        let rep1 = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Work, ZenOverride::Disabled),
+            &obs_stale_recovered,
+        );
+        let svc1 = rep1
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        let sess1 = rep1
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-sess")
+            .unwrap();
+        assert_eq!(svc1.desired, PerRunnerDesired::Drained);
+        assert_eq!(svc1.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(svc1.plan, PerRunnerPlan::Noop);
+        // Under Work mode, runner-sess also drains cleanly because policy demands drain
+        assert_eq!(sess1.desired, PerRunnerDesired::Drained);
+        assert_eq!(sess1.plan, PerRunnerPlan::WithdrawSelector);
+
+        // Scenario 2: Remote link loss / readback uncertainty fail-closed.
+        // Under Idle (policy wants Full), if selector observation is unknown or None,
+        // achieved must NEVER be Full.
+        let mut obs_uncertain = obs("runner-svc", DiscoveredLifecycle::Listening, false, None);
+        obs_uncertain.selector_observation_unknown = true;
+        let obs_healthy = obs(
+            "runner-sess",
+            DiscoveredLifecycle::Listening,
+            false,
+            Some(true),
+        );
+        let rep2 = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Idle, ZenOverride::Disabled),
+            &[obs_uncertain, obs_healthy],
+        );
+        let svc2 = rep2
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        let sess2 = rep2
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-sess")
+            .unwrap();
+        assert_eq!(svc2.desired, PerRunnerDesired::Drained);
+        assert_eq!(svc2.plan, PerRunnerPlan::Refuse);
+        assert_eq!(svc2.achieved, PerRunnerAchieved::Unknown);
+        assert_ne!(svc2.achieved, PerRunnerAchieved::Full);
+        // Healthy sibling remains Full with no cross-talk
+        assert_eq!(sess2.desired, PerRunnerDesired::Full);
+        assert_eq!(sess2.achieved, PerRunnerAchieved::Full);
+        assert_eq!(sess2.plan, PerRunnerPlan::Noop);
+
+        // Scenario 3: Active worker non-termination invariant under withdrawal.
+        // When drain is requested (Work mode) and runner is busy, plan must be HoldBusy,
+        // and achieved state must remain Transitional (never claiming Drained prematurely).
+        let obs_busy = vec![
+            obs("runner-svc", DiscoveredLifecycle::Busy, true, Some(false)),
+            obs(
+                "runner-sess",
+                DiscoveredLifecycle::Listening,
+                false,
+                Some(false),
+            ),
+        ];
+        let rep3 = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Work, ZenOverride::Disabled),
+            &obs_busy,
+        );
+        let svc3 = rep3
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        assert_eq!(svc3.desired, PerRunnerDesired::Drained);
+        assert_eq!(svc3.plan, PerRunnerPlan::HoldBusy);
+        assert_eq!(svc3.achieved, PerRunnerAchieved::Transitional);
+        assert_ne!(svc3.achieved, PerRunnerAchieved::Drained);
+
+        // Scenario 4: Worker finishes on next tick -> transitions cleanly to Drained.
+        let obs_busy_done = vec![
+            obs(
+                "runner-svc",
+                DiscoveredLifecycle::Listening,
+                false,
+                Some(false),
+            ),
+            obs(
+                "runner-sess",
+                DiscoveredLifecycle::Listening,
+                false,
+                Some(false),
+            ),
+        ];
+        let rep4 = reconcile_multi_runners(
+            &registry,
+            &globals(UserMode::Work, ZenOverride::Disabled),
+            &obs_busy_done,
+        );
+        let svc4 = rep4
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        assert_eq!(svc4.desired, PerRunnerDesired::Drained);
+        assert_eq!(svc4.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(svc4.plan, PerRunnerPlan::Noop);
+    }
 }
