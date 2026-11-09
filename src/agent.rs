@@ -15,10 +15,11 @@ use crate::{
     decide_admission, handle_runners_command, AdmissionControlSnapshot, AdmissionDecision,
     AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
     DesiredAdmissionState, DiscoveryReport, DoctorCheck, DoctorReport, DoctorStatus,
-    ExecutionIdentityEvidence, HardSafetyState, LinkKind, LinkSnapshot, LinkState,
-    MemoryRegistryStore, OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
-    RegistryError, RegistryStore, RunnerPhase, RunnerRegistry, RunnerRegistryEditor,
-    SystemPreferences, UiPreferences, UserMode, ZenOverride,
+    ExecutionIdentityEvidence, GlobalPolicyInputs, HardSafetyState, LinkKind, LinkSnapshot,
+    LinkState, MemoryRegistryStore, MultiRunnerReconcileReport, OwnershipEvidence,
+    PerRunnerObservation, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RegistryError,
+    RegistryStore, RunnerPhase, RunnerRegistry, RunnerRegistryEditor, SystemPreferences,
+    UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -323,6 +324,21 @@ where
 
     pub fn runner_registry(&self) -> &RunnerRegistry {
         self.runner_registry.registry()
+    }
+
+    /// Reconciles all enrolled local runners against the single authoritative
+    /// Agent policy (user mode, zen, hard safety, effective probes).
+    pub fn reconcile_runners(
+        &self,
+        observations: &[PerRunnerObservation],
+    ) -> MultiRunnerReconcileReport {
+        let globals = GlobalPolicyInputs {
+            user_mode: self.config.user_mode,
+            zen: self.config.zen,
+            hard_safety: self.observation.hard_safety,
+            probes: self.effective_probes(),
+        };
+        crate::reconcile_multi_runners(self.runner_registry.registry(), &globals, observations)
     }
 
     /// Migrates the optional v0.1 single binding into the registry and persists.
@@ -1186,6 +1202,293 @@ mod tests {
         assert!(b.desired_enabled);
         assert_eq!(a.enrollment_state, EnrollmentState::Enrolled);
         assert_eq!(b.enrollment_state, EnrollmentState::Enrolled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_core_single_authority_reconciles_multi_runners_with_complete_precedence_matrix() {
+        use crate::{
+            DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
+            DiscoveredServiceBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryReport,
+            OpaqueIdentityReference, PerRunnerAchieved, PerRunnerDesired, PerRunnerObservation,
+            PerRunnerPlan, RegistrationScope, RunnerBackendKind,
+            WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+        };
+
+        let root = temporary_root();
+        let identity = OpaqueIdentityReference::new(
+            WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+
+        let mut core = AgentCore::new(
+            QueueObserver::new(vec![healthy_observation(); 16]),
+            RecordingReconciler::default(),
+            MemoryConfigStore::default(),
+            build(),
+        )
+        .unwrap();
+
+        let svc_exe = root.join("svc").join("RunnerService.exe");
+        core.set_runner_discovery(DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![
+                DiscoveredRunner {
+                    local_discovery_key: "runner-svc".to_owned(),
+                    disposition: DiscoveryDisposition::ObservedOnly,
+                    refusal: None,
+                    backend: RunnerBackendKind::WindowsService,
+                    identity: DiscoveredRunnerIdentity {
+                        registration_scope: Some(RegistrationScope::Repository {
+                            owner: "owner".to_owned(),
+                            repository: "repo-svc".to_owned(),
+                        }),
+                        runner_id: Some(101),
+                        expected_runner_name: Some("fixture-svc".to_owned()),
+                        runner_home: root.join("svc"),
+                        work_root: Some(root.join("svc").join("_work")),
+                        execution_identity_ref: Some(identity.clone()),
+                    },
+                    service: Some(DiscoveredServiceBinding {
+                        service_name: "actions.runner.svc".to_owned(),
+                        display_name: Some("Service Runner".to_owned()),
+                        image_path: Some(svc_exe),
+                        state: DiscoveredLifecycle::Listening,
+                    }),
+                    session: None,
+                    capabilities: DiscoveryCapabilities {
+                        service_control_contract: true,
+                        user_session_control_contract: false,
+                        enrollment_eligible: true,
+                    },
+                    same_scope_collision: false,
+                    observed_lifecycle: DiscoveredLifecycle::Listening,
+                },
+                DiscoveredRunner {
+                    local_discovery_key: "runner-sess".to_owned(),
+                    disposition: DiscoveryDisposition::ObservedOnly,
+                    refusal: None,
+                    backend: RunnerBackendKind::UserSession,
+                    identity: DiscoveredRunnerIdentity {
+                        registration_scope: Some(RegistrationScope::Repository {
+                            owner: "owner".to_owned(),
+                            repository: "repo-sess".to_owned(),
+                        }),
+                        runner_id: Some(102),
+                        expected_runner_name: Some("fixture-sess".to_owned()),
+                        runner_home: root.join("sess"),
+                        work_root: Some(root.join("sess").join("_work")),
+                        execution_identity_ref: Some(identity.clone()),
+                    },
+                    service: None,
+                    session: None,
+                    capabilities: DiscoveryCapabilities {
+                        service_control_contract: false,
+                        user_session_control_contract: true,
+                        enrollment_eligible: true,
+                    },
+                    same_scope_collision: false,
+                    observed_lifecycle: DiscoveredLifecycle::Listening,
+                },
+            ],
+        });
+
+        // 1. Enroll both runners.
+        for key in ["runner-svc", "runner-sess"] {
+            core.handle_command(AgentCommand::RunnersEnroll {
+                local_runner_key: key.to_owned(),
+                prepare_only: false,
+            })
+            .unwrap();
+        }
+
+        // Set baseline user mode to Idle.
+        core.handle_command(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        })
+        .unwrap();
+
+        // 2. Observations: both listening, selector present. Both should achieve Full.
+        let obs_both_full = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-svc".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-sess".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+
+        let rep1 = core.reconcile_runners(&obs_both_full);
+        assert_eq!(rep1.results.len(), 2);
+        assert_eq!(rep1.results[0].desired, PerRunnerDesired::Full);
+        assert_eq!(rep1.results[0].achieved, PerRunnerAchieved::Full);
+        assert_eq!(rep1.results[1].desired, PerRunnerDesired::Full);
+        assert_eq!(rep1.results[1].achieved, PerRunnerAchieved::Full);
+
+        // 3. Disable runner-svc while runner-sess remains enabled.
+        // Proves A/B independence: runner-sess remains desired Full and achieved Full.
+        core.handle_command(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-svc".to_owned(),
+            when_idle: true,
+            prepare_only: false,
+        })
+        .unwrap();
+
+        let rep2 = core.reconcile_runners(&obs_both_full);
+        let svc2 = rep2
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        let sess2 = rep2
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-sess")
+            .unwrap();
+        assert_eq!(svc2.desired, PerRunnerDesired::Drained);
+        assert_eq!(svc2.plan, PerRunnerPlan::WithdrawSelector);
+        assert_eq!(sess2.desired, PerRunnerDesired::Full);
+        assert_eq!(sess2.achieved, PerRunnerAchieved::Full);
+        assert_eq!(sess2.plan, PerRunnerPlan::Noop);
+
+        // 4. Precedence: Force-CI mode set on AgentCore.
+        // Explicit disable on runner-svc OUTRANKS Force-CI: runner-svc stays Drained!
+        core.handle_command(AgentCommand::SetMode {
+            mode: UserMode::ForceCi,
+        })
+        .unwrap();
+
+        let rep3 = core.reconcile_runners(&obs_both_full);
+        let svc3 = rep3
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        let sess3 = rep3
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-sess")
+            .unwrap();
+        assert_eq!(svc3.desired, PerRunnerDesired::Drained);
+        assert_eq!(sess3.desired, PerRunnerDesired::Full);
+
+        // 5. Precedence: Zen override enabled on AgentCore.
+        // Zen outranks Force-CI: all runners drain/offline, but registry desired_enabled is never mutated.
+        core.handle_command(AgentCommand::SetZen {
+            zen: ZenOverride::Enabled,
+        })
+        .unwrap();
+
+        let rep4 = core.reconcile_runners(&obs_both_full);
+        let svc4 = rep4
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        let sess4 = rep4
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-sess")
+            .unwrap();
+        // Explicitly disabled runner desires Drained; enabled runner under Zen desires Offline:
+        assert_eq!(svc4.desired, PerRunnerDesired::Drained);
+        assert_eq!(svc4.plan, PerRunnerPlan::WithdrawSelector);
+        assert_eq!(sess4.desired, PerRunnerDesired::Offline);
+        assert_eq!(sess4.plan, PerRunnerPlan::WithdrawSelector);
+        // Desired enabled in registry unchanged by Zen:
+        assert!(
+            !core
+                .runner_registry()
+                .get("runner-svc")
+                .unwrap()
+                .desired_enabled
+        );
+        assert!(
+            core.runner_registry()
+                .get("runner-sess")
+                .unwrap()
+                .desired_enabled
+        );
+
+        // 6. Worker busy preservation:
+        // When runner-svc is busy with active worker, withdrawal plan must be HoldBusy, never killing worker.
+        let obs_busy = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-svc".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Busy,
+                worker_present: true,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-sess".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Stopped,
+                worker_present: false,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep5 = core.reconcile_runners(&obs_busy);
+        let svc5 = rep5
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-svc")
+            .unwrap();
+        assert_eq!(svc5.plan, PerRunnerPlan::HoldBusy);
+        assert_eq!(svc5.achieved, PerRunnerAchieved::Transitional);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_core_handles_registry_store_corruption_fail_closed() {
+        use super::AgentCoreError;
+        use crate::FileRegistryStore;
+
+        let root = temporary_root();
+        let registry_path = root.join("corrupt-runners-registry.json");
+        fs::write(
+            &registry_path,
+            b"{\"schema_version\": 9999, \"invalid_syntax\": true}",
+        )
+        .unwrap();
+
+        let store = MemoryConfigStore::default();
+        let result = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation()]),
+            RecordingReconciler::default(),
+            store,
+            build(),
+            Box::new(FileRegistryStore::new(&registry_path)),
+        );
+
+        assert!(matches!(result, Err(AgentCoreError::Registry(_))));
         let _ = fs::remove_dir_all(root);
     }
 }
