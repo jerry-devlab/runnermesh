@@ -10,9 +10,9 @@ BRANCH=feat/160h-gt01-field-baseline
 IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
-CODE_ANCHOR=7bf1f47a6b5699ee7cece7a6100aaa7e2c2d5190
-LAST_PASS_ALL=ddf34b483720e1c8ec2d090298ca9398662b6516
-REMOTE_TIP=ddf34b483720e1c8ec2d090298ca9398662b6516
+CODE_ANCHOR=4179596bec1345296e35eff01681ccd761a8907e
+LAST_PASS_ALL=535a9b244dcf7d6e40995fa6667dbbb9592f1559
+REMOTE_TIP=535a9b244dcf7d6e40995fa6667dbbb9592f1559
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
@@ -86,13 +86,27 @@ INDEPENDENT_SECURITY_REVIEW=PENDING
    - Local: all 319 tests pass (303 lib, 3 package, 13 admission model).
    - Hosted CI: Run `42500546644` on `ddf34b4` PASS_ALL.
 
+
+## Completed in GT-03 leaf 4
+
+1. **P05/P06 CLI multi-runner status/list JSON rendering & prepare flags** (`src/cli.rs`):
+   - Added `runners_json_renders_faithful_machine_contract_and_respects_prepare_flags`: proves `runners status --json`, `runners list --json`, `runners enroll --prepare`, and `runners disable --when-idle` output faithful schema-versioned machine contracts without leaking sensitive credentials or host paths.
+2. **P05/P06 Tray multi-runner presentation & stable action IDs** (`src/tray.rs`):
+   - Added `tray_multi_runner_entries_preserve_stable_ids_and_distinguish_service_and_session`: proves stable toggle menu IDs (`control.runners.toggle.*`) across English and Chinese localizations, cached `RunnersRefresh` updates, and distinct toggle behavior for service vs session instances.
+3. **P06 Package doctor drift checks & installation integrity** (`src/package.rs`):
+   - Added `package_doctor_reports_fail_on_autostart_drift_and_tampered_active_version`: proves `autostart-ownership` failure on drift, `enable_autostart` drift refusal (`InstallError::AutostartDrift`), `installed-state-validity: Fail` + `active-version-validity: Unknown` on missing active binary, and `package-validity: Fail` on corrupt archive.
+4. **Validation**:
+   - Local: all 322 tests pass (306 lib, 3 package, 13 admission model).
+   - Code formatting: `rustup run 1.98.1-x86_64-pc-windows-msvc cargo fmt -- --check` clean.
+   - Public audit: zero sensitive paths or machine identities.
+
 ## Next safe goal
 
 ```text
-NEXT_SAFE_GOAL=GT-03-LEAF-04: Multi-runner CLI/Doctor status JSON rendering / tray presentation consistency OR await Owner gates
-BUDGET_USED_GT03≈estimate_3.5h
-BUDGET_REMAINING_GT03≈estimate_20.5h
+NEXT_SAFE_GOAL=GT-03-CLOSEOUT: Push Leaf 04 to remote, verify PR #65 Hosted CI PASS_ALL, and reconcile T03 closeout receipt / await Owner gates
+BUDGET_USED_GT03≈estimate_4.5h
+BUDGET_REMAINING_GT03≈estimate_19.5h
 WAITING_FOR_OWNER=true
 STOP_BEFORE=H2 cutover; HUX-2; real SCM; labels; H3 publish
-RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline tip=ddf34b483720e1c8ec2d090298ca9398662b6516; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
+RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline; LF line endings; never touch feat/lrm-09 or overwrite productization worktree
 ```
