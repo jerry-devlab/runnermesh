@@ -189,9 +189,12 @@ pub use runtime_binding::{
     WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 pub use scoped_admission_sim::{
-    evaluate_v01_selector_compatibility, propose_scoped_selector_migration,
-    ScopedSelectorMigrationPlan, SelectorCompatibility, SimulatedAdmissionBinding,
-    PROPOSED_SCOPED_SELECTOR_PREFIX,
+    audit_workflow_job_routing, evaluate_v01_selector_compatibility,
+    execute_synthetic_scoped_admission, plan_scoped_label_add, plan_scoped_label_remove,
+    propose_scoped_selector_migration, ScopedAdmissionAction, ScopedAdmissionReceipt,
+    ScopedAdmissionTransaction, ScopedAdmissionTransport, ScopedSelectorMigrationPlan,
+    SelectorCompatibility, SimulatedAdmissionBinding, WorkflowRoutingAudit,
+    WorkflowRoutingClassification, PROPOSED_SCOPED_SELECTOR_PREFIX,
 };
 pub use service_control_contract::{
     achieved_from_observation, capture_restore_plan, mutation_rights, next_control_phase,
