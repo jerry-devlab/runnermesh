@@ -3,7 +3,8 @@
 ```text
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 ACTIVE_TRAIN=RM-160H-T06-UX-INSTALL-HUX2
-LEAF=GT-06-LEAF-02
+TRAIN_STATUS=SOURCE_CLOSEOUT_PASS
+LEAF=GT-06-CLOSEOUT
 PRIOR_TRAIN=RM-160H-T05-ADMISSION-MULTIRUNNER
 ACTIVE_BUDGET=24h
 WORKTREE_LABEL=runnermesh-160h
@@ -12,11 +13,13 @@ IMPLEMENTER=AGY
 BASE=PR#63@8cd996acfee23e5f2006e7801139c70d0d67551d
 PLANNING_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 CODE_ANCHOR=0dd4afeb32d15c0a7a70043d28339ead4572ddce
-LAST_PASS_ALL=02531e60825abd6ea885724775c55d07edafcacb
+LAST_PASS_ALL=2ea0b59995862b0804b612c86d395e01821c5a38
+REMOTE_TIP=2ea0b59995862b0804b612c86d395e01821c5a38
+HOSTED_CI_RUN=42607694331
+CI_STATUS=PASS_ALL
 PRODUCTION_MUTATION=false
 SOURCE_AND_SANDBOX_ONLY=true
 CANDIDATE_PR=65
-CI_STATUS=PENDING_LEAF_01_PUSH
 ```
 
 ## Host truth
@@ -38,28 +41,38 @@ H3=WAITING_FOR_OWNER
 INDEPENDENT_SECURITY_REVIEW=PENDING
 ```
 
-## GT-06 Progress
+## GT-06 Summary of Completed Work
 
-- **GT-06 Leaf 01 (CODE_ANCHOR=`0dd4afeb32d15c0a7a70043d28339ead4572ddce`)**:
-  - Enforced `SOURCE != BUILD != RELEASE != INSTALLED RUNTIME != ACTIVE VERSION` in `src/installation.rs` and `src/package.rs`:
-    - Refused autostart and installation roots pointing into worktrees or build checkouts (`is_development_or_worktree_path`, `InstallError::SourceRuntimeOverlap`).
-    - Verified in `PackageDoctor::inspect` that autostart entries referencing developer checkouts fail ownership checks.
-  - Extended CLI in `src/cli.rs` with `--diagnostic` flag for `status` and `doctor`, cleanly separating extended developer telemetry from default presentation while preserving strict zero-secret redaction.
-  - All 335 unit/integration tests passing; zero clippy warnings.
+1. **Leaf 01 (CODE_ANCHOR=`0dd4afeb32d15c0a7a70043d28339ead4572ddce`)**:
+   - Enforced permanent invariant `SOURCE != BUILD != RELEASE != INSTALLED RUNTIME != ACTIVE VERSION` in `src/installation.rs` and `src/package.rs`:
+     - Added `is_development_or_worktree_path` helper refusing autostart and installation roots pointing into worktrees or build checkouts (`InstallError::SourceRuntimeOverlap`).
+     - Added test `autostart_refuses_target_debug_and_git_worktree_paths`.
+     - Verified in `PackageDoctor::inspect` that autostart entries referencing developer checkouts fail ownership checks (`package_doctor_fails_autostart_when_pointing_to_development_binary`).
+   - Extended CLI in `src/cli.rs` with `--diagnostic` flag for `status` and `doctor`, cleanly separating extended developer telemetry from default presentation while preserving strict zero-secret redaction (`diagnostic_mode_parsing_and_privacy_boundary`).
+   - Hosted CI run `42607694331` verified all 6 jobs green on Windows and Ubuntu.
 
-## GT-06 Remaining Scope & Plan
+2. **Leaf 02 (Preparation & Candidate Freeze Packet)**:
+   - Polished `goals/RM-HUX-2-READINESS-PACKAGE.md` with frozen candidate SHA (`2ea0b59995862b0804b612c86d395e01821c5a38`), code anchor (`0dd4afeb32d15c0a7a70043d28339ead4572ddce`), and passing Hosted CI run `42607694331`.
+   - Verified that all source boundaries, mock/synthetic verifiers, narrow helper patterns, and STOP conditions are formally prepared and public-audit compliant.
+   - Preserved all live Owner gates in `WAITING_FOR_OWNER` with zero unauthorized mutation.
 
-1. **P07-01/03 Candidate Freeze & HUX-2 Owner Qualification Packet**:
-   - Map exact code SHA and CI for candidate freeze.
-   - Prepare public HUX-2 single disposable Service Runner qualification checklist and STOP conditions without executing live mutations.
-   - Verify all Owner gates remain explicit `WAITING_FOR_OWNER`.
+## Full 160H Source Implementation Package Status
 
-## Next safe goal
+| Package | Scope | Disposition |
+| --- | --- | --- |
+| P01 | Field baseline / release prep (H2, G17) | PASS_READ_ONLY / PREPARED |
+| P02 | Discovery identity / enrollment | PASS_SOURCE |
+| P03 | Trusted SCM / Windows service control synthetic | PASS_SOURCE |
+| P04 | FakeGithub matrix / admission lifecycle / selector prep | PASS_SOURCE |
+| P05 | Multi-runner AgentCore single authority / precedence | PASS_SOURCE |
+| P06 | UX / CLI diagnostic / autostart safety / install sandbox | PASS_SOURCE |
+| P07 | Candidate freeze & HUX-2 Owner qualification packet | PREPARED |
+| P08 | ZenBookDuo HUX-1 verification | PENDING (requires ZenBookDuo host) |
+
+## Next safe action
 
 ```text
-NEXT_SAFE_GOAL=GT-06-LEAF-02: P07-01/03 Candidate freeze & HUX-2 Owner qualification packet
-BUDGET_USED_GT06≈estimate_1.5h
-BUDGET_REMAINING_GT06≈estimate_22.5h
+NEXT_ACTION=WAITING_FOR_OWNER_GATES
 WAITING_FOR_OWNER=true
 STOP_BEFORE=H2 cutover; HUX-2 live SCM; labels; H3 publish
 RECOVERY_INSTRUCTION=resume worktree_label=runnermesh-160h branch=feat/160h-gt01-field-baseline code_anchor=0dd4afeb32d15c0a7a70043d28339ead4572ddce; LF line endings; never touch feat/lrm-09 or overwrite productization worktree

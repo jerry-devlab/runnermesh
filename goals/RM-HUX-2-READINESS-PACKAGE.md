@@ -1,17 +1,20 @@
 # HUX-2 Formal Qualification Readiness Package
 
-`TRAIN_ID=RM-LRM-HUX2-READINESS-001` · `PRODUCTION_MUTATION=false`
+`PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001` · `TRAIN_ID=RM-160H-T06-UX-INSTALL-HUX2` · `PRODUCTION_MUTATION=false`
 
 This package prepares Owner-gated live Service qualification. It does **not**
-authorize live SCM mutation. Cursor self-review is not independent security
+authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
+CANDIDATE_HEAD=2ea0b59995862b0804b612c86d395e01821c5a38
+CODE_ANCHOR=0dd4afeb32d15c0a7a70043d28339ead4572ddce
+HOSTED_CI_RUN=42607694331 (PASS_ALL 6/6 jobs)
 SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
 INDEPENDENT_REVIEW_PENDING=true
 LIVE_NOT_AUTHORIZED=true
-CURSOR_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
+IMPLEMENTER_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
 TRUSTED_OWNER_AUTH=UNISSUED
 ```
 
@@ -127,14 +130,23 @@ SOURCE:
   src/service_control_contract.rs
   src/hux2_synthetic.rs
   src/runner_service_backend.rs
+  src/installation.rs
+  src/package.rs
 
-TESTS (local PASS on Implementer host):
+CANDIDATE_FREEZE:
+  CANDIDATE_HEAD=2ea0b59995862b0804b612c86d395e01821c5a38
+  CODE_ANCHOR=0dd4afeb32d15c0a7a70043d28339ead4572ddce
+  HOSTED_CI_RUN=42607694331 (PASS_ALL 6/6 jobs)
+
+TESTS (all passing locally and on hosted CI):
   cargo test --lib scm_
   cargo test --lib hux2_
   cargo test --lib service_control
+  cargo test --lib installation
+  cargo test --lib package
 
 DO NOT MARK:
-  INDEPENDENT_SECURITY_REVIEW=PASS   # Cursor self-review only
+  INDEPENDENT_SECURITY_REVIEW=PASS   # Implementer self-review only; independent review required
   LIVE_QUALIFICATION=PASS            # gate sealed; no live SCM
 ```
 
