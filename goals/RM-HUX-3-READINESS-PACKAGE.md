@@ -7,8 +7,8 @@ It does **not** authorize live label mutation, live service mutation, or product
 Implementer self-review is not independent acceptance.
 
 ```text
-PACKAGE_BUILD_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e
-CODE_ANCHOR=3952b1b83f922701f8d4984585ced02b132c997e
+PACKAGE_BUILD_COMMIT=82cf40b85994c668e5a3b29c8ed12f43e3e975d5
+CODE_ANCHOR=82cf40b85994c668e5a3b29c8ed12f43e3e975d5
 PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd
 PREDECESSOR_DOCS_PR_CI=42788141367 (PASS_ALL 6/6 jobs)
 SANDBOX_TWO_RUNNER_PASS=PASS        # prepare_two_runner_sandbox layout + tests
