@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=82cf40b85994c668e5a3b29c8ed12f43e3e975d5`<br>`PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd` | Predecessor Tip: Run 42788141367 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=de52610ec2000a953d10ed4f9d06fa575439f935`<br>`PREDECESSOR_DOCS_PR_HEAD=0234af522f28b2db5bc69b3df9bbab37fb31bf69` | Predecessor Tip: Run 42802351951 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -20,20 +20,20 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=ef023ec670893c61fce68989e2b25e81b75ebea5ab969e2c2cd2ccf4dcdadb35
-CANDIDATE_ZIP_BYTES=1159161
+CANDIDATE_ZIP_SHA256=e387dde14e205c08565102757a95e6587794d97e8aceca6e517f0622cc585bd1
+CANDIDATE_ZIP_BYTES=1152577
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=6a99f6e81635a8800536184052c17d0b488d40ef289a021293c1992d15a28856
-CANDIDATE_HELPER_BYTES=1753600
+CANDIDATE_HELPER_SHA256=75c7107133fa2062a1ebab27abc4d1b687be1919a7f5ae2e5d063b12ae1eae01
+CANDIDATE_HELPER_BYTES=1778688
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=82cf40b85994c668e5a3b29c8ed12f43e3e975d5
+PROVENANCE_COMMIT=de52610ec2000a953d10ed4f9d06fa575439f935
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
 INDEPENDENT_HASH_CHECK=PASS
 EXTRACT_TEST=PASS
 INSTALL_TEST=PASS
-SANDBOX_LIFECYCLE_TESTS=PASS (343/343 cargo tests)
+SANDBOX_LIFECYCLE_TESTS=PASS (344/344 cargo tests)
 ```
 
 ## 2. Risk & Architecture Map
@@ -47,7 +47,7 @@ SANDBOX_LIFECYCLE_TESTS=PASS (343/343 cargo tests)
   4. Non-Destructive Lifecycle: `DrainThenStop` requires selector removal and idle worker before any stop call. Destructive Worker `kill` or `taskkill` is prohibited.
   5. Mandatory Prestate & Readback: Independent status and configuration readback must match plan; failure forces `restore_pass=false`.
   6. Windows Backend Mutation Inert: `WindowsScmBackend::mutation_inert()` has write paths (`start`, `stop`, `change_start_mode`) unconditionally return `Err(ScmApiError::GateClosed)`. A privately minted `ScmMutationArm` is required to open writes, unconstructable in public code.
-  7. Trusted Verification & Refusal Matrix: `TokenValidatingOwnerVerifier` and `LiveScmExecutionGate::mint_trusted_live` verified. Unit tests prove all refusal paths fail closed: empty material (`AuthorizationNotIssued`), tampered tokens (`AccessDenied`), wildcard service names (`NameDrift`), service drift (`NameDrift`), image token mismatch (`IdentityMismatch`), and excessive rights (`AccessDenied`). Even with a `TrustedLive` gate, live Windows adapter write paths remain `GateClosed`.
+  7. Trusted Verification & Refusal Matrix: `TokenValidatingOwnerVerifier` and `LiveScmExecutionGate::mint_trusted_live` verified. Public self-signing path is closed (`pub(crate) fn mint_trusted_live`). Verification enforces cryptographic SHA-256 token matching, validity windows (`not_before_epoch_seconds` / `expires_at_epoch_seconds`), and single-use nonce tracking refusing replayed tokens (`AccessDenied`). Unit tests prove all refusal paths fail closed: empty material (`AuthorizationNotIssued`), tampered tokens (`AccessDenied`), wildcard service names (`NameDrift`), service drift (`NameDrift`), image token mismatch (`IdentityMismatch`), excessive rights (`AccessDenied`), empty nonces (`AccessDenied`), expired windows (`AccessDenied`), premature windows (`AccessDenied`), and replayed nonces (`AccessDenied`). Even with a `TrustedLive` gate, live Windows adapter write paths remain `GateClosed`.
 
 ### Surface B: GitHub Admission & Multi-Runner Execution (R6 Scope)
 - **Files**: `src/admission.rs`, `tests/fake_github_admission.rs`, `src/hux_sandbox.rs`, `src/agent.rs`
@@ -56,7 +56,8 @@ SANDBOX_LIFECYCLE_TESTS=PASS (343/343 cargo tests)
   2. Multi-runner Collision: Same-scope dual managed enrollment is refused (`same_scope_collision`).
   3. Desired vs Achieved State: Label removal does not imply immediate job drain; runner status must reach `DRAINED` / `Stopped` through observation.
   4. Multi-Runner Agent Chain & Isolation: Regular Agent entrypoint verification (`agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution`) proves that dispatching `RunnersDisable` for runner-a preserves runner-b desired `Full`, achieves active CI execution without interruption (`plan: Noop`, never stopped), persists across Agent reload, and rejects same-scope collisions fail-closed.
-  5. Scoped Selector ADR 0006 Posture: Remains `DRAFT_NOT_ACCEPTED`. Zero live label mutation occurs without explicit Owner decision.
+  5. Agent Loop SCM Integration & Multi-Runner Zero Control Action Proof: `AgentCore::reconcile_and_dispatch_runners` connects multi-runner reconciliation directly to narrow service control dispatch. Integration test (`agent_cycle_multi_runner_disable_a_leaves_b_zero_control_actions`) uses `MockScmBackend` per-service tracking to prove that disabling Runner A dispatches `StopService` exclusively for `actions.runner.a`, while Runner B receives zero control actions (`mock_scm.service_actions("actions.runner.b").is_empty()`, `mock_scm.service_stop_calls == 0`, `mock_scm.service_start_calls == 0`).
+  6. Scoped Selector ADR 0006 Posture: Remains `DRAFT_NOT_ACCEPTED`. Zero live label mutation occurs without explicit Owner decision.
 
 ### Surface C: Installation & Autostart Boundaries
 - **Files**: `src/installation.rs`, `src/package.rs`, `src/cli.rs`

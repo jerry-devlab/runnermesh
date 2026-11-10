@@ -7,13 +7,14 @@ It does **not** authorize live label mutation, live service mutation, or product
 Implementer self-review is not independent acceptance.
 
 ```text
-PACKAGE_BUILD_COMMIT=82cf40b85994c668e5a3b29c8ed12f43e3e975d5
-CODE_ANCHOR=82cf40b85994c668e5a3b29c8ed12f43e3e975d5
-PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd
-PREDECESSOR_DOCS_PR_CI=42788141367 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=de52610ec2000a953d10ed4f9d06fa575439f935
+CODE_ANCHOR=de52610ec2000a953d10ed4f9d06fa575439f935
+PREDECESSOR_DOCS_PR_HEAD=0234af522f28b2db5bc69b3df9bbab37fb31bf69
+PREDECESSOR_DOCS_PR_CI=42802351951 (PASS_ALL 6/6 jobs)
 SANDBOX_TWO_RUNNER_PASS=PASS        # prepare_two_runner_sandbox layout + tests
 AGENT_CORE_MULTI_RUNNER=PASS        # single authority multi-runner matrix
 AGENT_ENTRYPOINT_ISOLATION=PASS     # agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution
+AGENT_CYCLE_ZERO_ACTION_PROOF=PASS  # agent_cycle_multi_runner_disable_a_leaves_b_zero_control_actions (R6 sandbox proof)
 REGISTRY_PERSISTENCE=PASS           # assert_registry_intent_round_trip
 ADR0004_COLLISION_GUARD=PASS        # same_scope_collision refused
 ADR0006_STATUS=DRAFT_NOT_ACCEPTED   # awaiting Owner R5 decision

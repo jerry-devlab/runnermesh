@@ -13,11 +13,11 @@ v0.1 C0 保持独立。唯一 H2 产物是 G15R RC `fdd9fe6b90a4d1f79e6100c0646e
 | 坐标 | 已核实值 |
 |---|---|
 | 工作树与分支 | `runnermesh-160h` / `feat/160h-gt01-field-baseline` |
-| 安装包构建提交 | `82cf40b85994c668e5a3b29c8ed12f43e3e975d5` |
-| 代码锚点 | `82cf40b85994c668e5a3b29c8ed12f43e3e975d5` |
-| 前序已通过远端 HEAD 与 CI | `9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd` / [42788141367，6/6 PASS](https://github.com/jerry-devlab/runnermesh/actions/runs/42788141367) |
-| 候选 ZIP SHA-256 | `ef023ec670893c61fce68989e2b25e81b75ebea5ab969e2c2cd2ccf4dcdadb35` |
-| 候选 Helper SHA-256 | `6a99f6e81635a8800536184052c17d0b488d40ef289a021293c1992d15a28856` |
+| 安装包构建提交 | `de52610ec2000a953d10ed4f9d06fa575439f935` |
+| 代码锚点 | `de52610ec2000a953d10ed4f9d06fa575439f935` |
+| 前序已通过远端 HEAD 与 CI | `0234af522f28b2db5bc69b3df9bbab37fb31bf69` / [42802351951，6/6 PASS](https://github.com/jerry-devlab/runnermesh/actions/runs/42802351951) |
+| 候选 ZIP SHA-256 | `e387dde14e205c08565102757a95e6587794d97e8aceca6e517f0622cc585bd1` |
+| 候选 Helper SHA-256 | `75c7107133fa2062a1ebab27abc4d1b687be1919a7f5ae2e5d063b12ae1eae01` |
 | #65 当前 base | `feat/lrm-productization` / `8cd996acfee23e5f2006e7801139c70d0d67551d` |
 | 远端 main | `d2b37444342d085e650f996e5fb4322f775bbe6f` |
 
