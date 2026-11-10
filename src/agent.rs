@@ -6,7 +6,10 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -243,6 +246,78 @@ impl ConfigStore for MemoryConfigStore {
     }
 }
 
+/// Pluggable multi-runner lifecycle backend driving runner observation,
+/// admission selector withdrawal, and narrow privileged SCM dispatch.
+pub trait MultiRunnerLifecycleBackend: Send + Sync {
+    /// Gathers live or simulated observations for the enrolled runner keys.
+    fn observe_runners(&self, local_runner_keys: &[String]) -> Vec<PerRunnerObservation>;
+
+    /// Dispatches a single scoped SCM control action to the target runner's service.
+    fn dispatch_scm(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport;
+
+    /// Coordinates withdrawal of the reserved admission selector for the given scope and runner.
+    fn withdraw_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String>;
+}
+
+/// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
+pub struct SandboxMultiRunnerLifecycleBackend<B> {
+    helper: PrivilegedScmHelper<B>,
+    observations: Arc<Mutex<Vec<PerRunnerObservation>>>,
+    withdrawn_selectors: Arc<Mutex<Vec<(crate::RegistrationScope, u64)>>>,
+}
+
+impl<B: ScmControlBackend + Send + Sync + 'static> SandboxMultiRunnerLifecycleBackend<B> {
+    pub fn new(helper: PrivilegedScmHelper<B>) -> Self {
+        Self {
+            helper,
+            observations: Arc::new(Mutex::new(Vec::new())),
+            withdrawn_selectors: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn set_observations(&self, obs: Vec<PerRunnerObservation>) {
+        *self.observations.lock().unwrap_or_else(|p| p.into_inner()) = obs;
+    }
+
+    pub fn withdrawn_selectors(&self) -> Vec<(crate::RegistrationScope, u64)> {
+        self.withdrawn_selectors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
+    for SandboxMultiRunnerLifecycleBackend<B>
+{
+    fn observe_runners(&self, _local_runner_keys: &[String]) -> Vec<PerRunnerObservation> {
+        self.observations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn dispatch_scm(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport {
+        self.helper.dispatch(request)
+    }
+
+    fn withdraw_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String> {
+        self.withdrawn_selectors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((scope.clone(), runner_id));
+        Ok(true)
+    }
+}
+
 /// In-process single authority for `Observe -> Decide -> Reconcile`.
 pub struct AgentCore<O, R, S> {
     observer: O,
@@ -256,6 +331,8 @@ pub struct AgentCore<O, R, S> {
     runner_registry: RunnerRegistryEditor,
     registry_store: Box<dyn RegistryStore>,
     last_runner_discovery: Option<DiscoveryReport>,
+    multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+    last_runner_reports: Vec<PrivilegedScmReport>,
 }
 
 impl<O, R, S> AgentCore<O, R, S>
@@ -315,7 +392,116 @@ where
             runner_registry,
             registry_store,
             last_runner_discovery: None,
+            multi_runner_backend: None,
+            last_runner_reports: Vec::new(),
         })
+    }
+
+    /// Attaches a multi-runner lifecycle backend for runner observation,
+    /// admission selector withdrawal, and SCM dispatch.
+    pub fn set_multi_runner_backend(&mut self, backend: Arc<dyn MultiRunnerLifecycleBackend>) {
+        self.multi_runner_backend = Some(backend);
+    }
+
+    pub fn multi_runner_backend(&self) -> Option<&Arc<dyn MultiRunnerLifecycleBackend>> {
+        self.multi_runner_backend.as_ref()
+    }
+
+    pub fn last_runner_reports(&self) -> &[PrivilegedScmReport] {
+        &self.last_runner_reports
+    }
+
+    /// Reconciles all enrolled runners and dispatches necessary SCM actions via the attached backend.
+    pub fn reconcile_and_dispatch_multi_runners(
+        &mut self,
+        transaction_id: &str,
+    ) -> Vec<PrivilegedScmReport> {
+        let Some(backend) = self.multi_runner_backend.as_ref().cloned() else {
+            return Vec::new();
+        };
+
+        let keys: Vec<String> = self
+            .runner_registry
+            .registry()
+            .active_records()
+            .map(|r| r.local_runner_key.clone())
+            .collect();
+        if keys.is_empty() {
+            return Vec::new();
+        }
+
+        let observations = backend.observe_runners(&keys);
+        let reconcile_report = self.reconcile_runners(&observations);
+        let mut reports = Vec::new();
+
+        for result in &reconcile_report.results {
+            let Some(record) = self
+                .runner_registry
+                .registry()
+                .get(&result.local_runner_key)
+            else {
+                continue;
+            };
+
+            let service_name = match &record.backend {
+                RegistryBackendBinding::WindowsService { service_name } => service_name.clone(),
+                RegistryBackendBinding::UserSession => continue,
+            };
+
+            let obs = observations
+                .iter()
+                .find(|o| o.local_runner_key == result.local_runner_key);
+
+            // Step 1: If plan requires selector withdrawal, coordinate withdrawal
+            if result.plan == PerRunnerPlan::WithdrawSelector {
+                let _ = backend.withdraw_selector(&record.registration_scope, record.runner_id);
+            }
+
+            // Step 2: Strictly verify dispatch guards before issuing StopService
+            let selector_confirmed_absent = obs
+                .map(|o| o.selector_present == Some(false) && !o.selector_observation_unknown)
+                .unwrap_or(false);
+
+            let worker_idle = result.observed_lifecycle != DiscoveredLifecycle::Busy
+                && !obs.map(|o| o.worker_present).unwrap_or(false);
+
+            let plan_allows_stop = result.plan == PerRunnerPlan::Noop
+                && (result.achieved == PerRunnerAchieved::Drained
+                    || result.achieved == PerRunnerAchieved::Offline);
+
+            let action = if (!record.desired_enabled || result.desired == PerRunnerDesired::Offline)
+                && result.observed_lifecycle != DiscoveredLifecycle::Stopped
+                && selector_confirmed_absent
+                && worker_idle
+                && plan_allows_stop
+            {
+                Some(PrivilegedScmAction::StopService)
+            } else if record.desired_enabled
+                && result.desired == PerRunnerDesired::Full
+                && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+            {
+                Some(PrivilegedScmAction::StartService)
+            } else {
+                None
+            };
+
+            if let Some(action) = action {
+                let expected_image_token = crate::runner_service_image_token(&record.runner_home);
+                let expected_execution_identity_token = record.execution_identity_ref.key.clone();
+
+                let request = PrivilegedScmRequest {
+                    action,
+                    service_name,
+                    expected_image_token,
+                    expected_execution_identity_token,
+                    transaction_id: transaction_id.to_string(),
+                };
+                reports.push(backend.dispatch_scm(&request));
+            }
+        }
+
+        self.last_runner_reports = reports.clone();
+        reports
     }
 
     /// Injects a read-only discovery report for subsequent enroll/inspect flows.
@@ -403,8 +589,7 @@ where
             };
 
             if let Some(action) = action {
-                let expected_image_token =
-                    crate::opaque_image_token(&record.runner_home.to_string_lossy());
+                let expected_image_token = crate::runner_service_image_token(&record.runner_home);
                 let expected_execution_identity_token = record.execution_identity_ref.key.clone();
 
                 let request = PrivilegedScmRequest {
@@ -506,6 +691,11 @@ where
         self.observation = observation;
         self.decision = decision;
         self.admission_control = admission_control;
+
+        if self.multi_runner_backend.is_some() {
+            let _ = self.reconcile_and_dispatch_multi_runners("agent-cycle-tx");
+        }
+
         Ok(self.snapshot())
     }
 
@@ -1933,7 +2123,7 @@ mod tests {
     #[test]
     fn agent_cycle_multi_runner_disable_a_leaves_b_zero_control_actions() {
         use crate::{
-            opaque_image_token, DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
+            DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
             DiscoveredServiceBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryReport,
             LiveScmExecutionGate, MockScmBackend, MockServiceRecord, OpaqueIdentityReference,
             PerRunnerObservation, PrivilegedScmHelper, RegistrationScope, RunnerBackendKind,
@@ -2051,8 +2241,8 @@ mod tests {
         .unwrap();
 
         // 3. Set up mock SCM backend with initial state for both runners
-        let image_token_a = opaque_image_token(&home_a.to_string_lossy());
-        let image_token_b = opaque_image_token(&home_b.to_string_lossy());
+        let image_token_a = crate::runner_service_image_token(&home_a);
+        let image_token_b = crate::runner_service_image_token(&home_b);
 
         let mock_scm = MockScmBackend::new();
         mock_scm.insert(MockServiceRecord {

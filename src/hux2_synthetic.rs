@@ -427,14 +427,17 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
         let request = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.hux2".to_owned(),
             image_token: "hux2-image".to_owned(),
+            execution_identity_token: "hux2-execution-identity".to_owned(),
+            target_host_token: "hux2-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
             allow_start: true,
             allow_stop: true,
             allow_change_config: true,
+            transaction_id: "tx-hux2-synth".to_owned(),
             owner_material: b"attempt".to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "hux2-synth-nonce".to_owned(),
-            evaluation_time_epoch_seconds: None,
         };
         let disposition = match LiveScmExecutionGate::from_trusted_owner_authorization(
             &UnissuedOwnerAuthorizationVerifier,
