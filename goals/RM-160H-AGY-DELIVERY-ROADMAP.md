@@ -14,7 +14,7 @@ v0.1 C0 保持独立。唯一 H2 产物是 G15R RC `fdd9fe6b90a4d1f79e6100c0646e
 |---|---|
 | 工作树与分支 | `runnermesh-160h` / `feat/160h-gt01-field-baseline` |
 | 本地交接提交 | `c19acb34ba9b7713e48477938af43331e9fdb4a5` |
-| 远端 Draft #65 与 CI | `ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8` / [42743583126，6/6 PASS](https://github.com/jerry-devlab/runnermesh/actions/runs/42743583126) |
+| 远端 Draft #65 与 CI | `26775d04dd2a1db3ad80295eb48dc095033481aa` / [42765028290，6/6 PASS](https://github.com/jerry-devlab/runnermesh/actions/runs/42765028290) |
 | 代码锚点 | `b221eaf72336c5caac676b10405c06e8cdd90b06` |
 | #65 当前 base | `feat/lrm-productization` / `8cd996acfee23e5f2006e7801139c70d0d67551d` |
 | 接手时的远端 main | `d2b37444342d085e650f996e5fb4322f775bbe6f` |
