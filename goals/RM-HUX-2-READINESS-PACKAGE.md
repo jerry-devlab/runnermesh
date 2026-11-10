@@ -7,10 +7,10 @@ authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
-PACKAGE_BUILD_COMMIT=ee27461f848285f5c06cd69bd6a4f657e5e225a3
-CODE_ANCHOR=ee27461f848285f5c06cd69bd6a4f657e5e225a3
-PREDECESSOR_DOCS_PR_HEAD=ca8b8e96bfbc92b34a6bc6b081970fa3240e3aa0
-PREDECESSOR_DOCS_PR_CI=42802351951 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=028c7efba9ebd3d3925371b356a187eba428041d
+CODE_ANCHOR=028c7efba9ebd3d3925371b356a187eba428041d
+PREDECESSOR_DOCS_PR_HEAD=a2265f503c984b6f06200ebc51ecea604668cf57
+PREDECESSOR_DOCS_PR_CI=42808203174 (PASS_ALL 6/6 jobs)
 SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (344/344 cargo tests)
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
 TRUSTED_AUTH_VERIFIER=VERIFIED      # TokenValidatingOwnerVerifier + refusal paths tested
@@ -136,10 +136,10 @@ SOURCE:
   src/package.rs
 
 CANDIDATE_FREEZE:
-  PACKAGE_BUILD_COMMIT=ee27461f848285f5c06cd69bd6a4f657e5e225a3
-  CODE_ANCHOR=ee27461f848285f5c06cd69bd6a4f657e5e225a3
-  PREDECESSOR_DOCS_PR_HEAD=ca8b8e96bfbc92b34a6bc6b081970fa3240e3aa0
-  PREDECESSOR_DOCS_PR_CI=42802351951 (PASS_ALL 6/6 jobs)
+  PACKAGE_BUILD_COMMIT=028c7efba9ebd3d3925371b356a187eba428041d
+  CODE_ANCHOR=028c7efba9ebd3d3925371b356a187eba428041d
+  PREDECESSOR_DOCS_PR_HEAD=a2265f503c984b6f06200ebc51ecea604668cf57
+  PREDECESSOR_DOCS_PR_CI=42808203174 (PASS_ALL 6/6 jobs)
 
 TESTS (all passing locally and on hosted CI):
   cargo test --lib scm_
@@ -153,7 +153,15 @@ DO NOT MARK:
   LIVE_QUALIFICATION=PASS            # gate sealed; no live SCM
 ```
 
-## 7. Human execution plan + stop conditions
+## 7. Owner Determinations Required for Live Trusted Issuance
+
+Within the current source-and-sandbox admission boundary, live issuance material remains unprovisioned (`TRUSTED_OWNER_AUTH=UNISSUED`). To transition from sandbox verification to live execution, the following explicit Owner decisions are required:
+
+1. **Root Authority Secret & Key Provisioning**: Authoritative selection and provisioning mechanism for the Owner signing secret / private key (e.g., secure ephemeral session environment variable, Windows DPAPI / credential vault, or KMS/HSM).
+2. **Transaction Window & Expiry Policy**: Formal determination of the live transaction window duration (15 to 120 minutes) and automated expiry policy enforcement on vouchers.
+3. **Distribution Channel to Workstation**: Controlled injection mechanism of signed vouchers into the Agent/helper memory preventing plaintext credential persistence on untrusted disk storage.
+
+## 8. Human execution plan + stop conditions
 
 Prep (Owner):
 
