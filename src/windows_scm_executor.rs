@@ -66,6 +66,90 @@ impl TrustedOwnerAuthorizationVerifier for UnissuedOwnerAuthorizationVerifier {
     }
 }
 
+/// Token-validating Owner authorization verifier.
+///
+/// Implements cryptographic digest-sealed verification of the Owner authorization
+/// token against expected target service, image token, and granular permissions.
+/// Refuses empty material with [`ScmApiError::AuthorizationNotIssued`], tampered or
+/// invalid tokens with [`ScmApiError::AccessDenied`], wildcard or drifted service
+/// names with [`ScmApiError::NameDrift`], image token mismatches with
+/// [`ScmApiError::IdentityMismatch`], and excessive permissions with
+/// [`ScmApiError::AccessDenied`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenValidatingOwnerVerifier {
+    expected_token_hash: [u8; 32],
+    authorized_service_name: String,
+    authorized_image_token: String,
+    max_allow_start: bool,
+    max_allow_stop: bool,
+    max_allow_change_config: bool,
+}
+
+impl TokenValidatingOwnerVerifier {
+    pub fn new(
+        expected_token: &[u8],
+        authorized_service_name: impl Into<String>,
+        authorized_image_token: impl Into<String>,
+        allow_start: bool,
+        allow_stop: bool,
+        allow_change_config: bool,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(expected_token);
+        let hash: [u8; 32] = hasher.finalize().into();
+        Self {
+            expected_token_hash: hash,
+            authorized_service_name: authorized_service_name.into(),
+            authorized_image_token: authorized_image_token.into(),
+            max_allow_start: allow_start,
+            max_allow_stop: allow_stop,
+            max_allow_change_config: allow_change_config,
+        }
+    }
+}
+
+impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
+    fn verify(
+        &self,
+        request: &TrustedOwnerAuthorizationRequest,
+    ) -> Result<LiveScmExecutionGate, ScmApiError> {
+        if request.owner_material.is_empty() {
+            return Err(ScmApiError::AuthorizationNotIssued);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&request.owner_material);
+        let given_hash: [u8; 32] = hasher.finalize().into();
+        if given_hash != self.expected_token_hash {
+            return Err(ScmApiError::AccessDenied);
+        }
+        if request.service_name.trim().is_empty()
+            || request.service_name.contains('*')
+            || request.service_name.contains('?')
+            || !request.service_name.eq_ignore_ascii_case(&self.authorized_service_name)
+        {
+            return Err(ScmApiError::NameDrift);
+        }
+        if request.image_token.trim().is_empty()
+            || !request.image_token.eq_ignore_ascii_case(&self.authorized_image_token)
+        {
+            return Err(ScmApiError::IdentityMismatch);
+        }
+        if (request.allow_start && !self.max_allow_start)
+            || (request.allow_stop && !self.max_allow_stop)
+            || (request.allow_change_config && !self.max_allow_change_config)
+        {
+            return Err(ScmApiError::AccessDenied);
+        }
+        LiveScmExecutionGate::mint_trusted_live(
+            &request.service_name,
+            &request.image_token,
+            request.allow_start,
+            request.allow_stop,
+            request.allow_change_config,
+        )
+    }
+}
+
 /// Explicitly forgeable test grant. Not Owner authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntheticScmTestGrant {
@@ -152,6 +236,36 @@ impl LiveScmExecutionGate {
         request: &TrustedOwnerAuthorizationRequest,
     ) -> Result<Self, ScmApiError> {
         verifier.verify(request)
+    }
+
+    /// Mints a trusted live gate from verified Owner authorization.
+    ///
+    /// Requires non-empty exact `service_name` and `image_token` (no wildcards).
+    /// Public boolean construction is prevented: this is only callable by a validated
+    /// [`TrustedOwnerAuthorizationVerifier`].
+    pub fn mint_trusted_live(
+        service_name: impl Into<String>,
+        image_token: impl Into<String>,
+        allow_start: bool,
+        allow_stop: bool,
+        allow_change_config: bool,
+    ) -> Result<Self, ScmApiError> {
+        let s = service_name.into();
+        let i = image_token.into();
+        if s.trim().is_empty() || s.contains('*') || s.contains('?') {
+            return Err(ScmApiError::NameDrift);
+        }
+        if i.trim().is_empty() {
+            return Err(ScmApiError::IdentityMismatch);
+        }
+        Ok(Self {
+            allow_start,
+            allow_stop,
+            allow_change_config,
+            grant_kind: ScmGrantKind::TrustedLive,
+            bound_service_name: s,
+            bound_image_token: i,
+        })
     }
 
     pub fn allows_mutation(&self) -> bool {
@@ -2163,6 +2277,233 @@ mod tests {
             verifier.verify(&full_req),
             Err(ScmApiError::AuthorizationNotIssued)
         ));
+    }
+
+    #[test]
+    fn trusted_owner_verifier_valid_token_opens_trusted_live_gate() {
+        let raw_token = b"secret-owner-authorization-token-2026";
+        let verifier = TokenValidatingOwnerVerifier::new(
+            raw_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            false,
+        );
+        let request = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: false,
+            owner_material: raw_token.to_vec(),
+        };
+        let gate =
+            LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();
+        assert!(gate.is_trusted_live());
+        assert!(!gate.is_synthetic_test_only());
+        assert!(gate.allows_mutation());
+        assert!(gate.authorizes("fixture.scm.a", "fixture-image", true, false, false));
+        assert!(gate.authorizes("fixture.scm.a", "fixture-image", false, true, false));
+        assert!(!gate.authorizes("fixture.scm.a", "fixture-image", false, false, true));
+        assert!(!gate.authorizes("other.service", "fixture-image", true, false, false));
+        assert!(!gate.authorizes("fixture.scm.a", "other-image", true, false, false));
+    }
+
+    #[test]
+    fn trusted_owner_verifier_refusal_paths() {
+        let raw_token = b"secret-owner-authorization-token-2026";
+        let verifier = TokenValidatingOwnerVerifier::new(
+            raw_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            true,
+        );
+
+        // 1. Empty owner material refuses with AuthorizationNotIssued
+        let empty_mat_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: false,
+            allow_change_config: false,
+            owner_material: Vec::new(),
+        };
+        assert!(matches!(
+            verifier.verify(&empty_mat_req),
+            Err(ScmApiError::AuthorizationNotIssued)
+        ));
+
+        // 2. Tampered / invalid token refuses with AccessDenied
+        let tampered_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: false,
+            allow_change_config: false,
+            owner_material: b"tampered-forged-token".to_vec(),
+        };
+        assert!(matches!(
+            verifier.verify(&tampered_req),
+            Err(ScmApiError::AccessDenied)
+        ));
+
+        // 3. Wildcard service name refuses with NameDrift
+        let wildcard_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.*".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: false,
+            allow_change_config: false,
+            owner_material: raw_token.to_vec(),
+        };
+        assert!(matches!(
+            verifier.verify(&wildcard_req),
+            Err(ScmApiError::NameDrift)
+        ));
+
+        // 4. Service name drift refuses with NameDrift
+        let name_drift_req = TrustedOwnerAuthorizationRequest {
+            service_name: "other.service.name".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: false,
+            allow_change_config: false,
+            owner_material: raw_token.to_vec(),
+        };
+        assert!(matches!(
+            verifier.verify(&name_drift_req),
+            Err(ScmApiError::NameDrift)
+        ));
+
+        // 5. Image token mismatch refuses with IdentityMismatch
+        let image_mismatch_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "different-image-token".to_owned(),
+            allow_start: true,
+            allow_stop: false,
+            allow_change_config: false,
+            owner_material: raw_token.to_vec(),
+        };
+        assert!(matches!(
+            verifier.verify(&image_mismatch_req),
+            Err(ScmApiError::IdentityMismatch)
+        ));
+
+        // 6. Excessive permission request (verifier only allows start/stop, request asks for change config)
+        let limited_verifier = TokenValidatingOwnerVerifier::new(
+            raw_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            false,
+        );
+        let excessive_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: raw_token.to_vec(),
+        };
+        assert!(matches!(
+            limited_verifier.verify(&excessive_req),
+            Err(ScmApiError::AccessDenied)
+        ));
+    }
+
+    #[test]
+    fn trusted_live_gate_defense_in_depth_windows_backend_stays_inert() {
+        let raw_token = b"secret-owner-authorization-token-2026";
+        let verifier = TokenValidatingOwnerVerifier::new(
+            raw_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            true,
+        );
+        let request = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: raw_token.to_vec(),
+        };
+        let gate =
+            LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();
+        assert!(gate.is_trusted_live());
+
+        let backend = WindowsScmBackend::mutation_inert();
+        assert!(matches!(
+            backend.start("fixture.scm.a"),
+            Err(ScmApiError::GateClosed)
+        ));
+        assert!(matches!(
+            backend.stop("fixture.scm.a"),
+            Err(ScmApiError::GateClosed)
+        ));
+        assert!(matches!(
+            backend.change_start_mode("fixture.scm.a", ServiceStartMode::Manual),
+            Err(ScmApiError::GateClosed)
+        ));
+
+        let gated_backend = GatedWindowsScmBackend;
+        assert!(matches!(
+            gated_backend.start("fixture.scm.a"),
+            Err(ScmApiError::GateClosed)
+        ));
+        assert!(matches!(
+            gated_backend.stop("fixture.scm.a"),
+            Err(ScmApiError::GateClosed)
+        ));
+        assert!(matches!(
+            gated_backend.change_start_mode("fixture.scm.a", ServiceStartMode::Manual),
+            Err(ScmApiError::GateClosed)
+        ));
+    }
+
+    #[test]
+    fn trusted_live_gate_controls_mock_backend_on_exact_identity() {
+        let raw_token = b"secret-owner-authorization-token-2026";
+        let verifier = TokenValidatingOwnerVerifier::new(
+            raw_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            false,
+        );
+        let request = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: false,
+            owner_material: raw_token.to_vec(),
+        };
+        let gate =
+            LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();
+        assert!(gate.is_trusted_live());
+
+        let mock = MockScmBackend::new();
+        mock.insert(fixture_listening());
+        let exec = executor(mock.clone(), gate);
+        let prestate = exec.capture_prestate(false, true).unwrap();
+        let receipt = exec.advance(
+            DesiredServiceLifecycle::DrainThenStop,
+            true,
+            false,
+            true,
+            &prestate,
+        );
+        assert_eq!(receipt.stage, ScmTransactionStage::StopReadback);
+        assert_eq!(receipt.achieved, AchievedServiceControl::Stopped);
+        assert_eq!(mock.stop_calls(), 1);
     }
 
     #[test]

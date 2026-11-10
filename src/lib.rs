@@ -233,7 +233,8 @@ pub use windows_scm_executor::{
     PrivilegedScmRequest, ScmApiError, ScmControlBackend, ScmControlExecutor, ScmExactSnapshot,
     ScmTransactionJournal, ScmTransactionReceipt, ScmTransactionStage, SyntheticScmTestGrant,
     TrustedOwnerAuthorizationRequest, TrustedOwnerAuthorizationVerifier,
-    UnissuedOwnerAuthorizationVerifier, WindowsScmBackend, SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
+    TokenValidatingOwnerVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
+    SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{

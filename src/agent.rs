@@ -1206,6 +1206,364 @@ mod tests {
     }
 
     #[test]
+    fn agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution() {
+        use crate::{
+            DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
+            DiscoveredServiceBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryReport,
+            FileRegistryStore, OpaqueIdentityReference, PerRunnerAchieved, PerRunnerDesired,
+            PerRunnerObservation, PerRunnerPlan, RegistrationScope, RunnerBackendKind,
+            WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+        };
+
+        let root = temporary_root();
+        let registry_path = root.join("runners-registry.json");
+        let identity = OpaqueIdentityReference::new(
+            WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+
+        let make_candidate = |key: &str, repo: &str, id: u64, same_scope: bool| DiscoveredRunner {
+            local_discovery_key: key.to_owned(),
+            disposition: DiscoveryDisposition::ObservedOnly,
+            refusal: None,
+            backend: RunnerBackendKind::UserSession,
+            identity: DiscoveredRunnerIdentity {
+                registration_scope: Some(RegistrationScope::Repository {
+                    owner: "fixture-owner".to_owned(),
+                    repository: repo.to_owned(),
+                }),
+                runner_id: Some(id),
+                expected_runner_name: Some(format!("fixture-{id}")),
+                runner_home: root.join(key),
+                work_root: Some(root.join(key).join("_work")),
+                execution_identity_ref: Some(identity.clone()),
+            },
+            service: None as Option<DiscoveredServiceBinding>,
+            session: None,
+            capabilities: DiscoveryCapabilities {
+                service_control_contract: false,
+                user_session_control_contract: true,
+                enrollment_eligible: true,
+            },
+            same_scope_collision: same_scope,
+            observed_lifecycle: DiscoveredLifecycle::Stopped,
+        };
+
+        // 1. Initialize AgentCore with persistent file store
+        let store = MemoryConfigStore::default();
+        let mut core = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation(); 16]),
+            RecordingReconciler::default(),
+            store,
+            build(),
+            Box::new(FileRegistryStore::new(&registry_path)),
+        )
+        .unwrap();
+
+        // 2. Discover two distinct runners across different scopes (repo-a and repo-b)
+        // plus runner-c sharing repo-b (colliding under ADR 0004).
+        core.set_runner_discovery(DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![
+                make_candidate("runner-a", "repo-a", 101, false),
+                make_candidate("runner-b", "repo-b", 102, false),
+                make_candidate("runner-c", "repo-b", 103, true),
+            ],
+        });
+
+        // 3. Enroll runner-a and runner-b via regular Agent command entrypoint
+        for key in ["runner-a", "runner-b"] {
+            let resp = core
+                .handle_command(AgentCommand::RunnersEnroll {
+                    local_runner_key: key.to_owned(),
+                    prepare_only: false,
+                })
+                .unwrap();
+            assert!(matches!(resp, AgentResponse::Runners(_)));
+        }
+
+        // Verify initial intent via regular Agent entrypoint: both enabled
+        let status1 = core
+            .handle_command(AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            })
+            .unwrap();
+        let AgentResponse::Runners(report1) = status1 else {
+            panic!("expected runners report");
+        };
+        let view_a1 = report1
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "runner-a")
+            .unwrap();
+        let view_b1 = report1
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "runner-b")
+            .unwrap();
+        assert!(view_a1.desired_enabled);
+        assert!(view_b1.desired_enabled);
+
+        // Set baseline user mode to Idle via regular Agent command entrypoint
+        core.handle_command(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        })
+        .unwrap();
+
+        // 4. Initial multi-runner reconciliation: both listening and idle -> Full capacity
+        let obs_both_listening = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep1 = core.reconcile_runners(&obs_both_listening);
+        assert_eq!(rep1.results.len(), 2);
+        assert_eq!(rep1.results[0].desired, PerRunnerDesired::Full);
+        assert_eq!(rep1.results[0].achieved, PerRunnerAchieved::Full);
+        assert_eq!(rep1.results[1].desired, PerRunnerDesired::Full);
+        assert_eq!(rep1.results[1].achieved, PerRunnerAchieved::Full);
+
+        // 5. Disable runner-a via regular Agent command entrypoint
+        let disable_resp = core
+            .handle_command(AgentCommand::RunnersDisable {
+                local_runner_key: "runner-a".to_owned(),
+                when_idle: true,
+                prepare_only: false,
+            })
+            .unwrap();
+        let AgentResponse::Runners(disable_report) = disable_resp else {
+            panic!("expected runners report on disable");
+        };
+        assert!(disable_report.applied);
+
+        // 6. Verify Intent Independence: runner-a is Disabled, runner-b remains Enabled!
+        let status2 = core
+            .handle_command(AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            })
+            .unwrap();
+        let AgentResponse::Runners(report2) = status2 else {
+            panic!("expected runners report");
+        };
+        let view_a2 = report2
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "runner-a")
+            .unwrap();
+        let view_b2 = report2
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "runner-b")
+            .unwrap();
+        assert!(!view_a2.desired_enabled, "runner-a must be disabled");
+        assert!(
+            view_b2.desired_enabled,
+            "runner-b intent must remain enabled and unaffected"
+        );
+
+        // 7. Verify Execution Independence:
+        // Runner A is draining/withdrawing selector, while Runner B is actively executing a CI job!
+        let obs_a_draining_b_busy = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Busy,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep2 = core.reconcile_runners(&obs_a_draining_b_busy);
+        let res_a2 = rep2
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-a")
+            .unwrap();
+        let res_b2 = rep2
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-b")
+            .unwrap();
+        // Runner A plans selector withdrawal:
+        assert_eq!(res_a2.desired, PerRunnerDesired::Drained);
+        assert_eq!(res_a2.plan, PerRunnerPlan::WithdrawSelector);
+        // Runner B remains desired Full; active worker execution continues (plan is Noop, never interrupted):
+        assert_eq!(res_b2.desired, PerRunnerDesired::Full);
+        assert_eq!(res_b2.plan, PerRunnerPlan::Noop);
+        assert_eq!(res_b2.achieved, PerRunnerAchieved::Full);
+
+        // 8. Runner A finishes withdrawal & stops; Runner B completes CI job & returns to Listening:
+        let obs_a_stopped_b_completed = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Stopped,
+                worker_present: false,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep3 = core.reconcile_runners(&obs_a_stopped_b_completed);
+        let res_a3 = rep3
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-a")
+            .unwrap();
+        let res_b3 = rep3
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-b")
+            .unwrap();
+        assert_eq!(res_a3.desired, PerRunnerDesired::Drained);
+        assert_eq!(res_a3.achieved, PerRunnerAchieved::Drained);
+        assert_eq!(res_a3.plan, PerRunnerPlan::Noop);
+        // Runner B is Full and completely unimpeded:
+        assert_eq!(res_b3.desired, PerRunnerDesired::Full);
+        assert_eq!(res_b3.achieved, PerRunnerAchieved::Full);
+        assert_eq!(res_b3.plan, PerRunnerPlan::Noop);
+
+        // 9. Simulate Agent Restart: construct fresh AgentCore from disk store
+        drop(core);
+        let store2 = MemoryConfigStore::default();
+        let mut reloaded = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation(); 16]),
+            RecordingReconciler::default(),
+            store2,
+            build(),
+            Box::new(FileRegistryStore::new(&registry_path)),
+        )
+        .unwrap();
+
+        let status_reloaded = reloaded
+            .handle_command(AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            })
+            .unwrap();
+        let AgentResponse::Runners(report_reloaded) = status_reloaded else {
+            panic!("expected runners report");
+        };
+        let view_a_rel = report_reloaded
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "runner-a")
+            .unwrap();
+        let view_b_rel = report_reloaded
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "runner-b")
+            .unwrap();
+        assert!(!view_a_rel.desired_enabled, "runner-a remains disabled");
+        assert!(view_b_rel.desired_enabled, "runner-b remains enabled");
+
+        // 10. Ineligible candidate is rejected fail-closed at regular Agent entrypoint
+        let mut ineligible_candidate = make_candidate("runner-ineligible", "repo-b", 103, true);
+        ineligible_candidate.capabilities.enrollment_eligible = false;
+        reloaded.set_runner_discovery(DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![ineligible_candidate],
+        });
+        let ineligible_resp = reloaded
+            .handle_command(AgentCommand::RunnersEnroll {
+                local_runner_key: "runner-ineligible".to_owned(),
+                prepare_only: false,
+            })
+            .unwrap();
+        assert_eq!(
+            ineligible_resp,
+            AgentResponse::Rejected {
+                reason_code: super::static_reason("runners-not-enrollment-eligible")
+            }
+        );
+
+        // 11. ADR 0004 same-scope managed collision guard during multi-runner reconciliation
+        let obs_collision = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Stopped,
+                worker_present: false,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: true, // collision detected!
+            },
+        ];
+        let rep_coll = reloaded.reconcile_runners(&obs_collision);
+        let res_coll = rep_coll
+            .results
+            .iter()
+            .find(|r| r.local_runner_key == "runner-b")
+            .unwrap();
+        assert_eq!(res_coll.desired, PerRunnerDesired::Drained);
+        assert_eq!(res_coll.plan, PerRunnerPlan::WithdrawSelector);
+        assert_eq!(res_coll.achieved, PerRunnerAchieved::Transitional);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn agent_core_single_authority_reconciles_multi_runners_with_complete_precedence_matrix() {
         use crate::{
             DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
