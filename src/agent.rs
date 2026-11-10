@@ -14,12 +14,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     decide_admission, handle_runners_command, AdmissionControlSnapshot, AdmissionDecision,
     AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
-    DesiredAdmissionState, DiscoveryReport, DoctorCheck, DoctorReport, DoctorStatus,
-    ExecutionIdentityEvidence, GlobalPolicyInputs, HardSafetyState, LinkKind, LinkSnapshot,
-    LinkState, MemoryRegistryStore, MultiRunnerReconcileReport, OwnershipEvidence,
-    PerRunnerObservation, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RegistryError,
-    RegistryStore, RunnerPhase, RunnerRegistry, RunnerRegistryEditor, SystemPreferences,
-    UiPreferences, UserMode, ZenOverride,
+    DesiredAdmissionState, DiscoveredLifecycle, DiscoveryReport, DoctorCheck, DoctorReport,
+    DoctorStatus, ExecutionIdentityEvidence, GlobalPolicyInputs, HardSafetyState, LinkKind,
+    LinkSnapshot, LinkState, MemoryRegistryStore, MultiRunnerReconcileReport, OwnershipEvidence,
+    PerRunnerDesired, PerRunnerObservation, PrivilegedScmAction, PrivilegedScmHelper,
+    PrivilegedScmReport, PrivilegedScmRequest, ProbeId, ProbeRuntimeState, ProbeSnapshot,
+    ReasonCode, RegistryBackendBinding, RegistryError, RegistryStore, RunnerPhase, RunnerRegistry,
+    RunnerRegistryEditor, ScmControlBackend, SystemPreferences, UiPreferences, UserMode,
+    ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -339,6 +341,74 @@ where
             probes: self.effective_probes(),
         };
         crate::reconcile_multi_runners(self.runner_registry.registry(), &globals, observations)
+    }
+
+    /// Reconciles all enrolled runners and dispatches necessary SCM actions via the privileged helper.
+    ///
+    /// Multi-runner isolation invariant:
+    /// Disabling Runner A dispatches control actions strictly for Runner A's bound service,
+    /// while leaving Runner B's service completely untouched with zero dispatched actions.
+    pub fn reconcile_and_dispatch_runners<B: ScmControlBackend>(
+        &self,
+        observations: &[PerRunnerObservation],
+        helper: &PrivilegedScmHelper<B>,
+        transaction_id: &str,
+    ) -> Vec<PrivilegedScmReport> {
+        let reconcile_report = self.reconcile_runners(observations);
+        let mut reports = Vec::new();
+
+        for result in &reconcile_report.results {
+            let Some(record) = self
+                .runner_registry
+                .registry()
+                .get(&result.local_runner_key)
+            else {
+                continue;
+            };
+
+            let service_name = match &record.backend {
+                RegistryBackendBinding::WindowsService { service_name } => service_name.clone(),
+                RegistryBackendBinding::UserSession => continue,
+            };
+
+            let is_busy = result.observed_lifecycle == DiscoveredLifecycle::Busy
+                || observations
+                    .iter()
+                    .find(|o| o.local_runner_key == result.local_runner_key)
+                    .map(|o| o.worker_present)
+                    .unwrap_or(false);
+
+            let action = if (!record.desired_enabled || result.desired == PerRunnerDesired::Offline)
+                && result.observed_lifecycle != DiscoveredLifecycle::Stopped
+                && !is_busy
+            {
+                Some(PrivilegedScmAction::StopService)
+            } else if record.desired_enabled
+                && result.desired == PerRunnerDesired::Full
+                && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+            {
+                Some(PrivilegedScmAction::StartService)
+            } else {
+                None
+            };
+
+            if let Some(action) = action {
+                let expected_image_token =
+                    crate::opaque_image_token(&record.runner_home.to_string_lossy());
+                let expected_execution_identity_token = record.execution_identity_ref.key.clone();
+
+                let request = PrivilegedScmRequest {
+                    action,
+                    service_name,
+                    expected_image_token,
+                    expected_execution_identity_token,
+                    transaction_id: transaction_id.to_string(),
+                };
+                reports.push(helper.dispatch(&request));
+            }
+        }
+
+        reports
     }
 
     /// Migrates the optional v0.1 single binding into the registry and persists.
@@ -1847,6 +1917,264 @@ mod tests {
         );
 
         assert!(matches!(result, Err(AgentCoreError::Registry(_))));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_cycle_multi_runner_disable_a_leaves_b_zero_control_actions() {
+        use crate::{
+            opaque_image_token, DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity,
+            DiscoveredServiceBinding, DiscoveryCapabilities, DiscoveryDisposition, DiscoveryReport,
+            LiveScmExecutionGate, MockScmBackend, MockServiceRecord, OpaqueIdentityReference,
+            PerRunnerObservation, PrivilegedScmHelper, RegistrationScope, RunnerBackendKind,
+            ScmApiError, ServiceObservation, ServiceStartMode, SyntheticScmTestGrant,
+            WindowsScmBackend, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+        };
+
+        let root = temporary_root();
+        let home_a = root.join("runner-a");
+        let home_b = root.join("runner-b");
+        fs::create_dir_all(&home_a).unwrap();
+        fs::create_dir_all(&home_b).unwrap();
+
+        let identity = OpaqueIdentityReference::new(
+            WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .unwrap();
+
+        let mut core = AgentCore::new(
+            QueueObserver::new(vec![healthy_observation(); 16]),
+            RecordingReconciler::default(),
+            MemoryConfigStore::default(),
+            build(),
+        )
+        .unwrap();
+
+        // 1. Discover Runner A and Runner B as Windows services
+        core.set_runner_discovery(DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![
+                DiscoveredRunner {
+                    local_discovery_key: "runner-a".to_owned(),
+                    disposition: DiscoveryDisposition::ObservedOnly,
+                    refusal: None,
+                    backend: RunnerBackendKind::WindowsService,
+                    identity: DiscoveredRunnerIdentity {
+                        registration_scope: Some(RegistrationScope::Repository {
+                            owner: "fixture-org".to_owned(),
+                            repository: "repo-a".to_owned(),
+                        }),
+                        runner_id: Some(101),
+                        expected_runner_name: Some("runner-a".to_owned()),
+                        runner_home: home_a.clone(),
+                        work_root: Some(home_a.join("_work")),
+                        execution_identity_ref: Some(identity.clone()),
+                    },
+                    service: Some(DiscoveredServiceBinding {
+                        service_name: "actions.runner.a".to_owned(),
+                        display_name: Some("Runner A Service".to_owned()),
+                        image_path: Some(home_a.join("bin").join("RunnerService.exe")),
+                        state: DiscoveredLifecycle::Listening,
+                    }),
+                    session: None,
+                    capabilities: DiscoveryCapabilities {
+                        service_control_contract: true,
+                        user_session_control_contract: false,
+                        enrollment_eligible: true,
+                    },
+                    same_scope_collision: false,
+                    observed_lifecycle: DiscoveredLifecycle::Listening,
+                },
+                DiscoveredRunner {
+                    local_discovery_key: "runner-b".to_owned(),
+                    disposition: DiscoveryDisposition::ObservedOnly,
+                    refusal: None,
+                    backend: RunnerBackendKind::WindowsService,
+                    identity: DiscoveredRunnerIdentity {
+                        registration_scope: Some(RegistrationScope::Repository {
+                            owner: "fixture-org".to_owned(),
+                            repository: "repo-b".to_owned(),
+                        }),
+                        runner_id: Some(102),
+                        expected_runner_name: Some("runner-b".to_owned()),
+                        runner_home: home_b.clone(),
+                        work_root: Some(home_b.join("_work")),
+                        execution_identity_ref: Some(identity.clone()),
+                    },
+                    service: Some(DiscoveredServiceBinding {
+                        service_name: "actions.runner.b".to_owned(),
+                        display_name: Some("Runner B Service".to_owned()),
+                        image_path: Some(home_b.join("bin").join("RunnerService.exe")),
+                        state: DiscoveredLifecycle::Listening,
+                    }),
+                    session: None,
+                    capabilities: DiscoveryCapabilities {
+                        service_control_contract: true,
+                        user_session_control_contract: false,
+                        enrollment_eligible: true,
+                    },
+                    same_scope_collision: false,
+                    observed_lifecycle: DiscoveredLifecycle::Listening,
+                },
+            ],
+        });
+
+        // 2. Enroll both runners via regular Agent command entrypoint
+        for key in ["runner-a", "runner-b"] {
+            core.handle_command(AgentCommand::RunnersEnroll {
+                local_runner_key: key.to_owned(),
+                prepare_only: false,
+            })
+            .unwrap();
+        }
+
+        // Set baseline user mode to Idle via regular Agent command entrypoint
+        core.handle_command(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        })
+        .unwrap();
+
+        // 3. Set up mock SCM backend with initial state for both runners
+        let image_token_a = opaque_image_token(&home_a.to_string_lossy());
+        let image_token_b = opaque_image_token(&home_b.to_string_lossy());
+
+        let mock_scm = MockScmBackend::new();
+        mock_scm.insert(MockServiceRecord {
+            observation: ServiceObservation {
+                service_name: "actions.runner.a".to_owned(),
+                state: DiscoveredLifecycle::Listening,
+                start_mode: ServiceStartMode::Manual,
+                image_path_matches: true,
+                ownership_verified: true,
+            },
+            worker_busy: false,
+            image_token: image_token_a.clone(),
+            execution_identity_token: identity.key.clone(),
+        });
+        mock_scm.insert(MockServiceRecord {
+            observation: ServiceObservation {
+                service_name: "actions.runner.b".to_owned(),
+                state: DiscoveredLifecycle::Listening,
+                start_mode: ServiceStartMode::Manual,
+                image_path_matches: true,
+                ownership_verified: true,
+            },
+            worker_busy: true, // Runner B is actively executing a CI job
+            image_token: image_token_b.clone(),
+            execution_identity_token: identity.key.clone(),
+        });
+
+        // Synthetic gate authorized for actions.runner.a Stop
+        let gate_a = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+            "actions.runner.a",
+            &image_token_a,
+            false,
+            true,
+            false,
+        ))
+        .unwrap();
+        let helper_a = PrivilegedScmHelper::new(mock_scm.clone(), gate_a);
+
+        // 4. Initial cycle: both runners are enabled.
+        // Runner A: Listening, Runner B: Listening & Busy with job
+        let obs_cycle1 = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+
+        // Before any disable, dispatch produces ZERO actions (both enabled and running)
+        let reports1 = core.reconcile_and_dispatch_runners(&obs_cycle1, &helper_a, "tx-cycle-1");
+        assert!(reports1.is_empty());
+        assert_eq!(mock_scm.stop_calls(), 0);
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
+        assert!(mock_scm.service_actions("actions.runner.a").is_empty());
+        assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+        // 5. Disable Runner A via regular AgentCommand entrypoint
+        let disable_resp = core
+            .handle_command(AgentCommand::RunnersDisable {
+                local_runner_key: "runner-a".to_owned(),
+                when_idle: true,
+                prepare_only: false,
+            })
+            .unwrap();
+        assert!(matches!(disable_resp, AgentResponse::Runners(_)));
+
+        // Verify Runner A is disabled, Runner B remains enabled
+        assert!(
+            !core
+                .runner_registry()
+                .get("runner-a")
+                .unwrap()
+                .desired_enabled
+        );
+        assert!(
+            core.runner_registry()
+                .get("runner-b")
+                .unwrap()
+                .desired_enabled
+        );
+
+        // 6. Regular Agent cycle with Runner A disabled and Runner B busy
+        let reports2 = core.reconcile_and_dispatch_runners(&obs_cycle1, &helper_a, "tx-disable-a");
+
+        // Exactly one SCM action dispatched: for Runner A
+        assert_eq!(reports2.len(), 1);
+        assert_eq!(reports2[0].service_name, "actions.runner.a");
+        assert!(reports2[0].applied);
+        assert_eq!(reports2[0].achieved_state, DiscoveredLifecycle::Stopped);
+
+        // Runner A service was stopped
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 1);
+        assert_eq!(
+            mock_scm.service_actions("actions.runner.a"),
+            vec!["stop".to_string()]
+        );
+
+        // CRUCIAL ISOLATION PROOF: Runner B received ZERO control actions
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
+        assert_eq!(mock_scm.service_start_calls("actions.runner.b"), 0);
+        assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+        // 7. Defense-in-depth: Live Windows SCM backend unconditionally refuses mutation (GateClosed)
+        let inert_helper = PrivilegedScmHelper::new(
+            WindowsScmBackend::mutation_inert(),
+            LiveScmExecutionGate::CLOSED,
+        );
+        let reports_inert =
+            core.reconcile_and_dispatch_runners(&obs_cycle1, &inert_helper, "tx-inert");
+        assert_eq!(reports_inert.len(), 1);
+        assert!(!reports_inert[0].applied);
+        assert_eq!(
+            reports_inert[0].refusal_reason.as_deref(),
+            Some(ScmApiError::GateClosed.as_str())
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 }
