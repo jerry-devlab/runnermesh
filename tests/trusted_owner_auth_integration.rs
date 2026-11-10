@@ -261,3 +261,78 @@ fn defense_in_depth_trusted_live_gate_leaves_windows_backend_sealed() {
         Err(ScmApiError::GateClosed)
     ));
 }
+
+#[test]
+fn external_caller_with_raw_token_via_new_is_refused() {
+    let raw_token = b"caller-arbitrary-raw-token";
+    let scope = test_scope();
+    let verifier = TokenValidatingOwnerVerifier::new(raw_token, scope.clone());
+
+    let request = TrustedOwnerAuthorizationRequest {
+        service_name: scope.service_name,
+        image_token: scope.image_token,
+        execution_identity_token: scope.execution_identity_token,
+        target_host_token: scope.target_host_token,
+        candidate_commit: scope.candidate_commit,
+        transaction_id: scope.transaction_id,
+        allow_start: scope.allow_start,
+        allow_stop: scope.allow_stop,
+        allow_change_config: scope.allow_change_config,
+        not_before_epoch_seconds: 0,
+        expires_at_epoch_seconds: u64::MAX,
+        nonce: "raw-token-nonce".to_string(),
+        owner_material: raw_token.to_vec(),
+    };
+
+    let result = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request);
+    assert!(matches!(result, Err(ScmApiError::AuthorizationNotIssued)));
+}
+
+#[test]
+fn concurrent_race_with_same_voucher_permits_exactly_one_success() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let authority_secret = b"owner-root-secret-concurrent-race-test";
+    let scope = test_scope();
+    let issuer = OwnerAuthorizationIssuer::new(authority_secret.to_vec());
+    let verifier = Arc::new(TokenValidatingOwnerVerifier::from_authority(
+        authority_secret.to_vec(),
+        scope.clone(),
+    ));
+
+    let (request, _) = issuer.issue_for_scope(&scope, 3600, "concurrent-race-single-use-nonce");
+    let request = Arc::new(request);
+
+    let thread_count = 8;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let mut handles = Vec::new();
+
+    for _ in 0..thread_count {
+        let v = Arc::clone(&verifier);
+        let req = Arc::clone(&request);
+        let b = Arc::clone(&barrier);
+
+        handles.push(thread::spawn(move || {
+            b.wait();
+            LiveScmExecutionGate::from_trusted_owner_authorization(&*v, &req)
+        }));
+    }
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let successes = results.iter().filter(|r| r.is_ok()).count();
+    let denials = results
+        .iter()
+        .filter(|r| matches!(r, Err(ScmApiError::AccessDenied)))
+        .count();
+
+    assert_eq!(
+        successes, 1,
+        "Atomic consumption ledger must allow EXACTLY ONE success across concurrent races"
+    );
+    assert_eq!(
+        denials,
+        thread_count - 1,
+        "All other concurrent attempts must be rejected with AccessDenied"
+    );
+}

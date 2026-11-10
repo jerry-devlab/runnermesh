@@ -30,9 +30,9 @@ use crate::{
     DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
     ExecutionIdentityEvidence, FileConfigStore, HardSafetyState, HostSnapshot, HostSource,
     Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    LocalAgentTransport, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
-    ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph, TrayMenuEntry,
-    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
+    LocalAgentTransport, MultiRunnerLifecycleBackend, NativeTrayEventLoop, OfficialRunnerObserver,
+    OwnershipEvidence, ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph,
+    TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
     WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
 };
@@ -81,7 +81,7 @@ impl RuntimeReadiness {
     }
 }
 
-enum RuntimeReconciler {
+pub enum RuntimeReconciler {
     Unconfigured(NoRunnerControl),
     Configured(Box<AdmissionAgentReconciler<WindowsGithubAdmissionBackend>>),
 }
@@ -99,7 +99,7 @@ impl AgentReconciler for RuntimeReconciler {
     }
 }
 
-type RuntimeCore = AgentCore<RuntimeObserver, RuntimeReconciler, FileConfigStore>;
+pub type RuntimeCore = AgentCore<RuntimeObserver, RuntimeReconciler, FileConfigStore>;
 
 /// Starts the development-only Agent. `development_root` must be a caller-owned
 /// sandbox path; no default is intentionally provided.
@@ -184,6 +184,37 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     )
 }
 
+/// Common assembly entry point for installed AgentCore.
+///
+/// Attaches config store, file registry store, build provenance, read-only runner discovery,
+/// and the multi-runner lifecycle backend (when configured).
+pub fn assemble_installed_core(
+    config_path: PathBuf,
+    observer: RuntimeObserver,
+    reconciler: RuntimeReconciler,
+    multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+) -> Result<RuntimeCore, String> {
+    let store = FileConfigStore::new(config_path.clone());
+    let registry_path = config_path
+        .parent()
+        .map(|parent| parent.join("runners-registry.json"))
+        .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
+    let mut core = AgentCore::with_registry_store(
+        observer,
+        reconciler,
+        store,
+        build_provenance(),
+        Box::new(crate::FileRegistryStore::new(registry_path)),
+    )
+    .map_err(|error| error.to_string())?;
+    // Best-effort read-only host discovery at startup (never mutates Services).
+    core.set_runner_discovery(crate::discover_local_runners_read_only(Vec::new()));
+    if let Some(backend) = multi_runner_backend {
+        core.set_multi_runner_backend(backend);
+    }
+    Ok(core)
+}
+
 fn run_agent(
     config_path: PathBuf,
     runtime_state_root: PathBuf,
@@ -196,27 +227,13 @@ fn run_agent(
     // remote admission selector.
     let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
     let server = IpcServer::bind(endpoint).map_err(|error| error.to_string())?;
-    let runner_home = observer.runner_home.as_deref();
+    let runner_home = observer.runner_home.as_deref().map(Path::to_path_buf);
     let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
-    let store = FileConfigStore::new(config_path.clone());
-    let registry_path = config_path
-        .parent()
-        .map(|parent| parent.join("runners-registry.json"))
-        .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
     let readiness = Arc::new(RuntimeReadiness::from_runner_home(
-        runner_home,
+        runner_home.as_deref(),
         runner_control_configured,
     ));
-    let mut core = AgentCore::with_registry_store(
-        observer,
-        reconciler,
-        store,
-        build_provenance(),
-        Box::new(crate::FileRegistryStore::new(registry_path)),
-    )
-    .map_err(|error| error.to_string())?;
-    // Best-effort read-only host discovery at startup (never mutates Services).
-    core.set_runner_discovery(crate::discover_local_runners_read_only(Vec::new()));
+    let mut core = assemble_installed_core(config_path, observer, reconciler, None)?;
     let initial_snapshot = core
         .observe_decide_reconcile()
         .map_err(|error| error.to_string())?;
@@ -923,17 +940,17 @@ fn pump_windows_messages() {
     }
 }
 
-struct RuntimeObserver {
-    host: WindowsHostSource,
-    user_activity: UserActivityProbe<WindowsUserActivitySource>,
-    steam: crate::SteamGameProbe<WindowsSteamAppIdSource>,
-    process_list: ProcessListProbe<WindowsProcessSource>,
-    runner_home: Option<PathBuf>,
-    exact_runner_source: Option<WindowsRunnerSource>,
+pub struct RuntimeObserver {
+    pub(crate) host: WindowsHostSource,
+    pub(crate) user_activity: UserActivityProbe<WindowsUserActivitySource>,
+    pub(crate) steam: crate::SteamGameProbe<WindowsSteamAppIdSource>,
+    pub(crate) process_list: ProcessListProbe<WindowsProcessSource>,
+    pub(crate) runner_home: Option<PathBuf>,
+    pub(crate) exact_runner_source: Option<WindowsRunnerSource>,
 }
 
 impl RuntimeObserver {
-    fn new(runner_home: Option<PathBuf>, process_probe_names: Vec<String>) -> Self {
+    pub fn new(runner_home: Option<PathBuf>, process_probe_names: Vec<String>) -> Self {
         Self {
             host: WindowsHostSource::default(),
             user_activity: UserActivityProbe::new(WindowsUserActivitySource, 300),
@@ -1023,7 +1040,14 @@ fn hard_safety_from_host(host: &HostSnapshot) -> HardSafetyState {
     }
 }
 
-struct NoRunnerControl;
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoRunnerControl;
+
+impl NoRunnerControl {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 impl AgentReconciler for NoRunnerControl {
     fn reconcile(

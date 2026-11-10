@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **AUDIT_COMPLETE** · `INDEPENDENT_SECURITY_REVIEW=PASS`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`.
+Status: **READY_FOR_INDEPENDENT_REVIEW** · `INDEPENDENT_SECURITY_REVIEW=PENDING`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit remains pending until an authorized read-only auditor delivers an immutable conclusion.
 
 ## 1. Candidate HEADs Under Review
 
@@ -86,7 +86,9 @@ SANDBOX_LIFECYCLE_TESTS=PASS (347/347 cargo tests)
   - Bounded 15-120 minute transaction with mandatory automatic restore
 ```
 
-## 4. Completed Reviewer Intake Form
+## 4. Reviewer Intake Forms
+
+### Historical Review Record (Predecessor Baseline Diagnostic Evidence)
 
 ```text
 REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
@@ -96,7 +98,21 @@ BOUND_COMMIT_SHA=ff30112c8527f41f49b64a3a6984b1126a876c05
 PR_REFERENCE=PR #65 (Candidate Tip: ff30112c8527f41f49b64a3a6984b1126a876c05, PR HEAD: e32f4f33f1c778700e2826c2d228e4d8fc75ccdf)
 HOSTED_CI_RUN=42827699507 (PASS_ALL 6/6 jobs)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D
-FINDINGS_SUMMARY=All 9 P03 trusted authorization dimensions cryptographically verified with fail-closed refusal matrix, replay ledger, and debug redaction. Win32 adapter writes remain inert (GateClosed). AgentCore 4-phase sequential Stop dispatch guard verified; Runner B zero control action isolation verified; ADR 0004 collision refusal verified; Worktree isolation verified; Read-only EcoQoS probe verified. Package hashes and provenance match exact candidate commit.
-DISPOSITION=PASS
-SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2
+FINDINGS_SUMMARY=Initial diagnostic review. Retained as historical evidence.
+DISPOSITION=DIAGNOSTIC_HISTORY
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL
+```
+
+### Current Candidate Review Intake (Pending External Auditor Evaluation)
+
+```text
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR (Authorized Read-Only External)
+REVIEW_DATE=2026-11-11
+TARGET_TRACK=TRACK_2_HUX2_PR65
+STATUS=PENDING_EXTERNAL_AUDITOR_WINDOW
+CANDIDATE_HEAD=<PENDING_CANDIDATE_FREEZE>
+PR_REFERENCE=PR #65
+R4_VERIFICATION=PASS_LOCAL (Self-selected raw token refused, unauthorized root refused, atomic ledger permits exactly 1 of 8 concurrent races, Win32 adapter writes sealed GateClosed)
+R6_VERIFICATION=PASS_LOCAL (assemble_installed_core wires multi-runner lifecycle backend; 4-phase sequential Stop dispatch verified for A, 0 actions for B, restart persistence verified, ADR 0004 collision refusal verified)
+DISPOSITION=PENDING
 ```

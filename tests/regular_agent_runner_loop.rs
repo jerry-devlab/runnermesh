@@ -12,59 +12,16 @@
 //! - Manual intent durability across restart/reloading from storage.
 //! - Same-scope dual managed admission collision refusal (ADR 0004).
 
-use std::{cell::RefCell, fs, sync::Arc};
+use std::{fs, sync::Arc};
 
 use runnermesh::{
-    runner_service_image_token, AdmissionControlSnapshot, AdmissionDecision, AgentCommand,
-    AgentConfig, AgentCore, AgentObservation, AgentObserver, AgentReconciler, AgentResponse,
-    BuildProvenance, ConfigStore, ConfigStoreError, DesiredAdmissionState, DiscoveredLifecycle,
-    DiscoveredRunner, DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
+    runner_service_image_token, AgentCommand, AgentResponse, DiscoveredLifecycle, DiscoveredRunner,
+    DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
     DiscoveryDisposition, DiscoveryReport, LiveScmExecutionGate, MockScmBackend, MockServiceRecord,
     OpaqueIdentityReference, PerRunnerObservation, PrivilegedScmHelper, RegistrationScope,
     RegistryError, RunnerBackendKind, SandboxMultiRunnerLifecycleBackend, ServiceObservation,
     ServiceStartMode, SyntheticScmTestGrant, UserMode, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
-
-struct TestObserver;
-impl AgentObserver for TestObserver {
-    fn observe(&mut self) -> Result<AgentObservation, String> {
-        Ok(AgentObservation::unobserved())
-    }
-}
-
-struct TestReconciler;
-impl AgentReconciler for TestReconciler {
-    fn reconcile(
-        &mut self,
-        _decision: &AdmissionDecision,
-        _observation: &AgentObservation,
-    ) -> Result<AdmissionControlSnapshot, String> {
-        Ok(AdmissionControlSnapshot::not_configured(
-            DesiredAdmissionState::Drained,
-        ))
-    }
-}
-
-#[derive(Default)]
-struct MemoryStore(RefCell<Option<AgentConfig>>);
-impl ConfigStore for MemoryStore {
-    fn load(&self) -> Result<Option<AgentConfig>, ConfigStoreError> {
-        Ok(self.0.borrow().clone())
-    }
-    fn save(&self, config: &AgentConfig) -> Result<(), ConfigStoreError> {
-        *self.0.borrow_mut() = Some(config.clone());
-        Ok(())
-    }
-}
-
-fn build_info() -> BuildProvenance {
-    BuildProvenance {
-        version: "0.1.0".to_string(),
-        commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_string(),
-        channel: "rc".to_string(),
-        target: "x86_64-pc-windows-msvc".to_string(),
-    }
-}
 
 #[test]
 fn regular_agent_loop_drives_multi_runner_stop_guard_and_leaves_b_isolated() {
@@ -131,20 +88,21 @@ fn regular_agent_loop_drives_multi_runner_stop_guard_and_leaves_b_isolated() {
     let lifecycle_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper_a));
 
     // Shared registry file store to test persistence across restart
-    let registry_file = temp_dir.join("runners-registry.json");
-    let registry_store = runnermesh::FileRegistryStore::new(registry_file.clone());
+    let config_path = temp_dir.join("config.json");
+    let observer = runnermesh::agent_runtime::RuntimeObserver::new(None, Vec::new());
+    let reconciler = runnermesh::agent_runtime::RuntimeReconciler::Unconfigured(
+        runnermesh::agent_runtime::NoRunnerControl::new(),
+    );
 
-    let mut core = AgentCore::with_registry_store(
-        TestObserver,
-        TestReconciler,
-        MemoryStore::default(),
-        build_info(),
-        Box::new(registry_store),
+    // Assemble AgentCore using the exact installed assembly path with multi-runner backend
+    let mut core = runnermesh::agent_runtime::assemble_installed_core(
+        config_path.clone(),
+        observer,
+        reconciler,
+        Some(lifecycle_backend.clone()),
     )
     .unwrap();
-
-    // Attach the multi-runner lifecycle backend to the regular AgentCore
-    core.set_multi_runner_backend(lifecycle_backend.clone());
+    assert!(core.multi_runner_backend().is_some());
 
     // 1. Discover runners A and B
     core.set_runner_discovery(DiscoveryReport {
@@ -409,13 +367,15 @@ fn regular_agent_loop_drives_multi_runner_stop_guard_and_leaves_b_isolated() {
     // -------------------------------------------------------------------------
     // 5. Restart durability test: Reload AgentCore from storage
     // -------------------------------------------------------------------------
-    let reloaded_store = runnermesh::FileRegistryStore::new(registry_file);
-    let reloaded_core = AgentCore::with_registry_store(
-        TestObserver,
-        TestReconciler,
-        MemoryStore::default(),
-        build_info(),
-        Box::new(reloaded_store),
+    let observer2 = runnermesh::agent_runtime::RuntimeObserver::new(None, Vec::new());
+    let reconciler2 = runnermesh::agent_runtime::RuntimeReconciler::Unconfigured(
+        runnermesh::agent_runtime::NoRunnerControl::new(),
+    );
+    let reloaded_core = runnermesh::agent_runtime::assemble_installed_core(
+        config_path,
+        observer2,
+        reconciler2,
+        None,
     )
     .unwrap();
 
