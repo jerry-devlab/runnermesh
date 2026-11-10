@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=de52610ec2000a953d10ed4f9d06fa575439f935`<br>`PREDECESSOR_DOCS_PR_HEAD=0234af522f28b2db5bc69b3df9bbab37fb31bf69` | Predecessor Tip: Run 42802351951 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=ee27461f848285f5c06cd69bd6a4f657e5e225a3`<br>`PREDECESSOR_DOCS_PR_HEAD=ca8b8e96bfbc92b34a6bc6b081970fa3240e3aa0` | Predecessor Tip: Run 42802351951 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -20,13 +20,13 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=e387dde14e205c08565102757a95e6587794d97e8aceca6e517f0622cc585bd1
-CANDIDATE_ZIP_BYTES=1152577
+CANDIDATE_ZIP_SHA256=92fb2a3cea07c4169a4d562102e62f34baa8934c096595b628f63cb3394a5ffa
+CANDIDATE_ZIP_BYTES=1152576
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=75c7107133fa2062a1ebab27abc4d1b687be1919a7f5ae2e5d063b12ae1eae01
+CANDIDATE_HELPER_SHA256=8517b1bd2a87a8e7a287f35f827819db655c97b88e3d297cc586242e2b489b57
 CANDIDATE_HELPER_BYTES=1778688
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=de52610ec2000a953d10ed4f9d06fa575439f935
+PROVENANCE_COMMIT=ee27461f848285f5c06cd69bd6a4f657e5e225a3
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
