@@ -7,17 +7,17 @@ authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
-PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
-CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06
-DOCS_PR_HEAD=96794280ff6b772fcd211a89db16a43faf498559
-PACKAGE_BUILD_CI=42743583126 (PASS_ALL 6/6 jobs)
-DOCS_PR_CI=42765331894 (PASS_ALL 6/6 jobs)
-SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (338/338 cargo tests)
+PACKAGE_BUILD_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e
+CODE_ANCHOR=3952b1b83f922701f8d4984585ced02b132c997e
+PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd
+PREDECESSOR_DOCS_PR_CI=42788141367 (PASS_ALL 6/6 jobs)
+SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (343/343 cargo tests)
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
+TRUSTED_AUTH_VERIFIER=VERIFIED      # TokenValidatingOwnerVerifier + refusal paths tested
 INDEPENDENT_REVIEW_PENDING=true
 LIVE_NOT_AUTHORIZED=true
 IMPLEMENTER_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
-TRUSTED_OWNER_AUTH=UNISSUED
+TRUSTED_OWNER_AUTH=UNISSUED         # UnissuedOwnerAuthorizationVerifier default
 ```
 
 ## 1. Exact Service / Runner identity + Owner authorization scope
@@ -136,11 +136,10 @@ SOURCE:
   src/package.rs
 
 CANDIDATE_FREEZE:
-  PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
-  CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06
-  DOCS_PR_HEAD=96794280ff6b772fcd211a89db16a43faf498559
-  PACKAGE_BUILD_CI=42743583126 (PASS_ALL 6/6 jobs)
-  DOCS_PR_CI=42765331894 (PASS_ALL 6/6 jobs)
+  PACKAGE_BUILD_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e
+  CODE_ANCHOR=3952b1b83f922701f8d4984585ced02b132c997e
+  PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd
+  PREDECESSOR_DOCS_PR_CI=42788141367 (PASS_ALL 6/6 jobs)
 
 TESTS (all passing locally and on hosted CI):
   cargo test --lib scm_

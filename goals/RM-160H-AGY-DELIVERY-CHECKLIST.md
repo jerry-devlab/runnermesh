@@ -21,9 +21,9 @@
 | R2 / G15R | 独立审查者结论绑定 G15R 的准确 SHA | `PENDING` |
 | R2 / LRM | 独立审查者结论绑定 LRM 候选及改变的信任边界 | `PENDING` |
 | R3 / H2 | 新 Owner 授权、精确 G15R 哈希、切换与恢复分别记录、至少 24 小时实际普通使用、G17 收尾 | `WAITING_FOR_OWNER` |
-| R4 / HUX-2 | R2、可信执行入口、精确且空闲的一次性 Service、撤回 admission、Stop/Start 独立读回和恢复。已更新 RM-HUX-2-READINESS-PACKAGE.md，沙盒与合成测试全通 | `WAITING_FOR_OWNER` |
+| R4 / HUX-2 | R2、可信执行入口、精确且空闲的一次性 Service、撤回 admission、Stop/Start 独立读回和恢复。已更新 RM-HUX-2-READINESS-PACKAGE.md，验证 TokenValidatingOwnerVerifier、mint_trusted_live 及所有拒绝路径，沙盒与合成测试全通 | `WAITING_FOR_OWNER` |
 | R5 / ADR 0006 | Owner 书面决定，R6 路由符合已接受约束。RM-160H-R5-ADR006-OWNER-BRIEF.md 简报已备 | `DRAFT_NOT_ACCEPTED` |
-| R6 / HUX-3 | R4 通过、真实多 Runner 执行链、兼容路由和授权。A 停用时 B 可完成合法 CI，重启后意图保留。已编制 RM-HUX-3-READINESS-PACKAGE.md，双 Runner 沙盒全通 | `WAITING_FOR_OWNER` |
+| R6 / HUX-3 | R4 通过、真实多 Runner 执行链、兼容路由和授权。A 停用时 B 可完成合法 CI，重启后意图保留。已编制 RM-HUX-3-READINESS-PACKAGE.md，从常规 Agent 入口完成 A 停用 B 意图与执行不受影响及 ADR 0004 拦截验证，测试全通 | `WAITING_FOR_OWNER` |
 | R7 | Owner 接收准确源码和实际目标分支，合并后复核远端与目标 CI | `OPEN_DRAFT` |
 | HUX-4 / R8 | 最终 LRM 字节经批准在指定环境完成安装、Startup、重启、升级、回滚和至少 24 小时普通使用。公开发布另取该轨授权 | `WAITING_FOR_OWNER` |
 

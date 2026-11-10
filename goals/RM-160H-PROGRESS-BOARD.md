@@ -2,11 +2,10 @@
 
 ```text
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
-AS_OF_TIP=96794280ff6b772fcd211a89db16a43faf498559
-AS_OF_CI=42765331894 (PASS_ALL 6/6 jobs)
-PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
-PACKAGE_BUILD_CI=42743583126 (PASS_ALL 6/6 jobs)
-CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06
+PACKAGE_BUILD_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e
+CODE_ANCHOR=3952b1b83f922701f8d4984585ced02b132c997e
+PREDECESSOR_TIP=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd
+PREDECESSOR_CI=42788141367 (PASS_ALL 6/6 jobs)
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 SOURCE_AND_SANDBOX_CLOSEOUT=PASS
 LIVE_DELIVERY=WAITING_FOR_OWNER
@@ -29,9 +28,9 @@ never counts as PASS.
 |---|---|---|---:|---|
 | **P01** | Field baseline / H2–G17–H3 preflight | `READY_FOR_OWNER` | **50%** | Public preflights refreshed; H2/dogfood/H3 await Owner |
 | **P02** | Discovery / enrollment / identity | `PASS_SOURCE` | **100%** | Source+tests on #65 |
-| **P03** | Win32 SCM synthetic / trusted-auth design | `PASS_SOURCE` | **100%** | Live SCM still Owner-gated |
+| **P03** | Win32 SCM synthetic / trusted-auth design | `PASS_SOURCE` | **100%** | Trusted verifier + refusal matrix verified in unit tests |
 | **P04** | Admission / FakeGithub / selector prep | `PASS_SOURCE` | **95%** | Code done; R5 Owner brief published; decision open (~5%) |
-| **P05** | Multi-runner AgentCore authority | `PASS_SOURCE` | **100%** | |
+| **P05** | Multi-runner AgentCore authority | `PASS_SOURCE` | **100%** | Regular Agent entrypoint A-disable & B-execution verified |
 | **P06** | UX / CLI / install safety | `PASS_SOURCE` | **100%** | HUX-0 Owner visual PASS |
 | **P07** | Candidate freeze / HUX-2 qualify packets | `PREPARED` | **75%** | Packets refreshed; live HUX-2/3 await Owner |
 | **P08** | Read-only resources / EcoQoS capability | `PASS_SOURCE` | **100%** | Enforcement explicitly out of scope |

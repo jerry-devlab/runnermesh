@@ -7,13 +7,13 @@ It does **not** authorize live label mutation, live service mutation, or product
 Implementer self-review is not independent acceptance.
 
 ```text
-PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
-CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06
-DOCS_PR_HEAD=96794280ff6b772fcd211a89db16a43faf498559
-PACKAGE_BUILD_CI=42743583126 (PASS_ALL 6/6 jobs)
-DOCS_PR_CI=42765331894 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e
+CODE_ANCHOR=3952b1b83f922701f8d4984585ced02b132c997e
+PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd
+PREDECESSOR_DOCS_PR_CI=42788141367 (PASS_ALL 6/6 jobs)
 SANDBOX_TWO_RUNNER_PASS=PASS        # prepare_two_runner_sandbox layout + tests
 AGENT_CORE_MULTI_RUNNER=PASS        # single authority multi-runner matrix
+AGENT_ENTRYPOINT_ISOLATION=PASS     # agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution
 REGISTRY_PERSISTENCE=PASS           # assert_registry_intent_round_trip
 ADR0004_COLLISION_GUARD=PASS        # same_scope_collision refused
 ADR0006_STATUS=DRAFT_NOT_ACCEPTED   # awaiting Owner R5 decision
@@ -60,6 +60,8 @@ All source and sandbox contracts for multi-runner execution are verified and gre
    - `same_scope_collision` is surfaced and blocks enrollment when two runners share the same GitHub scope under ADR 0004.
 5. **Human Visual Confirmation (HUX-0 / PR #63)**:
    - Owner accepted the development Tray presentation showing distinct runner intent labels and independent toggling.
+6. **Regular Agent Entrypoint Isolation (`src/agent.rs`)**:
+   - `agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution` proves from the regular Agent entrypoint (`AgentCommand::RunnersDisable`) that disabling Runner A preserves Runner B desired `Full`, keeps active worker execution uninterrupted (`plan: Noop`), persists across Agent reload, and rejects same-scope collisions fail-closed.
 
 ## 3. Operator Sequence for Live HUX-3 Qualification (When Authorized)
 

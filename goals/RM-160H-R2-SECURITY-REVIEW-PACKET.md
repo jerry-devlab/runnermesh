@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8`<br>`CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06`<br>`CANDIDATE_DOCS_PR_HEAD=96794280ff6b772fcd211a89db16a43faf498559` | Package Build: Run 42743583126 (6/6 green)<br>Docs PR Tip: Run 42765331894 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e`<br>`PREDECESSOR_DOCS_PR_HEAD=9757405c93cb6fb7d42cf7f7a79e61dbfffc3dbd` | Predecessor Tip: Run 42788141367 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -20,20 +20,20 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=d6112ce7157a96f8aae937dccb631a4a489fca8cff6b2982c6e30ade4cb049c8
-CANDIDATE_ZIP_BYTES=1157861
+CANDIDATE_ZIP_SHA256=6ddfa96a36d0f87ba2d63e3e35613140621d8735d3dfcafeeb55346812a8a8d8
+CANDIDATE_ZIP_BYTES=1159277
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=3740388f7f37cc31483377e99500c2cc0ec1fa8dc107edcc9756be4000bcb123
-CANDIDATE_HELPER_BYTES=1751552
+CANDIDATE_HELPER_SHA256=bf8d51e515776c90f691d543a473ce6648aed9ce7879005ddf3127b56d6db531
+CANDIDATE_HELPER_BYTES=1753600
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
+PROVENANCE_COMMIT=3952b1b83f922701f8d4984585ced02b132c997e
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
 INDEPENDENT_HASH_CHECK=PASS
 EXTRACT_TEST=PASS
 INSTALL_TEST=PASS
-SANDBOX_LIFECYCLE_TESTS=PASS (338/338 cargo tests)
+SANDBOX_LIFECYCLE_TESTS=PASS (343/343 cargo tests)
 ```
 
 ## 2. Risk & Architecture Map
@@ -47,6 +47,7 @@ SANDBOX_LIFECYCLE_TESTS=PASS (338/338 cargo tests)
   4. Non-Destructive Lifecycle: `DrainThenStop` requires selector removal and idle worker before any stop call. Destructive Worker `kill` or `taskkill` is prohibited.
   5. Mandatory Prestate & Readback: Independent status and configuration readback must match plan; failure forces `restore_pass=false`.
   6. Windows Backend Mutation Inert: `WindowsScmBackend::mutation_inert()` has write paths (`start`, `stop`, `change_start_mode`) unconditionally return `Err(ScmApiError::GateClosed)`. A privately minted `ScmMutationArm` is required to open writes, unconstructable in public code.
+  7. Trusted Verification & Refusal Matrix: `TokenValidatingOwnerVerifier` and `LiveScmExecutionGate::mint_trusted_live` verified. Unit tests prove all refusal paths fail closed: empty material (`AuthorizationNotIssued`), tampered tokens (`AccessDenied`), wildcard service names (`NameDrift`), service drift (`NameDrift`), image token mismatch (`IdentityMismatch`), and excessive rights (`AccessDenied`). Even with a `TrustedLive` gate, live Windows adapter write paths remain `GateClosed`.
 
 ### Surface B: GitHub Admission & Multi-Runner Execution (R6 Scope)
 - **Files**: `src/admission.rs`, `tests/fake_github_admission.rs`, `src/hux_sandbox.rs`, `src/agent.rs`
@@ -54,7 +55,7 @@ SANDBOX_LIFECYCLE_TESTS=PASS (338/338 cargo tests)
   1. Reserved Selector: Scoped strictly to `runnermesh-admit` under ADR 0004.
   2. Multi-runner Collision: Same-scope dual managed enrollment is refused (`same_scope_collision`).
   3. Desired vs Achieved State: Label removal does not imply immediate job drain; runner status must reach `DRAINED` / `Stopped` through observation.
-  4. Multi-Runner Agent Chain & Isolation: Disabling runner A preserves runner B desired state, worker, service, selector, and registry (`prepare_two_runner_sandbox` isolated layout verified).
+  4. Multi-Runner Agent Chain & Isolation: Regular Agent entrypoint verification (`agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution`) proves that dispatching `RunnersDisable` for runner-a preserves runner-b desired `Full`, achieves active CI execution without interruption (`plan: Noop`, never stopped), persists across Agent reload, and rejects same-scope collisions fail-closed.
   5. Scoped Selector ADR 0006 Posture: Remains `DRAFT_NOT_ACCEPTED`. Zero live label mutation occurs without explicit Owner decision.
 
 ### Surface C: Installation & Autostart Boundaries
