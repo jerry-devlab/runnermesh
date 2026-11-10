@@ -125,12 +125,16 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
         if request.service_name.trim().is_empty()
             || request.service_name.contains('*')
             || request.service_name.contains('?')
-            || !request.service_name.eq_ignore_ascii_case(&self.authorized_service_name)
+            || !request
+                .service_name
+                .eq_ignore_ascii_case(&self.authorized_service_name)
         {
             return Err(ScmApiError::NameDrift);
         }
         if request.image_token.trim().is_empty()
-            || !request.image_token.eq_ignore_ascii_case(&self.authorized_image_token)
+            || !request
+                .image_token
+                .eq_ignore_ascii_case(&self.authorized_image_token)
         {
             return Err(ScmApiError::IdentityMismatch);
         }

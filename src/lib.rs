@@ -232,8 +232,8 @@ pub use windows_scm_executor::{
     MockServiceRecord, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
     PrivilegedScmRequest, ScmApiError, ScmControlBackend, ScmControlExecutor, ScmExactSnapshot,
     ScmTransactionJournal, ScmTransactionReceipt, ScmTransactionStage, SyntheticScmTestGrant,
-    TrustedOwnerAuthorizationRequest, TrustedOwnerAuthorizationVerifier,
-    TokenValidatingOwnerVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
+    TokenValidatingOwnerVerifier, TrustedOwnerAuthorizationRequest,
+    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
     SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };
 #[cfg(windows)]
