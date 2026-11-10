@@ -1,6 +1,6 @@
 # RM-160H R5 — G-ADR006 Owner Architecture Brief
 
-Status: **BRIEF_READY** · `G-ADR006=DRAFT_NOT_ACCEPTED`  
+Status: **BRIEF_READY** · `G-ADR006=DRAFT_NOT_ACCEPTED`
 Authority: Distilled from `docs/adr/0006-scoped-admission-selector-draft.md` and `goals/RM-160H-P04-SELECTOR-DECISION-PREP.md`.
 
 ## Context

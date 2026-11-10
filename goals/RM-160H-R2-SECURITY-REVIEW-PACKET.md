@@ -1,6 +1,6 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **ASSIST_READY** · `INDEPENDENT_SECURITY_REVIEW=PENDING`  
+Status: **ASSIST_READY** · `INDEPENDENT_SECURITY_REVIEW=PENDING`
 Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`.
 
 ## 1. Candidate HEADs Under Review
