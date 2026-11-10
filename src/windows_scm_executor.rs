@@ -55,31 +55,6 @@ pub struct TrustedOwnerAuthorizationRequest {
 }
 
 impl TrustedOwnerAuthorizationRequest {
-    pub fn new(
-        service_name: impl Into<String>,
-        image_token: impl Into<String>,
-        owner_material: Vec<u8>,
-        allow_start: bool,
-        allow_stop: bool,
-        allow_change_config: bool,
-        not_before_epoch_seconds: u64,
-        expires_at_epoch_seconds: u64,
-        nonce: impl Into<String>,
-    ) -> Self {
-        Self {
-            service_name: service_name.into(),
-            image_token: image_token.into(),
-            allow_start,
-            allow_stop,
-            allow_change_config,
-            owner_material,
-            not_before_epoch_seconds,
-            expires_at_epoch_seconds,
-            nonce: nonce.into(),
-            evaluation_time_epoch_seconds: None,
-        }
-    }
-
     pub fn new_test_fixture(
         service_name: impl Into<String>,
         image_token: impl Into<String>,
