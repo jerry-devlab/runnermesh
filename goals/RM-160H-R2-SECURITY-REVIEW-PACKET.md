@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 Live SCM Gate` | `CANDIDATE_HEAD=c3f939611b4028cf565ec1d441112467d0187e07` (Code: `b221eaf57be5a0a3952ba0e30d1e3895e34749f9`) | Run 42655292685 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe |
+| **Track 2: v0.2-A LRM** | `HUX-2 Live SCM Gate` | `CANDIDATE_HEAD=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8` (Code: `b221eaf72336c5caac676b10405c06e8cdd90b06`) | Run 42743583126 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
