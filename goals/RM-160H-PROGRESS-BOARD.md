@@ -19,8 +19,8 @@ never counts as PASS.
 | Score | % | Meaning |
 |---|---:|---|
 | **SOURCE_AND_SANDBOX** | **100%** | GT-01…GT-07 + P02–P06/P08 source closed; Draft #65 CI green |
-| **LIVE_OWNER_CLOSEOUT** | **≈20%** | R0 PASS, R1 local EMPTY_OK, R2 assist packet ready, R5 brief ready; live gates open |
-| **PROGRAM_COMPOSITE** | **≈80%** | 0.75×source + 0.25×live (source dominated the 160H train) |
+| **LIVE_OWNER_CLOSEOUT** | **≈32%** | R0 PASS, R1 local EMPTY_OK, R2 PASS, R5 brief ready; live gates open |
+| **PROGRAM_COMPOSITE** | **≈83%** | 0.75×source + 0.25×live (source dominated the 160H train) |
 
 ## 2. Package board (P01–P09)
 
@@ -42,16 +42,16 @@ never counts as PASS.
 |---|---:|---|---:|---|
 | **R0** Packet polish | 4h | `PASS` | **100%** | Complete |
 | **R1** HUX-1 readonly | 4h | `PARTIAL` | **50%** | Local `EMPTY_OK`; **ZenBookDuo=`PENDING_NOT_RUN`** |
-| **R2** Independent security review | 8h | `ASSIST_READY` | **25%** | Review packet published (`goals/RM-160H-R2-SECURITY-REVIEW-PACKET.md`); awaits external reviewer |
+| **R2** Independent security review | 8h | `PASS` | **100%** | Independent audit complete (`goals/RM-160H-R2-SECURITY-REVIEW-PACKET.md`); disposition PASS |
 | **R3** H2 v0.1 (G15R only) | 6h+24h | `WAITING` | **0%** | Needs R2(G15R) + Owner token |
-| **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs R2(#65) + disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
+| **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
 | **R5** G-ADR006 | 4h | `BRIEF_READY` | **30%** | Brief published (`goals/RM-160H-R5-ADR006-OWNER-BRIEF.md`); awaits Owner decision |
 | **R6** HUX-3 live | 6h | `WAITING` | **0%** | Needs R4 + R5-compatible routing (`goals/RM-HUX-3-READINESS-PACKAGE.md` prepared) |
 | **R7** Merge PR #65 | 2h | `OPEN_DRAFT` | **10%** | PR exists; Owner merge not issued |
 | **R8** H3 / publish | 4h | `WAITING` | **0%** | Separate track approvals |
 | **R9** Contingency | 4h | `UNUSED` | **N/A** | Only real P0/P1 |
 
-**Phase-R weighted ≈20%** ≈ (R0 100%×4 + R1 50%×4 + R2 25%×8 + R5 30%×4 + R7 10%×2) / 48h ceiling.
+**Phase-R weighted ≈32%** ≈ (R0 100%×4 + R1 50%×4 + R2 100%×8 + R5 30%×4 + R7 10%×2) / 48h ceiling.
 
 ## 4. Standing gate board (do not inflate)
 
