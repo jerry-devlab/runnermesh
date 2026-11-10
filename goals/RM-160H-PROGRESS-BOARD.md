@@ -2,8 +2,10 @@
 
 ```text
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
-AS_OF_TIP=26775d04dd2a1db3ad80295eb48dc095033481aa
-AS_OF_CI=42765028290 (PASS_ALL 6/6 jobs)
+AS_OF_TIP=96794280ff6b772fcd211a89db16a43faf498559
+AS_OF_CI=42765331894 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
+PACKAGE_BUILD_CI=42743583126 (PASS_ALL 6/6 jobs)
 CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 SOURCE_AND_SANDBOX_CLOSEOUT=PASS
@@ -43,9 +45,9 @@ never counts as PASS.
 | **R1** HUX-1 readonly | 4h | `PARTIAL` | **50%** | Local `EMPTY_OK`; **ZenBookDuo=`PENDING_NOT_RUN`** |
 | **R2** Independent security review | 8h | `ASSIST_READY` | **25%** | Review packet published (`goals/RM-160H-R2-SECURITY-REVIEW-PACKET.md`); awaits external reviewer |
 | **R3** H2 v0.1 (G15R only) | 6h+24h | `WAITING` | **0%** | Needs R2(G15R) + Owner token |
-| **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs R2(#65) + disposable Service auth |
+| **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs R2(#65) + disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
 | **R5** G-ADR006 | 4h | `BRIEF_READY` | **30%** | Brief published (`goals/RM-160H-R5-ADR006-OWNER-BRIEF.md`); awaits Owner decision |
-| **R6** HUX-3 live | 6h | `WAITING` | **0%** | Needs R4 + R5-compatible routing |
+| **R6** HUX-3 live | 6h | `WAITING` | **0%** | Needs R4 + R5-compatible routing (`goals/RM-HUX-3-READINESS-PACKAGE.md` prepared) |
 | **R7** Merge PR #65 | 2h | `OPEN_DRAFT` | **10%** | PR exists; Owner merge not issued |
 | **R8** H3 / publish | 4h | `WAITING` | **0%** | Separate track approvals |
 | **R9** Contingency | 4h | `UNUSED` | **N/A** | Only real P0/P1 |

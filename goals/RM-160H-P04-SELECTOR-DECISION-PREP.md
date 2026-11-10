@@ -25,10 +25,13 @@ before any Owner architecture acceptance. Cursor self-review is not acceptance.
 
 ## Source already safe without acceptance
 
-- Registry refuses same-scope managed admission collisions.
+- Registry refuses same-scope managed admission collisions (`same_scope_collision`).
 - Discovery surfaces `same_scope_collision` without auto-enroll.
+- Multi-runner sandbox (`prepare_two_runner_sandbox`) proves isolated intent and independent lifecycle.
+- AgentCore single-authority multi-runner reconciliation matrix verified.
 - `scoped_admission_sim` remains unapproved simulation only.
 - FakeGitHub / HUX-2 synthetic Busy/drain paths do not authorize live labels.
+- Live multi-runner operational readiness is codified in `RM-HUX-3-READINESS-PACKAGE.md`.
 
 ## Disposition
 

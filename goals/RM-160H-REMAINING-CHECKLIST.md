@@ -9,10 +9,12 @@ R0=PASS
 R1_LOCAL=EMPTY_OK
 R1_ZENBOOKDUO=PENDING_NOT_RUN
 CANDIDATE_PR=65
-REMOTE_TIP=26775d04dd2a1db3ad80295eb48dc095033481aa
+PACKAGE_BUILD_COMMIT=ea0d9a36000d5c993c9e7c5d5c46450bdd1f87b8
+PACKAGE_BUILD_CI=42743583126 (PASS_ALL 6/6 jobs)
+CANDIDATE_DOCS_PR_HEAD=96794280ff6b772fcd211a89db16a43faf498559
+DOCS_PR_CI=42765331894 (PASS_ALL 6/6 jobs)
 CODE_ANCHOR=b221eaf72336c5caac676b10405c06e8cdd90b06
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-HOSTED_CI_RUN=42765028290 (PASS_ALL 6/6 jobs)
 ```
 
 ## R0 — packet polish (safe, no live mutation)
@@ -54,7 +56,7 @@ HOSTED_CI_RUN=42765028290 (PASS_ALL 6/6 jobs)
 
 ## R4 — HUX-2 live (disposable Service)
 
-- [ ] R4-01 Preconditions: R2 PASS for candidate HEAD; readiness package fields complete; no Busy Worker.
+- [ ] R4-01 Preconditions: R2 PASS for candidate HEAD; readiness package fields complete (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated); no Busy Worker.
 - [ ] R4-02 Follow `RM-HUX-2-OWNER-SERVICE-GATE-PLAN.md` exactly.
 - [ ] R4-03 Stop → readback → Start → restore; `RESTORE` separate disposition.
 - [ ] R4-04 Never touch production dogfood runner.
@@ -69,7 +71,7 @@ HOSTED_CI_RUN=42765028290 (PASS_ALL 6/6 jobs)
 
 ## R6 — HUX-3 live (two runners)
 
-- [ ] R6-01 Preconditions: HUX2_LIVE PASS; routing decision compatible with R5; two exact enrolled runners.
+- [ ] R6-01 Preconditions: HUX2_LIVE PASS; routing decision compatible with R5; two exact enrolled runners (`goals/RM-HUX-3-READINESS-PACKAGE.md` prepared).
 - [ ] R6-02 Disable A; prove B desired/Worker/service/selector/registry unchanged; B can finish legitimate CI.
 - [ ] R6-03 Restart preserves manual intent; no cross-scope drift.
 - [ ] **EXIT** `HUX3_LIVE=PASS` or `BLOCKED_BY_OWNER`

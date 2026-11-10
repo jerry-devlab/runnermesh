@@ -28,6 +28,7 @@ runnermesh-admit-<stable-local-key>
 
 - In `src/admission.rs`: Same-scope managed admission collisions are detected and rejected (`same_scope_collision`).
 - In `tests/fake_github_admission.rs`: Scoped admission simulations (`scoped_admission_sim`) remain marked unapproved.
+- In `goals/RM-HUX-3-READINESS-PACKAGE.md`: Multi-runner operational readiness and isolation sequence are codified.
 - Zero live label mutation occurs without explicit Owner transaction authorization.
 
 ## Recommended Owner Action
