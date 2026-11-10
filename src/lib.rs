@@ -228,11 +228,12 @@ pub use windows_runner_discovery::{
 };
 pub use windows_scm_executor::{
     opaque_image_token, reconcile_interrupted_scm_journal, AdmissionSelectorObserver,
-    FakeGithubAdmissionBackend, GatedWindowsScmBackend, LiveScmExecutionGate, MockScmBackend,
-    MockServiceRecord, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
-    PrivilegedScmRequest, ScmApiError, ScmControlBackend, ScmControlExecutor, ScmExactSnapshot,
-    ScmTransactionJournal, ScmTransactionReceipt, ScmTransactionStage, SyntheticScmTestGrant,
-    TokenValidatingOwnerVerifier, TrustedOwnerAuthorizationRequest,
+    FakeGithubAdmissionBackend, GatedWindowsScmBackend, LiveScmExecutionGate, MockClock,
+    MockScmBackend, MockServiceRecord, OwnerAuthorizationIssuer, PrivilegedScmAction,
+    PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ScmApiError, ScmControlBackend,
+    ScmControlExecutor, ScmExactSnapshot, ScmTransactionJournal, ScmTransactionReceipt,
+    ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant, SystemClock,
+    TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
     TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
     SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };

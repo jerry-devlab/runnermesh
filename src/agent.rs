@@ -17,11 +17,11 @@ use crate::{
     DesiredAdmissionState, DiscoveredLifecycle, DiscoveryReport, DoctorCheck, DoctorReport,
     DoctorStatus, ExecutionIdentityEvidence, GlobalPolicyInputs, HardSafetyState, LinkKind,
     LinkSnapshot, LinkState, MemoryRegistryStore, MultiRunnerReconcileReport, OwnershipEvidence,
-    PerRunnerDesired, PerRunnerObservation, PrivilegedScmAction, PrivilegedScmHelper,
-    PrivilegedScmReport, PrivilegedScmRequest, ProbeId, ProbeRuntimeState, ProbeSnapshot,
-    ReasonCode, RegistryBackendBinding, RegistryError, RegistryStore, RunnerPhase, RunnerRegistry,
-    RunnerRegistryEditor, ScmControlBackend, SystemPreferences, UiPreferences, UserMode,
-    ZenOverride,
+    PerRunnerAchieved, PerRunnerDesired, PerRunnerObservation, PerRunnerPlan, PrivilegedScmAction,
+    PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ProbeId, ProbeRuntimeState,
+    ProbeSnapshot, ReasonCode, RegistryBackendBinding, RegistryError, RegistryStore, RunnerPhase,
+    RunnerRegistry, RunnerRegistryEditor, ScmControlBackend, SystemPreferences, UiPreferences,
+    UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -371,16 +371,26 @@ where
                 RegistryBackendBinding::UserSession => continue,
             };
 
-            let is_busy = result.observed_lifecycle == DiscoveredLifecycle::Busy
-                || observations
-                    .iter()
-                    .find(|o| o.local_runner_key == result.local_runner_key)
-                    .map(|o| o.worker_present)
-                    .unwrap_or(false);
+            let obs = observations
+                .iter()
+                .find(|o| o.local_runner_key == result.local_runner_key);
+
+            let selector_confirmed_absent = obs
+                .map(|o| o.selector_present == Some(false) && !o.selector_observation_unknown)
+                .unwrap_or(false);
+
+            let worker_idle = result.observed_lifecycle != DiscoveredLifecycle::Busy
+                && !obs.map(|o| o.worker_present).unwrap_or(false);
+
+            let plan_allows_stop = result.plan == PerRunnerPlan::Noop
+                && (result.achieved == PerRunnerAchieved::Drained
+                    || result.achieved == PerRunnerAchieved::Offline);
 
             let action = if (!record.desired_enabled || result.desired == PerRunnerDesired::Offline)
                 && result.observed_lifecycle != DiscoveredLifecycle::Stopped
-                && !is_busy
+                && selector_confirmed_absent
+                && worker_idle
+                && plan_allows_stop
             {
                 Some(PrivilegedScmAction::StopService)
             } else if record.desired_enabled
@@ -2140,23 +2150,133 @@ mod tests {
                 .desired_enabled
         );
 
-        // 6. Regular Agent cycle with Runner A disabled and Runner B busy
-        let reports2 = core.reconcile_and_dispatch_runners(&obs_cycle1, &helper_a, "tx-disable-a");
+        // 6. Regular Agent cycle with Runner A disabled.
+        // Phase 1: Selector still present (withdrawing) -> MUST NOT stop A!
+        let obs_selector_present = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep_sel =
+            core.reconcile_and_dispatch_runners(&obs_selector_present, &helper_a, "tx-sel");
+        assert!(
+            rep_sel.is_empty(),
+            "MUST NOT stop A while selector is still present"
+        );
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
 
-        // Exactly one SCM action dispatched: for Runner A
-        assert_eq!(reports2.len(), 1);
-        assert_eq!(reports2[0].service_name, "actions.runner.a");
-        assert!(reports2[0].applied);
-        assert_eq!(reports2[0].achieved_state, DiscoveredLifecycle::Stopped);
+        // Phase 2: Withdrawal status is unknown -> MUST NOT stop A!
+        let obs_selector_unknown = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: None,
+                selector_observation_unknown: true,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep_unk =
+            core.reconcile_and_dispatch_runners(&obs_selector_unknown, &helper_a, "tx-unk");
+        assert!(
+            rep_unk.is_empty(),
+            "MUST NOT stop A while selector status is unknown"
+        );
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
 
-        // Runner A service was stopped
+        // Phase 3: Selector confirmed absent, but Worker is still busy executing a job -> MUST NOT stop A!
+        let obs_worker_busy = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Busy,
+                worker_present: true,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep_busy = core.reconcile_and_dispatch_runners(&obs_worker_busy, &helper_a, "tx-busy");
+        assert!(rep_busy.is_empty(), "MUST NOT stop A while Worker is busy");
+        assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
+
+        // Phase 4: Independent readback confirms selector absent AND Worker idle AND plan allows stop
+        let obs_drained = vec![
+            PerRunnerObservation {
+                local_runner_key: "runner-a".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: false,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "runner-b".to_owned(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Listening,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ];
+        let rep_drain = core.reconcile_and_dispatch_runners(&obs_drained, &helper_a, "tx-drain");
+        assert_eq!(rep_drain.len(), 1);
+        assert_eq!(rep_drain[0].service_name, "actions.runner.a");
+        assert!(rep_drain[0].applied);
+        assert_eq!(rep_drain[0].achieved_state, DiscoveredLifecycle::Stopped);
+
+        // Runner A service was stopped exactly once (in Phase 4)
         assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 1);
         assert_eq!(
             mock_scm.service_actions("actions.runner.a"),
             vec!["stop".to_string()]
         );
 
-        // CRUCIAL ISOLATION PROOF: Runner B received ZERO control actions
+        // CRUCIAL ISOLATION PROOF: Runner B received ZERO control actions across all phases
         assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
         assert_eq!(mock_scm.service_start_calls("actions.runner.b"), 0);
         assert!(mock_scm.service_actions("actions.runner.b").is_empty());
@@ -2167,7 +2287,7 @@ mod tests {
             LiveScmExecutionGate::CLOSED,
         );
         let reports_inert =
-            core.reconcile_and_dispatch_runners(&obs_cycle1, &inert_helper, "tx-inert");
+            core.reconcile_and_dispatch_runners(&obs_drained, &inert_helper, "tx-inert");
         assert_eq!(reports_inert.len(), 1);
         assert!(!reports_inert[0].applied);
         assert_eq!(

@@ -78,6 +78,208 @@ impl TrustedOwnerAuthorizationRequest {
     }
 }
 
+/// Clock abstraction for trusted boundary authorization verification.
+pub trait TrustedClock: Send + Sync + std::fmt::Debug {
+    fn now_epoch_seconds(&self) -> u64;
+}
+
+/// Default system clock using [`SystemTime::now()`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl TrustedClock for SystemClock {
+    fn now_epoch_seconds(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+}
+
+/// Controllable mock clock for deterministic testing.
+#[derive(Clone, Debug)]
+pub struct MockClock {
+    now: Arc<Mutex<u64>>,
+}
+
+impl MockClock {
+    pub fn new(initial_time: u64) -> Self {
+        Self {
+            now: Arc::new(Mutex::new(initial_time)),
+        }
+    }
+
+    pub fn set_time(&self, time: u64) {
+        *self.now.lock().unwrap_or_else(|p| p.into_inner()) = time;
+    }
+}
+
+impl TrustedClock for MockClock {
+    fn now_epoch_seconds(&self) -> u64 {
+        *self.now.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+static GLOBAL_AUTH_LEDGER: std::sync::OnceLock<SharedAuthorizationLedger> =
+    std::sync::OnceLock::new();
+
+/// Thread-safe shared authorization ledger managing consumed authorizations.
+///
+/// Prevents both swapped-nonce replays (reusing the same authorization voucher with
+/// a different nonce) and reconstructed-verifier replays (instantiating a fresh
+/// verifier instance to replay a consumed authorization).
+#[derive(Clone, Debug)]
+pub struct SharedAuthorizationLedger {
+    consumed_tokens: Arc<Mutex<std::collections::BTreeSet<[u8; 32]>>>,
+    consumed_nonces: Arc<Mutex<std::collections::BTreeSet<String>>>,
+}
+
+impl Default for SharedAuthorizationLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedAuthorizationLedger {
+    pub fn global() -> &'static SharedAuthorizationLedger {
+        GLOBAL_AUTH_LEDGER.get_or_init(Self::new)
+    }
+
+    pub fn new() -> Self {
+        Self {
+            consumed_tokens: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+            consumed_nonces: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        }
+    }
+
+    pub fn is_consumed(&self, token_hash: &[u8; 32], nonce: &str) -> bool {
+        let tokens = self
+            .consumed_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if tokens.contains(token_hash) {
+            return true;
+        }
+        let nonces = self
+            .consumed_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        nonces.contains(nonce)
+    }
+
+    pub fn record_consumption(&self, token_hash: [u8; 32], nonce: String) -> bool {
+        let mut tokens = self
+            .consumed_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut nonces = self
+            .consumed_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if tokens.contains(&token_hash) || nonces.contains(&nonce) {
+            return false;
+        }
+        tokens.insert(token_hash);
+        nonces.insert(nonce);
+        true
+    }
+
+    pub fn consumed_count(&self) -> usize {
+        self.consumed_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
+
+    pub fn clear_for_test(&self) {
+        let mut tokens = self
+            .consumed_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        tokens.clear();
+        let mut nonces = self
+            .consumed_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        nonces.clear();
+    }
+}
+
+/// Trusted boundary Owner authorization issuer.
+///
+/// In production, Owner vouchers are issued solely by an authorized control
+/// plane possessing the Owner root authority secret. Callers cannot self-select
+/// tokens or manufacture valid vouchers without this authority.
+#[derive(Clone, Debug)]
+pub struct OwnerAuthorizationIssuer {
+    authority_secret: Vec<u8>,
+    clock: Arc<dyn TrustedClock>,
+}
+
+impl OwnerAuthorizationIssuer {
+    pub fn new(authority_secret: impl Into<Vec<u8>>) -> Self {
+        Self {
+            authority_secret: authority_secret.into(),
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    pub fn with_clock(authority_secret: impl Into<Vec<u8>>, clock: Arc<dyn TrustedClock>) -> Self {
+        Self {
+            authority_secret: authority_secret.into(),
+            clock,
+        }
+    }
+
+    /// Issue a signed authorization request for the specified target and permissions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        &self,
+        service_name: impl Into<String>,
+        image_token: impl Into<String>,
+        allow_start: bool,
+        allow_stop: bool,
+        allow_change_config: bool,
+        validity_duration_seconds: u64,
+        nonce: impl Into<String>,
+    ) -> (TrustedOwnerAuthorizationRequest, Vec<u8>) {
+        let service_name = service_name.into();
+        let image_token = image_token.into();
+        let nonce = nonce.into();
+        let not_before = self.clock.now_epoch_seconds();
+        let expires_at = not_before + validity_duration_seconds;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&self.authority_secret);
+        hasher.update(service_name.as_bytes());
+        hasher.update(image_token.as_bytes());
+        hasher.update([
+            allow_start as u8,
+            allow_stop as u8,
+            allow_change_config as u8,
+        ]);
+        hasher.update(not_before.to_le_bytes());
+        hasher.update(expires_at.to_le_bytes());
+        hasher.update(nonce.as_bytes());
+        let token = hasher.finalize().to_vec();
+
+        let req = TrustedOwnerAuthorizationRequest {
+            service_name,
+            image_token,
+            allow_start,
+            allow_stop,
+            allow_change_config,
+            owner_material: token.clone(),
+            not_before_epoch_seconds: not_before,
+            expires_at_epoch_seconds: expires_at,
+            nonce,
+            evaluation_time_epoch_seconds: None,
+        };
+
+        (req, token)
+    }
+}
+
 /// Live/trusted authorization entry. Implementations must not accept synthetic grants.
 pub trait TrustedOwnerAuthorizationVerifier {
     fn verify(
@@ -108,8 +310,10 @@ impl TrustedOwnerAuthorizationVerifier for UnissuedOwnerAuthorizationVerifier {
 /// names with [`ScmApiError::NameDrift`], image token mismatches with
 /// [`ScmApiError::IdentityMismatch`], excessive permissions with
 /// [`ScmApiError::AccessDenied`], expired or not-yet-valid validity windows with
-/// [`ScmApiError::AccessDenied`], and replayed nonces with [`ScmApiError::AccessDenied`].
-#[derive(Clone, Debug)]
+/// [`ScmApiError::AccessDenied`], caller-specified evaluation times with
+/// [`ScmApiError::AccessDenied`], and replayed tokens/nonces across the shared
+/// ledger with [`ScmApiError::AccessDenied`].
+#[derive(Clone)]
 pub struct TokenValidatingOwnerVerifier {
     expected_token_hash: [u8; 32],
     authorized_service_name: String,
@@ -118,6 +322,20 @@ pub struct TokenValidatingOwnerVerifier {
     max_allow_stop: bool,
     max_allow_change_config: bool,
     consumed_nonces: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    ledger: SharedAuthorizationLedger,
+    clock: Arc<dyn TrustedClock>,
+}
+
+impl std::fmt::Debug for TokenValidatingOwnerVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenValidatingOwnerVerifier")
+            .field("authorized_service_name", &self.authorized_service_name)
+            .field("authorized_image_token", &self.authorized_image_token)
+            .field("max_allow_start", &self.max_allow_start)
+            .field("max_allow_stop", &self.max_allow_stop)
+            .field("max_allow_change_config", &self.max_allow_change_config)
+            .finish()
+    }
 }
 
 impl TokenValidatingOwnerVerifier {
@@ -128,6 +346,50 @@ impl TokenValidatingOwnerVerifier {
         allow_start: bool,
         allow_stop: bool,
         allow_change_config: bool,
+    ) -> Self {
+        Self::with_clock_and_ledger(
+            expected_token,
+            authorized_service_name,
+            authorized_image_token,
+            allow_start,
+            allow_stop,
+            allow_change_config,
+            Arc::new(SystemClock),
+            SharedAuthorizationLedger::global().clone(),
+        )
+    }
+
+    pub fn with_clock(
+        expected_token: &[u8],
+        authorized_service_name: impl Into<String>,
+        authorized_image_token: impl Into<String>,
+        allow_start: bool,
+        allow_stop: bool,
+        allow_change_config: bool,
+        clock: Arc<dyn TrustedClock>,
+    ) -> Self {
+        Self::with_clock_and_ledger(
+            expected_token,
+            authorized_service_name,
+            authorized_image_token,
+            allow_start,
+            allow_stop,
+            allow_change_config,
+            clock,
+            SharedAuthorizationLedger::global().clone(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_clock_and_ledger(
+        expected_token: &[u8],
+        authorized_service_name: impl Into<String>,
+        authorized_image_token: impl Into<String>,
+        allow_start: bool,
+        allow_stop: bool,
+        allow_change_config: bool,
+        clock: Arc<dyn TrustedClock>,
+        ledger: SharedAuthorizationLedger,
     ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(expected_token);
@@ -140,10 +402,12 @@ impl TokenValidatingOwnerVerifier {
             max_allow_stop: allow_stop,
             max_allow_change_config: allow_change_config,
             consumed_nonces: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+            ledger,
+            clock,
         }
     }
 
-    /// Number of distinct nonces consumed so far.
+    /// Number of distinct nonces consumed so far by this verifier.
     pub fn consumed_nonce_count(&self) -> usize {
         self.consumed_nonces
             .lock()
@@ -196,26 +460,28 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
         if request.expires_at_epoch_seconds <= request.not_before_epoch_seconds {
             return Err(ScmApiError::AccessDenied);
         }
-        let now = match request.evaluation_time_epoch_seconds {
-            Some(t) => t,
-            None => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
+
+        // The trusted boundary strictly owns the clock.
+        // Callers cannot choose or tamper with evaluation time.
+        if request.evaluation_time_epoch_seconds.is_some() {
+            return Err(ScmApiError::AccessDenied);
+        }
+
+        let now = self.clock.now_epoch_seconds();
         if now < request.not_before_epoch_seconds || now >= request.expires_at_epoch_seconds {
             return Err(ScmApiError::AccessDenied);
         }
 
-        // Single-use replay protection check
-        let mut nonces = self
-            .consumed_nonces
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        if nonces.contains(&request.nonce) {
+        // Single-use replay protection check across shared ledger
+        if self.ledger.is_consumed(&given_hash, &request.nonce) {
             return Err(ScmApiError::AccessDenied);
         }
-        nonces.insert(request.nonce.clone());
+        self.ledger
+            .record_consumption(given_hash, request.nonce.clone());
+        self.consumed_nonces
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(request.nonce.clone());
 
         LiveScmExecutionGate::mint_trusted_live(
             &request.service_name,
@@ -2423,14 +2689,16 @@ mod tests {
 
     #[test]
     fn trusted_owner_verifier_valid_token_opens_trusted_live_gate() {
-        let raw_token = b"secret-owner-authorization-token-2026";
-        let verifier = TokenValidatingOwnerVerifier::new(
+        let raw_token = b"secret-token-valid-opens-gate-suite";
+        let clock = Arc::new(MockClock::new(1_500));
+        let verifier = TokenValidatingOwnerVerifier::with_clock(
             raw_token,
             "fixture.scm.a",
             "fixture-image",
             true,
             true,
             false,
+            clock,
         );
         let request = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
@@ -2442,7 +2710,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-valid".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         let gate =
             LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();
@@ -2459,14 +2727,16 @@ mod tests {
 
     #[test]
     fn trusted_owner_verifier_refusal_paths() {
-        let raw_token = b"secret-owner-authorization-token-2026";
-        let verifier = TokenValidatingOwnerVerifier::new(
+        let raw_token = b"secret-token-refusal-paths-suite-42";
+        let mock_clock = Arc::new(MockClock::new(1_500));
+        let verifier = TokenValidatingOwnerVerifier::with_clock(
             raw_token,
             "fixture.scm.a",
             "fixture-image",
             true,
             true,
             true,
+            mock_clock.clone(),
         );
 
         // 1. Empty owner material refuses with AuthorizationNotIssued
@@ -2480,7 +2750,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-refusal-1".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&empty_mat_req),
@@ -2498,7 +2768,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-refusal-2".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&tampered_req),
@@ -2516,7 +2786,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-refusal-3".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&wildcard_req),
@@ -2534,7 +2804,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-refusal-4".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&name_drift_req),
@@ -2552,7 +2822,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-refusal-5".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&image_mismatch_req),
@@ -2560,13 +2830,14 @@ mod tests {
         ));
 
         // 6. Excessive permission request (verifier only allows start/stop, request asks for change config)
-        let limited_verifier = TokenValidatingOwnerVerifier::new(
+        let limited_verifier = TokenValidatingOwnerVerifier::with_clock(
             raw_token,
             "fixture.scm.a",
             "fixture-image",
             true,
             true,
             false,
+            mock_clock.clone(),
         );
         let excessive_req = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
@@ -2578,7 +2849,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-refusal-6".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             limited_verifier.verify(&excessive_req),
@@ -2596,7 +2867,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "   ".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&empty_nonce_req),
@@ -2614,14 +2885,33 @@ mod tests {
             not_before_epoch_seconds: 2_000,
             expires_at_epoch_seconds: 1_000,
             nonce: "nonce-inverted".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&inverted_req),
             Err(ScmApiError::AccessDenied)
         ));
 
-        // 9. Expired token (evaluation_time >= expires_at) refuses with AccessDenied
+        // 9. Tampered evaluation time: caller attempting to choose/tamper evaluation time
+        let tampered_time_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: raw_token.to_vec(),
+            not_before_epoch_seconds: 1_000,
+            expires_at_epoch_seconds: 2_000,
+            nonce: "nonce-tampered-time".to_owned(),
+            evaluation_time_epoch_seconds: Some(1_500),
+        };
+        assert!(matches!(
+            verifier.verify(&tampered_time_req),
+            Err(ScmApiError::AccessDenied)
+        ));
+
+        // 10. Expired token against trusted clock (now >= expires_at) refuses with AccessDenied
+        mock_clock.set_time(2_000);
         let expired_req = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
             image_token: "fixture-image".to_owned(),
@@ -2632,14 +2922,15 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-expired".to_owned(),
-            evaluation_time_epoch_seconds: Some(2_000),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&expired_req),
             Err(ScmApiError::AccessDenied)
         ));
 
-        // 10. Not-yet-valid token (evaluation_time < not_before) refuses with AccessDenied
+        // 11. Not-yet-valid token against trusted clock (now < not_before) refuses with AccessDenied
+        mock_clock.set_time(999);
         let premature_req = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
             image_token: "fixture-image".to_owned(),
@@ -2650,14 +2941,17 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "nonce-premature".to_owned(),
-            evaluation_time_epoch_seconds: Some(999),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&premature_req),
             Err(ScmApiError::AccessDenied)
         ));
 
-        // 11. Replayed nonce refuses with AccessDenied
+        // Restore clock to valid window
+        mock_clock.set_time(1_500);
+
+        // 12. Valid first request opens TrustedLive gate and consumes authorization
         let single_use_nonce = "single-use-nonce-12345".to_owned();
         let valid_first_req = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
@@ -2669,12 +2963,12 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: single_use_nonce.clone(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         let gate1 = verifier.verify(&valid_first_req).unwrap();
         assert!(gate1.is_trusted_live());
 
-        // Replay with identical nonce must fail closed
+        // 13. Replay with identical nonce must fail closed
         let replay_req = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
             image_token: "fixture-image".to_owned(),
@@ -2685,24 +2979,114 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: single_use_nonce,
-            evaluation_time_epoch_seconds: Some(1_501),
+            evaluation_time_epoch_seconds: None,
         };
         assert!(matches!(
             verifier.verify(&replay_req),
             Err(ScmApiError::AccessDenied)
         ));
-    }
 
-    #[test]
-    fn trusted_live_gate_defense_in_depth_windows_backend_stays_inert() {
-        let raw_token = b"secret-owner-authorization-token-2026";
-        let verifier = TokenValidatingOwnerVerifier::new(
+        // 14. Replay with swapped nonce (using a different nonce for the same token) must be refused
+        let replay_swapped_nonce = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: raw_token.to_vec(),
+            not_before_epoch_seconds: 1_000,
+            expires_at_epoch_seconds: 2_000,
+            nonce: "different-nonce-for-same-token".to_owned(),
+            evaluation_time_epoch_seconds: None,
+        };
+        assert!(matches!(
+            verifier.verify(&replay_swapped_nonce),
+            Err(ScmApiError::AccessDenied)
+        ));
+
+        // 15. Replay with a newly constructed verifier instance must be refused via shared ledger
+        let verifier2 = TokenValidatingOwnerVerifier::with_clock(
             raw_token,
             "fixture.scm.a",
             "fixture-image",
             true,
             true,
             true,
+            mock_clock.clone(),
+        );
+        let replay_reconstructed_verifier = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: raw_token.to_vec(),
+            not_before_epoch_seconds: 1_000,
+            expires_at_epoch_seconds: 2_000,
+            nonce: "nonce-to-fresh-verifier".to_owned(),
+            evaluation_time_epoch_seconds: None,
+        };
+        assert!(matches!(
+            verifier2.verify(&replay_reconstructed_verifier),
+            Err(ScmApiError::AccessDenied)
+        ));
+
+        // 16. Self-selected token: caller invents an unissued token
+        let issuer = OwnerAuthorizationIssuer::with_clock(
+            b"trusted-authority-master-secret",
+            mock_clock.clone(),
+        );
+        let (issued_req, issued_token) = issuer.issue(
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            true,
+            500,
+            "issued-nonce-16",
+        );
+        let authority_verifier = TokenValidatingOwnerVerifier::with_clock(
+            &issued_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            true,
+            mock_clock.clone(),
+        );
+        let issued_gate = authority_verifier.verify(&issued_req).unwrap();
+        assert!(issued_gate.is_trusted_live());
+
+        let self_selected_req = TrustedOwnerAuthorizationRequest {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            owner_material: b"caller-arbitrary-chosen-token".to_vec(),
+            not_before_epoch_seconds: 1_000,
+            expires_at_epoch_seconds: 2_000,
+            nonce: "self-selected-nonce".to_owned(),
+            evaluation_time_epoch_seconds: None,
+        };
+        assert!(matches!(
+            authority_verifier.verify(&self_selected_req),
+            Err(ScmApiError::AccessDenied)
+        ));
+    }
+
+    #[test]
+    fn trusted_live_gate_defense_in_depth_windows_backend_stays_inert() {
+        let raw_token = b"secret-token-defense-in-depth-inert-suite";
+        let clock = Arc::new(MockClock::new(1_500));
+        let verifier = TokenValidatingOwnerVerifier::with_clock(
+            raw_token,
+            "fixture.scm.a",
+            "fixture-image",
+            true,
+            true,
+            true,
+            clock,
         );
         let request = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
@@ -2714,7 +3098,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "defense-in-depth-nonce".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         let gate =
             LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();
@@ -2751,14 +3135,16 @@ mod tests {
 
     #[test]
     fn trusted_live_gate_controls_mock_backend_on_exact_identity() {
-        let raw_token = b"secret-owner-authorization-token-2026";
-        let verifier = TokenValidatingOwnerVerifier::new(
+        let raw_token = b"secret-token-controls-mock-exact-suite";
+        let clock = Arc::new(MockClock::new(1_500));
+        let verifier = TokenValidatingOwnerVerifier::with_clock(
             raw_token,
             "fixture.scm.a",
             "fixture-image",
             true,
             true,
             false,
+            clock,
         );
         let request = TrustedOwnerAuthorizationRequest {
             service_name: "fixture.scm.a".to_owned(),
@@ -2770,7 +3156,7 @@ mod tests {
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "mock-exact-nonce".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         let gate =
             LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();

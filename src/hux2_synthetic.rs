@@ -434,7 +434,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
             nonce: "hux2-synth-nonce".to_owned(),
-            evaluation_time_epoch_seconds: Some(1_500),
+            evaluation_time_epoch_seconds: None,
         };
         let disposition = match LiveScmExecutionGate::from_trusted_owner_authorization(
             &UnissuedOwnerAuthorizationVerifier,

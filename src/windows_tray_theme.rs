@@ -1895,39 +1895,31 @@ unsafe extern "system" fn owner_draw_proc(
     reference_data: usize,
 ) -> LRESULT {
     match message {
-        WM_INITMENUPOPUP => {
-            if reference_data != 0 {
-                let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
-                tooltip.evidence.init_menu_popup_count += 1;
-                tooltip.evidence_dirty = true;
-            }
+        WM_INITMENUPOPUP if reference_data != 0 => {
+            let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
+            tooltip.evidence.init_menu_popup_count += 1;
+            tooltip.evidence_dirty = true;
         }
-        WM_MENUSELECT => {
-            if reference_data != 0 {
-                let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
-                let flags = ((wparam >> 16) & 0xffff) as u32;
-                if flags == 0xffff && lparam == 0 {
-                    tooltip.evidence.menu_close_count += 1;
-                    tooltip.evidence_dirty = true;
-                    tooltip.queue_dismiss(HintDismissal::MenuClosed);
-                } else {
-                    tooltip.select(resolve_menu_selection(&tooltip.registry, wparam, lparam));
-                }
-            }
-        }
-        WM_UNINITMENUPOPUP => {
-            if reference_data != 0 {
-                let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
-                tooltip.evidence.uninit_menu_popup_count += 1;
+        WM_MENUSELECT if reference_data != 0 => {
+            let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
+            let flags = ((wparam >> 16) & 0xffff) as u32;
+            if flags == 0xffff && lparam == 0 {
+                tooltip.evidence.menu_close_count += 1;
                 tooltip.evidence_dirty = true;
                 tooltip.queue_dismiss(HintDismissal::MenuClosed);
+            } else {
+                tooltip.select(resolve_menu_selection(&tooltip.registry, wparam, lparam));
             }
         }
-        WM_DPICHANGED => {
-            if reference_data != 0 {
-                let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
-                tooltip.note_dpi_changed();
-            }
+        WM_UNINITMENUPOPUP if reference_data != 0 => {
+            let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
+            tooltip.evidence.uninit_menu_popup_count += 1;
+            tooltip.evidence_dirty = true;
+            tooltip.queue_dismiss(HintDismissal::MenuClosed);
+        }
+        WM_DPICHANGED if reference_data != 0 => {
+            let tooltip = &mut *(reference_data as *mut MenuHintTooltip);
+            tooltip.note_dpi_changed();
         }
         WM_TIMER if wparam == HINT_EXERCISE_CLOSE_TIMER_ID => {
             KillTimer(hwnd, HINT_EXERCISE_CLOSE_TIMER_ID);
