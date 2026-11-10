@@ -7,9 +7,9 @@ authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
-CANDIDATE_HEAD=68eccdd6f57823c9142e7ca63ac30b217c58e50e
+CANDIDATE_HEAD=c3f939611b4028cf565ec1d441112467d0187e07
 CODE_ANCHOR=b221eaf57be5a0a3952ba0e30d1e3895e34749f9
-HOSTED_CI_RUN=42612738829 (PASS_ALL 6/6 jobs)
+HOSTED_CI_RUN=42655292685 (PASS_ALL 6/6 jobs)
 SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
 INDEPENDENT_REVIEW_PENDING=true
@@ -134,9 +134,9 @@ SOURCE:
   src/package.rs
 
 CANDIDATE_FREEZE:
-  CANDIDATE_HEAD=68eccdd6f57823c9142e7ca63ac30b217c58e50e
+  CANDIDATE_HEAD=c3f939611b4028cf565ec1d441112467d0187e07
   CODE_ANCHOR=b221eaf57be5a0a3952ba0e30d1e3895e34749f9
-  HOSTED_CI_RUN=42612738829 (PASS_ALL 6/6 jobs)
+  HOSTED_CI_RUN=42655292685 (PASS_ALL 6/6 jobs)
 
 TESTS (all passing locally and on hosted CI):
   cargo test --lib scm_
