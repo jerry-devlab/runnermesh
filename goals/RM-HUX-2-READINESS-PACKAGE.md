@@ -7,14 +7,14 @@ authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
-PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8
-CODE_ANCHOR=563a6a31d15647b2409f064ee861e621e8bc38a8
-PREDECESSOR_DOCS_PR_HEAD=cd0af1521c75cbfb88302f31b6b55363b9f1d0ca
-PREDECESSOR_DOCS_PR_CI=43009983415 (PASS_ALL 6/6 jobs)
-SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (356/356 cargo tests)
+PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PREDECESSOR_DOCS_PR_HEAD=9155ad7310ae950a7f14e3e3b7b252ce8a3ce38f
+PREDECESSOR_DOCS_PR_CI=43024450360 (PASS_ALL 6/6 jobs)
+SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (357/357 cargo tests)
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
 TRUSTED_AUTH_VERIFIER=VERIFIED      # TokenValidatingOwnerVerifier + refusal paths tested
-INDEPENDENT_SECURITY_REVIEW=PASS
+INDEPENDENT_SECURITY_REVIEW=PENDING
 LIVE_NOT_AUTHORIZED=true
 IMPLEMENTER_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
 TRUSTED_OWNER_AUTH=UNISSUED         # UnissuedOwnerAuthorizationVerifier default

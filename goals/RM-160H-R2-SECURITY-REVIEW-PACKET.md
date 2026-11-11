@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **AUDIT_COMPLETE** · `INDEPENDENT_SECURITY_REVIEW=PASS`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit delivered formal PASS disposition on 2026-11-11 following nuclear remediation of R4 and R6 on candidate commit `563a6a31d15647b2409f064ee861e621e8bc38a8`.
+Status: **IN_REVIEW** · `INDEPENDENT_SECURITY_REVIEW=PENDING`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit re-opened as PENDING following unification of R6 background periodic dispatch and falsifiability test on candidate commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`.
 
 ## 1. Candidate HEADs Under Review
 
@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8`<br>`PR_65_CANDIDATE_HEAD=563a6a31d15647b2409f064ee861e621e8bc38a8` | Run 43022730033 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_65_CANDIDATE_HEAD=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` | Pending candidate push | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -20,20 +20,20 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=b22f7f020f0df900ad5aa7f941a1981cef8da62358f334c2c99d4a5325069b8e
-CANDIDATE_ZIP_BYTES=1165011
+CANDIDATE_ZIP_SHA256=e6d9dabfdcecf75779e6ad54867b7e422708a779acd5412d9e78e53b98efec18
+CANDIDATE_ZIP_BYTES=1171857
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=2efead4e371a357a1a047a626de0494da8c100deb19faad22623cc8f81c635cb
-CANDIDATE_HELPER_BYTES=1777664
+CANDIDATE_HELPER_SHA256=7bd7e591e8781857d0db8e51777ff032436885be03acbb9384580de7ab00b8f5
+CANDIDATE_HELPER_BYTES=1782272
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8
+PROVENANCE_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
 INDEPENDENT_HASH_CHECK=PASS
 EXTRACT_TEST=PASS
 INSTALL_TEST=PASS
-SANDBOX_LIFECYCLE_TESTS=PASS (356/356 cargo tests)
+SANDBOX_LIFECYCLE_TESTS=PASS (357/357 cargo tests)
 ```
 
 ## 2. Risk & Architecture Map
@@ -59,7 +59,7 @@ SANDBOX_LIFECYCLE_TESTS=PASS (356/356 cargo tests)
   4. Multi-Runner Agent Chain & Isolation: Regular Agent entrypoint verification (`tests/regular_agent_runner_loop.rs`) proves that dispatching `RunnersDisable` for runner-a preserves runner-b desired `Full`, achieves active CI execution without interruption (`plan: Noop`, never stopped), persists across Agent reload, and rejects same-scope collisions fail-closed.
   5. Agent Loop SCM Integration & Multi-Runner Zero Control Action Proof: `AgentCore::observe_decide_reconcile` connects regular multi-runner lifecycle reconciliation directly to narrow service control dispatch. Integration test (`tests/regular_agent_runner_loop.rs`) drives regular Agent startup and polling entrypoints with `MockScmBackend` per-service tracking across 4 sequential phases: Phase 1 proves A receives 0 Stop calls while its selector is present (`selector_present: Some(true)`); Phase 2 proves A receives 0 Stop calls while withdrawal status is unknown (`selector_observation_unknown: true`); Phase 3 proves A receives 0 Stop calls while Worker is busy (`worker_present: true`, `lifecycle: Busy`); Phase 4 proves A receives Stop only after independent readback confirms selector is absent, Worker is idle, and plan allows stop (`PerRunnerPlan::Noop`, `PerRunnerAchieved::Drained`). Throughout all 4 phases, Runner B receives ZERO control actions (`mock_scm.service_actions("actions.runner.b").is_empty()`, `mock_scm.service_stop_calls == 0`, `mock_scm.service_start_calls == 0`).
   6. Scoped Selector ADR 0006 Posture: Remains `DRAFT_NOT_ACCEPTED`. Zero live label mutation occurs without explicit Owner decision.
-  7. Installed Agent Runtime Sandbox Loop (R6 Installed Assembly Remediation): In response to the Codex counterexample, `start_installed_agent_sandbox` is implemented in `src/agent_runtime.rs` to drive the authentic installed agent startup path with real Named Pipe IPC (`spawn_pipe_loop`), background polling loop (`observe_decide_reconcile`), 4-phase sequential Stop dispatch on Runner A, zero control action isolation on Runner B, clean IPC shutdown (`ExitAfterDrain`), restart durability from disk storage, and ADR-0004 collision refusal. Tested end-to-end in `tests/r4_r6_failure_reproduction.rs`.
+  7. Installed Agent Runtime Startup Assembly & Periodic Scheduling Loop Unification (R6 Closure): In response to the Codex counterexample against 563a6a3, `assemble_installed_core` and `spawn_periodic_loop` are unified across installed production (`run_installed_agent`) and sandbox (`start_installed_agent_sandbox`). Production wires `SandboxMultiRunnerLifecycleBackend` with fail-closed inert backend (`WindowsScmBackend::mutation_inert()`, `LiveScmExecutionGate::CLOSED`). Manual `step_poll()` is completely eliminated from the codebase. Runner A disable intent is changed strictly over real Named Pipe IPC (`RunnersDisable`). The background periodic loop automatically produces the 4-phase sequential Stop dispatch without manual stepping, leaving Runner B with zero control actions. Falsifiability is proven via `regression_r6_falsifiability_proves_disabled_scheduler_produces_zero_actions` (disabling the periodic scheduler produces zero actions even with Phase 4 conditions). Tested end-to-end in `tests/r4_r6_failure_reproduction.rs`.
 
 ### Surface C: Installation & Autostart Boundaries
 - **Files**: `src/installation.rs`, `src/package.rs`, `src/cli.rs`
@@ -120,18 +120,33 @@ DISPOSITION=SUPERSEDED_BY_COUNTEREXAMPLE
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL-2
 ```
 
-### Current Review Intake (Candidate 563a6a3 Supplementary Independent Auditor Evaluation)
+### Historical Review Record (Candidate 563a6a3 Audit Pass - Superseded by Codex Periodic Scheduling Counterexample)
 
 ```text
 REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
 REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
-STATUS=AUDIT_COMPLETE
 BOUND_COMMIT_SHA=563a6a31d15647b2409f064ee861e621e8bc38a8
 PR_REFERENCE=PR #65 (HEAD: f8903d7, Candidate: 563a6a31d15647b2409f064ee861e621e8bc38a8)
 HOSTED_CI_RUN=43022730033 (PASS_ALL 6/6 jobs green)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
-FINDINGS_SUMMARY=Nuclear remediation of R4 and R6 verified. Hardcoded authority roots completely deleted; TokenValidatingOwnerVerifier authority constructors isolated to internal test boundaries (pub(crate) / #[cfg(test)]); external callers unconditionally receive AuthorizationNotIssued (zero public minting paths). Installed agent runtime verified via authentic start_installed_agent_sandbox entrypoint driving real Named Pipe IPC, background polling, 4-phase sequential Stop dispatch on Runner A, and zero control action isolation on Runner B. Candidate package binaries verified with exact SHA-256 digests and provenance. Live Windows adapter writes remain inert (GateClosed).
-DISPOSITION=PASS
-SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL
+FINDINGS_SUMMARY=Pass superseded by Codex counterexample: run_agent still passed None for multi_runner_backend, and test step_poll bypassed the background periodic scheduler loop, leaving the periodic runtime chain unproven. Retained as historical evidence.
+DISPOSITION=SUPERSEDED_BY_COUNTEREXAMPLE
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL-3
+```
+
+### Current Review Intake (Candidate 0c266ec Unified Scheduler Loop & Falsifiability Re-Audit)
+
+```text
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
+REVIEW_DATE=2026-11-11
+TARGET_TRACK=TRACK_2_HUX2_PR65
+STATUS=IN_REVIEW
+BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6)
+HOSTED_CI_RUN=Pending candidate push
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
+FINDINGS_SUMMARY=Re-opened for independent evaluation following R6 periodic scheduling unification: step_poll eliminated, run_installed_agent wired with fail-closed multi-runner backend, background periodic scheduler automatically drives 4-phase Stop dispatch via IPC intent change, and falsifiability negative test proves disabled scheduler produces 0 actions.
+DISPOSITION=PENDING
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-PENDING
 ```

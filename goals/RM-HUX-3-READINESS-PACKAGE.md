@@ -7,10 +7,10 @@ It does **not** authorize live label mutation, live service mutation, or product
 Implementer self-review is not independent acceptance.
 
 ```text
-PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8
-CODE_ANCHOR=563a6a31d15647b2409f064ee861e621e8bc38a8
-PREDECESSOR_DOCS_PR_HEAD=cd0af1521c75cbfb88302f31b6b55363b9f1d0ca
-PREDECESSOR_DOCS_PR_CI=43009983415 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PREDECESSOR_DOCS_PR_HEAD=9155ad7310ae950a7f14e3e3b7b252ce8a3ce38f
+PREDECESSOR_DOCS_PR_CI=43024450360 (PASS_ALL 6/6 jobs)
 SANDBOX_TWO_RUNNER_PASS=PASS        # prepare_two_runner_sandbox layout + tests
 AGENT_CORE_MULTI_RUNNER=PASS        # single authority multi-runner matrix
 AGENT_ENTRYPOINT_ISOLATION=PASS     # agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution
