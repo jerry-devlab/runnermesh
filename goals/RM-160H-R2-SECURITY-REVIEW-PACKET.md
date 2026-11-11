@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **REOPENED_FOR_COUNTEREXAMPLE** · `INDEPENDENT_SECURITY_REVIEW=PENDING`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. Current candidate review reopened: Codex counterexample reproduced public test root minting TrustedLive (R4=FAIL) and R6 installed agent loop unproven (R6=UNPROVEN). Independent security review remains PENDING pending remediation and supplementary re-audit.
+Status: **AUDIT_COMPLETE** · `INDEPENDENT_SECURITY_REVIEW=PASS`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit delivered formal PASS disposition on 2026-11-11 following nuclear remediation of R4 and R6 on candidate commit `563a6a31d15647b2409f064ee861e621e8bc38a8`.
 
 ## 1. Candidate HEADs Under Review
 
@@ -120,17 +120,18 @@ DISPOSITION=SUPERSEDED_BY_COUNTEREXAMPLE
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL-2
 ```
 
-### Current Review Intake (Candidate 563a6a3 Remediation & Independent Auditor Re-Audit)
+### Current Review Intake (Candidate 563a6a3 Supplementary Independent Auditor Evaluation)
 
 ```text
 REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
 REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
-STATUS=READY_FOR_INDEPENDENT_AUDIT
-PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8
-PR_REFERENCE=PR #65 (HEAD: d9fc47b, Candidate: 563a6a31d15647b2409f064ee861e621e8bc38a8)
-HOSTED_CI_RUN=43022730033 (PASS_ALL 6/6 jobs)
-R4_STATUS=SOURCE_LOCAL_PASS (Hardcoded roots removed, test privilege isolated, external negative matrix verified)
-R6_STATUS=SOURCE_LOCAL_PASS (Installed agent sandbox runtime driven via IPC and polling loop, 4-phase sequential stop on A, zero control action on B)
-DISPOSITION=PENDING (Awaiting formal evaluation report from independent auditor)
+STATUS=AUDIT_COMPLETE
+BOUND_COMMIT_SHA=563a6a31d15647b2409f064ee861e621e8bc38a8
+PR_REFERENCE=PR #65 (HEAD: f8903d7, Candidate: 563a6a31d15647b2409f064ee861e621e8bc38a8)
+HOSTED_CI_RUN=43022730033 (PASS_ALL 6/6 jobs green)
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
+FINDINGS_SUMMARY=Nuclear remediation of R4 and R6 verified. Hardcoded authority roots completely deleted; TokenValidatingOwnerVerifier authority constructors isolated to internal test boundaries (pub(crate) / #[cfg(test)]); external callers unconditionally receive AuthorizationNotIssued (zero public minting paths). Installed agent runtime verified via authentic start_installed_agent_sandbox entrypoint driving real Named Pipe IPC, background polling, 4-phase sequential Stop dispatch on Runner A, and zero control action isolation on Runner B. Candidate package binaries verified with exact SHA-256 digests and provenance. Live Windows adapter writes remain inert (GateClosed).
+DISPOSITION=PASS
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL
 ```
