@@ -312,7 +312,8 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
         ipc_endpoint: ipc_endpoint.clone(),
         multi_runner_backend: Some(lifecycle_backend.clone()),
         discovery_report: Some(discovery_report),
-        poll_interval: Duration::from_millis(50),
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
     };
 
     // 1. Start the installed Agent runtime with explicit sandbox configuration
@@ -359,7 +360,7 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
         runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.applied)
     ));
 
-    // 3. Drive 4-phase sequential Stop dispatch via Agent observation & polling
+    // 3. Drive 4-phase sequential Stop dispatch via Agent observation driven automatically by background scheduler
     // Phase 1: Selector present -> 0 Stop calls
     lifecycle_backend.set_observations(vec![
         PerRunnerObservation {
@@ -383,7 +384,7 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
             same_scope_managed_collision: false,
         },
     ]);
-    let _ = runtime.step_poll().unwrap();
+    thread::sleep(Duration::from_millis(100));
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
 
@@ -433,7 +434,7 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
             same_scope_managed_collision: false,
         },
     ]);
-    let _ = runtime.step_poll().unwrap();
+    thread::sleep(Duration::from_millis(100));
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
 
@@ -460,11 +461,12 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
             same_scope_managed_collision: false,
         },
     ]);
-    let _ = runtime.step_poll().unwrap();
+    thread::sleep(Duration::from_millis(100));
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
 
     // Phase 4: Confirmed absent + Worker idle -> exactly 1 Stop call for A, 0 for B
+    // Produced automatically by the background periodic loop without manual stepping
     lifecycle_backend.set_observations(vec![
         PerRunnerObservation {
             local_runner_key: "runner-a".to_string(),
@@ -487,8 +489,17 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
             same_scope_managed_collision: false,
         },
     ]);
-    let _ = runtime.step_poll().unwrap();
-    assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 1);
+    let start = std::time::Instant::now();
+    while mock_scm.service_stop_calls("actions.runner.a") < 1
+        && start.elapsed() < Duration::from_secs(2)
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        mock_scm.service_stop_calls("actions.runner.a"),
+        1,
+        "Background periodic scheduler MUST automatically trigger Stop for runner A"
+    );
     assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
     assert_eq!(mock_scm.service_start_calls("actions.runner.b"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
@@ -601,4 +612,222 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
         collision_result,
         Err(RegistryError::SameScopeManagedAdmissionCollision)
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn regression_r6_falsifiability_proves_disabled_scheduler_produces_zero_actions() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("runnermesh-r6-falsify-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let home_a = temp_dir.join("runner-a");
+    let home_b = temp_dir.join("runner-b");
+    let _ = std::fs::create_dir_all(home_a.join("bin"));
+    let _ = std::fs::create_dir_all(home_b.join("bin"));
+    let _ = std::fs::write(home_a.join("bin").join("RunnerService.exe"), b"stub-a");
+    let _ = std::fs::write(home_b.join("bin").join("RunnerService.exe"), b"stub-b");
+    let image_token_a = runner_service_image_token(&home_a);
+    let image_token_b = runner_service_image_token(&home_b);
+
+    let identity = OpaqueIdentityReference::new(
+        WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    )
+    .unwrap();
+
+    let mock_scm = MockScmBackend::new();
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.a".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: image_token_a.clone(),
+        execution_identity_token: identity.key.clone(),
+    });
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.b".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: true,
+        image_token: image_token_b.clone(),
+        execution_identity_token: identity.key.clone(),
+    });
+
+    let gate_a = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        "actions.runner.a",
+        &image_token_a,
+        false,
+        true,
+        false,
+    ))
+    .unwrap();
+    let helper_a = PrivilegedScmHelper::new(mock_scm.clone(), gate_a);
+    let lifecycle_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper_a));
+
+    let discovery_report = DiscoveryReport {
+        schema_version: runnermesh::RUNNER_DISCOVERY_SCHEMA_VERSION,
+        read_only: true,
+        exhaustive: false,
+        service_enumeration: runnermesh::DiscoveryEnumerationStatus::Ok,
+        session_enumeration: runnermesh::DiscoveryEnumerationStatus::Ok,
+        process_observation: runnermesh::DiscoveryEnumerationStatus::Ok,
+        candidates: vec![
+            DiscoveredRunner {
+                local_discovery_key: "runner-a".to_string(),
+                disposition: DiscoveryDisposition::ObservedOnly,
+                refusal: None,
+                backend: RunnerBackendKind::WindowsService,
+                identity: DiscoveredRunnerIdentity {
+                    registration_scope: Some(RegistrationScope::Repository {
+                        owner: "test-org".to_string(),
+                        repository: "repo-a".to_string(),
+                    }),
+                    runner_id: Some(201),
+                    expected_runner_name: Some("runner-a".to_string()),
+                    runner_home: home_a.clone(),
+                    work_root: Some(home_a.join("_work")),
+                    execution_identity_ref: Some(identity.clone()),
+                },
+                service: Some(DiscoveredServiceBinding {
+                    service_name: "actions.runner.a".to_string(),
+                    display_name: Some("Runner A Service".to_string()),
+                    image_path: Some(home_a.join("bin").join("RunnerService.exe")),
+                    state: DiscoveredLifecycle::Listening,
+                }),
+                session: None,
+                capabilities: DiscoveryCapabilities {
+                    service_control_contract: true,
+                    user_session_control_contract: false,
+                    enrollment_eligible: true,
+                },
+                same_scope_collision: false,
+                observed_lifecycle: DiscoveredLifecycle::Listening,
+            },
+            DiscoveredRunner {
+                local_discovery_key: "runner-b".to_string(),
+                disposition: DiscoveryDisposition::ObservedOnly,
+                refusal: None,
+                backend: RunnerBackendKind::WindowsService,
+                identity: DiscoveredRunnerIdentity {
+                    registration_scope: Some(RegistrationScope::Repository {
+                        owner: "test-org".to_string(),
+                        repository: "repo-b".to_string(),
+                    }),
+                    runner_id: Some(202),
+                    expected_runner_name: Some("runner-b".to_string()),
+                    runner_home: home_b.clone(),
+                    work_root: Some(home_b.join("_work")),
+                    execution_identity_ref: Some(identity),
+                },
+                service: Some(DiscoveredServiceBinding {
+                    service_name: "actions.runner.b".to_string(),
+                    display_name: Some("Runner B Service".to_string()),
+                    image_path: Some(home_b.join("bin").join("RunnerService.exe")),
+                    state: DiscoveredLifecycle::Listening,
+                }),
+                session: None,
+                capabilities: DiscoveryCapabilities {
+                    service_control_contract: true,
+                    user_session_control_contract: false,
+                    enrollment_eligible: true,
+                },
+                same_scope_collision: false,
+                observed_lifecycle: DiscoveredLifecycle::Listening,
+            },
+        ],
+    };
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("r6-falsify-{}", std::process::id()));
+
+    // CRITICAL: enable_periodic_scheduler is explicitly FALSE
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: temp_dir.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(lifecycle_backend.clone()),
+        discovery_report: Some(discovery_report),
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: false,
+    };
+
+    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    for key in ["runner-a", "runner-b"] {
+        let _ = ipc_client
+            .call(IpcRequest::new(AgentCommand::RunnersEnroll {
+                local_runner_key: key.to_string(),
+                prepare_only: false,
+            }))
+            .expect("IPC RunnersEnroll must succeed");
+    }
+
+    let _ = ipc_client
+        .call(IpcRequest::new(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        }))
+        .expect("IPC SetMode must succeed");
+
+    let _ = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-a".to_string(),
+            when_idle: true,
+            prepare_only: false,
+        }))
+        .expect("IPC RunnersDisable must succeed");
+
+    // Present Phase 4 observation (confirmed absent + idle) where Stop would normally be dispatched
+    lifecycle_backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-a".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(false),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-b".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
+
+    // Wait 150ms: without the periodic scheduler running, zero actions can be dispatched
+    thread::sleep(Duration::from_millis(150));
+
+    // FALSIFIABILITY PROOF:
+    // Because the periodic scheduler is disabled and manual step_poll is eliminated,
+    // runner A Stop calls MUST remain 0!
+    assert_eq!(
+        mock_scm.service_stop_calls("actions.runner.a"),
+        0,
+        "Disabled periodic scheduler MUST produce ZERO Stop calls (falsifiability proof)"
+    );
+    assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
+    assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::ExitAfterDrain))
+        .expect("ExitAfterDrain via IPC must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Accepted { .. })
+    ));
+    runtime.shutdown();
 }

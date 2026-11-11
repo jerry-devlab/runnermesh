@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -30,11 +30,13 @@ use crate::{
     DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
     ExecutionIdentityEvidence, FileConfigStore, HardSafetyState, HostSnapshot, HostSource,
     Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    LocalAgentTransport, MultiRunnerLifecycleBackend, NativeTrayEventLoop, OfficialRunnerObserver,
-    OwnershipEvidence, ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph,
-    TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
+    LiveScmExecutionGate, LocalAgentTransport, MultiRunnerLifecycleBackend, NativeTrayEventLoop,
+    OfficialRunnerObserver, OwnershipEvidence, PrivilegedScmHelper, ProcessListProbe, ReasonCode,
+    RunnerPhase, SandboxMultiRunnerLifecycleBackend, ThemePreference, TrayIconGlyph, TrayMenuEntry,
+    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
     WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
-    WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
+    WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
+    WindowsUserSessionSupervisorAdapter,
 };
 
 /// Reconstructable smoke evidence persisted only under the selected runtime
@@ -115,6 +117,7 @@ pub fn run_development_agent(
         development_root,
         observer,
         RuntimeReconciler::Unconfigured(NoRunnerControl),
+        None,
         true,
     )
 }
@@ -175,11 +178,18 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
         return Err("installed Agent state root is a reparse point".to_owned());
     }
+    let multi_runner_backend: Arc<dyn MultiRunnerLifecycleBackend> = Arc::new(
+        SandboxMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
+            WindowsScmBackend::mutation_inert(),
+            LiveScmExecutionGate::CLOSED,
+        )),
+    );
     run_agent(
         installation.agent_config_path(),
         state_root,
         observer,
         reconciler,
+        Some(multi_runner_backend),
         false,
     )
 }
@@ -223,6 +233,7 @@ pub struct InstalledAgentSandboxConfig {
     pub multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     pub discovery_report: Option<crate::DiscoveryReport>,
     pub poll_interval: Duration,
+    pub enable_periodic_scheduler: bool,
 }
 
 /// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
@@ -234,16 +245,6 @@ pub struct RunningInstalledAgentSandbox {
 }
 
 impl RunningInstalledAgentSandbox {
-    /// Triggers an immediate observation-decision-reconcile cycle on the shared AgentCore.
-    pub fn step_poll(&self) -> Result<AgentSnapshot, String> {
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| "Agent runtime core mutex poisoned".to_string())?;
-        core.observe_decide_reconcile()
-            .map_err(|error| error.to_string())
-    }
-
     /// Returns the current snapshot from the running AgentCore.
     pub fn snapshot(&self) -> AgentSnapshot {
         self.core.lock().unwrap().snapshot()
@@ -264,6 +265,36 @@ impl RunningInstalledAgentSandbox {
             let _ = handle.join();
         }
     }
+}
+
+/// Spawns the authentic periodic observation, decision, reconciliation, and multi-runner
+/// dispatch loop shared by installed production and sandboxed test execution.
+pub(crate) fn spawn_periodic_loop(
+    core: Arc<Mutex<RuntimeCore>>,
+    exit: Arc<RuntimeExitState>,
+    interval: Duration,
+    snapshot_sender: Option<Sender<AgentSnapshot>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !exit.requested.load(Ordering::Acquire) {
+            thread::sleep(interval);
+            if exit.requested.load(Ordering::Acquire) {
+                break;
+            }
+            if let Ok(mut core) = core.lock() {
+                if let Ok(snapshot) = core.observe_decide_reconcile() {
+                    if exit.after_drain.load(Ordering::Acquire)
+                        && snapshot.achieved_node_state == Some(crate::NodeState::Drained)
+                    {
+                        exit.requested.store(true, Ordering::Release);
+                    }
+                    if let Some(ref sender) = snapshot_sender {
+                        let _ = sender.send(snapshot);
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Starts an installed Agent runtime under explicit sandbox configuration.
@@ -312,26 +343,22 @@ pub fn start_installed_agent_sandbox(
         false,
     );
 
-    let core_for_poll = Arc::clone(&core);
-    let exit_for_poll = Arc::clone(&exit);
-    let poll_interval = config.poll_interval;
-    let poll_thread = thread::spawn(move || {
-        while !exit_for_poll.requested.load(Ordering::Acquire) {
-            thread::sleep(poll_interval);
-            if exit_for_poll.requested.load(Ordering::Acquire) {
-                break;
-            }
-            if let Ok(mut core) = core_for_poll.lock() {
-                let _ = core.observe_decide_reconcile();
-            }
-        }
-    });
+    let poll_thread = if config.enable_periodic_scheduler {
+        Some(spawn_periodic_loop(
+            Arc::clone(&core),
+            Arc::clone(&exit),
+            config.poll_interval,
+            None,
+        ))
+    } else {
+        None
+    };
 
     Ok(RunningInstalledAgentSandbox {
         core,
         exit,
         pipe_thread: Some(pipe_thread),
-        poll_thread: Some(poll_thread),
+        poll_thread,
     })
 }
 
@@ -340,6 +367,7 @@ fn run_agent(
     runtime_state_root: PathBuf,
     observer: RuntimeObserver,
     reconciler: RuntimeReconciler,
+    multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     development_controls: bool,
 ) -> Result<(), String> {
     // Acquire the user-scoped authority guard before constructing a configured
@@ -353,7 +381,8 @@ fn run_agent(
         runner_home.as_deref(),
         runner_control_configured,
     ));
-    let mut core = assemble_installed_core(config_path, observer, reconciler, None)?;
+    let mut core =
+        assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)?;
     let initial_snapshot = core
         .observe_decide_reconcile()
         .map_err(|error| error.to_string())?;
@@ -367,13 +396,18 @@ fn run_agent(
         Arc::clone(&core),
         Arc::clone(&exit),
         Arc::clone(&readiness),
-        snapshot_sender,
+        snapshot_sender.clone(),
         development_controls,
+    );
+    let periodic_thread = spawn_periodic_loop(
+        Arc::clone(&core),
+        Arc::clone(&exit),
+        Duration::from_secs(1),
+        Some(snapshot_sender),
     );
 
     let result = run_native_tray_loop(
         &runtime_state_root,
-        Arc::clone(&core),
         initial_snapshot,
         snapshot_receiver,
         Arc::clone(&exit),
@@ -384,11 +418,12 @@ fn run_agent(
     // Exit is requested through the same typed local IPC route. The pipe loop
     // returns after that request; never force-terminate a thread or runner.
     let _ = pipe_thread.join();
+    let _ = periodic_thread.join();
     result
 }
 
 #[derive(Default)]
-struct RuntimeExitState {
+pub(crate) struct RuntimeExitState {
     requested: AtomicBool,
     after_drain: AtomicBool,
 }
@@ -476,7 +511,6 @@ fn spawn_pipe_loop(
 
 fn run_native_tray_loop(
     runtime_state_root: &Path,
-    core: Arc<Mutex<RuntimeCore>>,
     initial_snapshot: AgentSnapshot,
     snapshots: Receiver<AgentSnapshot>,
     exit: Arc<RuntimeExitState>,
@@ -513,42 +547,9 @@ fn run_native_tray_loop(
     )?;
     write_runtime_stage(runtime_state_root, "runtime-ready")?;
     write_hint_evidence(runtime_state_root, &mut native)?;
-    let mut last_observation = Instant::now();
 
     while !exit.requested.load(Ordering::Acquire) {
         pump_windows_messages();
-        if last_observation.elapsed() >= Duration::from_secs(1) {
-            // Observation is reconstructed in the Agent Core on the normal
-            // Observe -> Decide -> Reconcile path. It is independent of tray
-            // rendering. Installed runtimes reconcile only through the exact
-            // accepted binding; development remains explicitly unconfigured.
-            if let Ok(mut core) = core.lock() {
-                if let Ok(snapshot) = core.observe_decide_reconcile() {
-                    current_snapshot = snapshot;
-                    let render = frontend
-                        .apply(TrayUiUpdate::Snapshot(current_snapshot.clone()))
-                        .map_err(|error| error.to_string())?;
-                    native.apply(
-                        render,
-                        current_snapshot.effective_ui_preferences.theme,
-                        current_snapshot.ui_preferences.theme != ThemePreference::System,
-                    )?;
-                    refreshes += 1;
-                    write_runtime_evidence(
-                        runtime_state_root,
-                        &current_snapshot,
-                        refreshes,
-                        development_controls,
-                    )?;
-                    if exit.after_drain.load(Ordering::Acquire)
-                        && current_snapshot.achieved_node_state == Some(crate::NodeState::Drained)
-                    {
-                        exit.requested.store(true, Ordering::Release);
-                    }
-                }
-            }
-            last_observation = Instant::now();
-        }
         if native.take_dpi_refresh_request() {
             let render = frontend
                 .current_render()
