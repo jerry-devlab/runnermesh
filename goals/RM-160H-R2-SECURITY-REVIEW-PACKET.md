@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=5dbdab73ac54326212cf114f2ebbd4778873af12`<br>`PR_65_CANDIDATE_HEAD=5dbdab73ac54326212cf114f2ebbd4778873af12` | Predecessor Tip: Run 42829617044 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=d481ec236db6d7b26c2e2764f6932ee2bf2f7f98`<br>`PR_65_CANDIDATE_HEAD=d481ec236db6d7b26c2e2764f6932ee2bf2f7f98` | Predecessor Tip: Run 42829617044 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -20,13 +20,13 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=d44cfadbb2db00d26803775c0fe7b5a9df8e3fbf2f13b8eb3f1342bb3d944468
-CANDIDATE_ZIP_BYTES=1165023
+CANDIDATE_ZIP_SHA256=ff4ded170136cd9a5fd3c8e171c71a10e16d815c9a585c181900b3fdb3b3951f
+CANDIDATE_ZIP_BYTES=1164617
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=c534758a30cac0c51090f1748f3c372807626abe0010dfeac452e98f2bd73400
-CANDIDATE_HELPER_BYTES=1778176
+CANDIDATE_HELPER_SHA256=2547621d7d40f380589a41994d7c66cf5bfc40ac37972ef42cc38fade49c88ea
+CANDIDATE_HELPER_BYTES=1777664
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=5dbdab73ac54326212cf114f2ebbd4778873af12
+PROVENANCE_COMMIT=d481ec236db6d7b26c2e2764f6932ee2bf2f7f98
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
@@ -110,7 +110,7 @@ REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR (Authorized Read-Only External)
 REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
 STATUS=PENDING_EXTERNAL_AUDITOR_WINDOW
-PACKAGE_BUILD_COMMIT=5dbdab73ac54326212cf114f2ebbd4778873af12
+PACKAGE_BUILD_COMMIT=d481ec236db6d7b26c2e2764f6932ee2bf2f7f98
 PR_REFERENCE=PR #65 (feat/160h-gt01-field-baseline)
 R4_VERIFICATION=PASS_LOCAL (Self-selected raw token refused, unauthorized root refused, atomic ledger permits exactly 1 of 8 concurrent races, Win32 adapter writes sealed GateClosed)
 R6_VERIFICATION=PASS_LOCAL (assemble_installed_core wires multi-runner lifecycle backend; 4-phase sequential Stop dispatch verified for A, 0 actions for B, restart persistence verified, ADR 0004 collision refusal verified)
