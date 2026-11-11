@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8`<br>`PR_65_CANDIDATE_HEAD=563a6a31d15647b2409f064ee861e621e8bc38a8` | Pending CI on updated candidate | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8`<br>`PR_65_CANDIDATE_HEAD=563a6a31d15647b2409f064ee861e621e8bc38a8` | Run 43022730033 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -128,7 +128,8 @@ REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
 STATUS=READY_FOR_INDEPENDENT_AUDIT
 PACKAGE_BUILD_COMMIT=563a6a31d15647b2409f064ee861e621e8bc38a8
-PR_REFERENCE=PR #65 (Candidate: 563a6a31d15647b2409f064ee861e621e8bc38a8)
+PR_REFERENCE=PR #65 (HEAD: d9fc47b, Candidate: 563a6a31d15647b2409f064ee861e621e8bc38a8)
+HOSTED_CI_RUN=43022730033 (PASS_ALL 6/6 jobs)
 R4_STATUS=SOURCE_LOCAL_PASS (Hardcoded roots removed, test privilege isolated, external negative matrix verified)
 R6_STATUS=SOURCE_LOCAL_PASS (Installed agent sandbox runtime driven via IPC and polling loop, 4-phase sequential stop on A, zero control action on B)
 DISPOSITION=PENDING (Awaiting formal evaluation report from independent auditor)
