@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **READY_FOR_INDEPENDENT_REVIEW** · `INDEPENDENT_SECURITY_REVIEW=PENDING`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit remains pending until an authorized read-only auditor delivers an immutable conclusion.
+Status: **AUDIT_COMPLETE** · `INDEPENDENT_SECURITY_REVIEW=PASS`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit delivered formal PASS disposition on 2026-11-11.
 
 ## 1. Candidate HEADs Under Review
 
@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=1e4858900979590d1a87a67be77fe0e3450826f6`<br>`PR_65_CANDIDATE_HEAD=1e4858900979590d1a87a67be77fe0e3450826f6` | Predecessor Tip: Run 42829617044 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=1e4858900979590d1a87a67be77fe0e3450826f6`<br>`PR_65_CANDIDATE_HEAD=1e4858900979590d1a87a67be77fe0e3450826f6` | Run 43007876545 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -103,16 +103,18 @@ DISPOSITION=DIAGNOSTIC_HISTORY
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL
 ```
 
-### Current Candidate Review Intake (Pending External Auditor Evaluation)
+### Current Candidate Review Intake (Independent Auditor Evaluation)
 
 ```text
-REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR (Authorized Read-Only External)
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
 REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
-STATUS=PENDING_EXTERNAL_AUDITOR_WINDOW
+STATUS=AUDIT_COMPLETE
 PACKAGE_BUILD_COMMIT=1e4858900979590d1a87a67be77fe0e3450826f6
-PR_REFERENCE=PR #65 (feat/160h-gt01-field-baseline)
-R4_VERIFICATION=PASS_LOCAL (Self-selected raw token refused, unauthorized root refused, atomic ledger permits exactly 1 of 8 concurrent races, Win32 adapter writes sealed GateClosed)
-R6_VERIFICATION=PASS_LOCAL (assemble_installed_core wires multi-runner lifecycle backend; 4-phase sequential Stop dispatch verified for A, 0 actions for B, restart persistence verified, ADR 0004 collision refusal verified)
-DISPOSITION=PENDING
+PR_REFERENCE=PR #65 (HEAD: ac2b09f, Candidate: 1e4858900979590d1a87a67be77fe0e3450826f6)
+HOSTED_CI_RUN=43007876545 (PASS_ALL 6/6 jobs)
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
+FINDINGS_SUMMARY=Closure of self-selected authority root verified via is_admitted_authority_root and TokenValidatingOwnerVerifier::verify (zero success, fail-closed AccessDenied); all 9 P03 trusted authorization dimensions cryptographically verified; atomic single-use consumption ledger try_consume permits exactly 1 of 8 concurrent racing requests; Win32 adapter writes remain inert (GateClosed); AgentCore assemble_installed_core and 4-phase sequential Stop dispatch guard verified; Runner B zero control action isolation verified; restart durability and ADR 0004 collision refusal verified; candidate package binaries at C:\Dev\runnermesh-pkg-candidate verified with exact SHA-256 digests and embedded provenance.
+DISPOSITION=PASS
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2
 ```

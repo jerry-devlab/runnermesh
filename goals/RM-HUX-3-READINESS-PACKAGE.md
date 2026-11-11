@@ -9,8 +9,8 @@ Implementer self-review is not independent acceptance.
 ```text
 PACKAGE_BUILD_COMMIT=1e4858900979590d1a87a67be77fe0e3450826f6
 CODE_ANCHOR=1e4858900979590d1a87a67be77fe0e3450826f6
-PREDECESSOR_DOCS_PR_HEAD=a1836fd2e76c1a8acf7aa20dcb4638801eafb110
-PREDECESSOR_DOCS_PR_CI=42829617044 (PASS_ALL 6/6 jobs)
+PREDECESSOR_DOCS_PR_HEAD=ac2b09f83d2fd48df5afccb5e54b2dc27af5a3ec
+PREDECESSOR_DOCS_PR_CI=43007876545 (PASS_ALL 6/6 jobs)
 SANDBOX_TWO_RUNNER_PASS=PASS        # prepare_two_runner_sandbox layout + tests
 AGENT_CORE_MULTI_RUNNER=PASS        # single authority multi-runner matrix
 AGENT_ENTRYPOINT_ISOLATION=PASS     # agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution
