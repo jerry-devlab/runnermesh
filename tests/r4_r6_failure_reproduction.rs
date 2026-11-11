@@ -10,8 +10,11 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+#[cfg(windows)]
+use runnermesh::agent_runtime::{
+    assemble_installed_core, NoRunnerControl, RuntimeObserver, RuntimeReconciler,
+};
 use runnermesh::{
-    agent_runtime::{assemble_installed_core, NoRunnerControl, RuntimeObserver, RuntimeReconciler},
     runner_service_image_token, LiveScmExecutionGate, MockScmBackend, MockServiceRecord,
     OpaqueIdentityReference, OwnerAuthorizationIssuer, OwnerAuthorizationScope,
     PrivilegedScmHelper, SandboxMultiRunnerLifecycleBackend, ScmApiError, ScmControlBackend,
@@ -179,6 +182,7 @@ fn regression_r4_defense_in_depth_real_scm_writes_sealed() {
     ));
 }
 
+#[cfg(windows)]
 #[test]
 fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolation() {
     let temp_dir = std::env::temp_dir().join(format!("runnermesh-r6-reg-{}", std::process::id()));

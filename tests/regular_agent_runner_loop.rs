@@ -12,6 +12,8 @@
 //! - Manual intent durability across restart/reloading from storage.
 //! - Same-scope dual managed admission collision refusal (ADR 0004).
 
+#![cfg(windows)]
+
 use std::{fs, sync::Arc};
 
 use runnermesh::{

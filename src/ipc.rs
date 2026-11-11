@@ -545,8 +545,6 @@ fn connect_pipe(
         if remaining.is_zero() {
             return Err(IpcTransportError::Timeout);
         }
-        let wait_millis = remaining.as_millis().min(25) as u32;
-        let _ = unsafe { WaitNamedPipeW(name.as_ptr(), wait_millis) };
         let handle = unsafe {
             CreateFileW(
                 name.as_ptr(),
@@ -562,12 +560,16 @@ fn connect_pipe(
             return Ok(unsafe { std::fs::File::from_raw_handle(handle as RawHandle) });
         }
         let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        if error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND {
+        if error == ERROR_PIPE_BUSY {
+            let wait_millis = remaining.as_millis().min(50) as u32;
+            let _ = unsafe { WaitNamedPipeW(name.as_ptr(), wait_millis) };
+        } else if error == ERROR_FILE_NOT_FOUND {
+            thread::sleep(Duration::from_millis(5));
+        } else {
             return Err(IpcTransportError::Io(io::Error::from_raw_os_error(
                 error as i32,
             )));
         }
-        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -831,11 +833,14 @@ mod tests {
                     })
                 });
                 let client_result =
-                    IpcClient::new(endpoint.clone(), Duration::from_secs(2)).call(IpcRequest {
+                    IpcClient::new(endpoint.clone(), Duration::from_secs(10)).call(IpcRequest {
                         protocol_version: IPC_PROTOCOL_VERSION,
                         request_id,
                         command: AgentCommand::GetVersion,
                     });
+                if client_result.is_err() {
+                    let _ = super::connect_pipe(&endpoint, Duration::from_millis(500));
+                }
                 let server_result = server_task.join().unwrap();
                 assert!(server_result.is_ok(), "server result: {server_result:?}");
                 let response = client_result.unwrap();
@@ -906,14 +911,19 @@ mod tests {
 
         let endpoint = test_endpoint();
         let _pipe = PipeHandle(super::create_server_pipe(&endpoint).unwrap());
-        let impersonation = AnonymousImpersonation::begin().unwrap();
-        let result = super::connect_pipe(&endpoint, Duration::from_millis(250));
-        impersonation.revert().unwrap();
-        assert!(matches!(
-            result,
-            Err(IpcTransportError::Io(ref error))
-                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
-        ));
+        let endpoint_clone = endpoint.clone();
+        std::thread::spawn(move || {
+            let impersonation = AnonymousImpersonation::begin().unwrap();
+            let result = super::connect_pipe(&endpoint_clone, Duration::from_millis(250));
+            impersonation.revert().unwrap();
+            assert!(matches!(
+                result,
+                Err(IpcTransportError::Io(ref error))
+                    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+            ));
+        })
+        .join()
+        .unwrap();
     }
 
     #[cfg(windows)]

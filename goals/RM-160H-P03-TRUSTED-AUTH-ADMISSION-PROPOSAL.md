@@ -1,9 +1,9 @@
 # RM-160H P03 Trusted SCM Authorization & Admission Proposal
 
-**Author**: AGY (Implementer)  
-**Date**: 2026-11-11  
-**Status**: SUBMITTED_FOR_OWNER_AND_INDEPENDENT_AUDITOR_REVIEW  
-**Target Track**: Track 2 (v0.2-A LRM)  
+**Author**: AGY (Implementer)\
+**Date**: 2026-11-11\
+**Status**: SUBMITTED_FOR_OWNER_AND_INDEPENDENT_AUDITOR_REVIEW\
+**Target Track**: Track 2 (v0.2-A LRM)\
 **Production Mutation**: `PRODUCTION_MUTATION=false` (All live writes remain inert)
 
 ---
