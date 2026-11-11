@@ -190,7 +190,10 @@ SUBAGENT_MACHINE_RECORDS_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-SUBAGENT-MAC
 SUBAGENT_SESSION_TRANSCRIPT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-SUBAGENT-SESSION-TRANSCRIPT-a825f275.jsonl
 RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-STRICT.md
 INDEPENDENT_PROCESS_PREFLIGHT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-PROCESS-PREFLIGHT-0c266ec.txt
-FINDINGS_SUMMARY=Strict read-only security audit completed by subagent a825f275 (diagnostic evidence). Surface A (R4) and Surface B (R6) findings match safety requirements. Independent process preflight (tools/dev/auditor_preflight.py --profile jerry-auditor) reported STOP_REASON=AUDIT_ADMISSION_FAILED. In accordance with QUALITY_GATES.md and governance instructions, the subagent report is retained as DIAGNOSTIC_ONLY evidence and R2_LRM remains PENDING pending verification by an admitted independent AI process.
+PREFLIGHT_DIAGNOSTIC_JSON_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-0c266ec.json
+PREFLIGHT_ANALYSIS_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-AUDITOR-PREFLIGHT-ANALYSIS-0c266ec.md
+FINDINGS_SUMMARY=Strict read-only security audit completed by subagent a825f275 (diagnostic evidence). Surface A (R4) and Surface B (R6) findings match safety requirements. Independent process preflight (tools/dev/auditor_preflight.py --profile jerry-auditor) diagnosed: startup succeeded (profile_start=true), no timeout, child process executed with exit_code 0, but evidence parsing failed (EVIDENCE_PARSING_FAILURE) because Codex invoked PowerShell 7 (pwsh.exe) instead of inbox powershell.exe. In accordance with QUALITY_GATES.md Blocker Policy v2 and governance instructions, BLOCKER_LATCHED=true is recorded, subagent report is retained as DIAGNOSTIC_ONLY evidence, and R2_LRM remains PENDING pending verification by an admitted independent AI process.
+BLOCKER_STATUS=BLOCKER_LATCHED=true
 DISPOSITION=PENDING
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1
 GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DIAGNOSTIC_ONLY. Independent review belongs solely to OWNER_INDEPENDENT_AUDITOR. If original independent evidence is missing or unverified, it must remain PENDING.

@@ -203,6 +203,29 @@ class AuditorPreflightTests(unittest.TestCase):
             self.assertFalse(result.read_only_capability)
             self.assertEqual(result.stop_reason, "AUDIT_ADMISSION_FAILED")
 
+    def test_preflight_writes_raw_diagnostic_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = self.write_profile(root)
+            log_file = root / "raw_log.json"
+            runner = FakeRunner(CommandResult(0, successful_output(), ""))
+            with mock.patch("tools.dev.auditor_preflight.os.path.isfile", return_value=True):
+                result = run_preflight(
+                    profile="jerry-auditor",
+                    profile_file=profile,
+                    repo_root=root,
+                    codex="codex.cmd",
+                    environment={"PATH": r"C:\Windows", "SystemRoot": r"C:\Windows"},
+                    timeout=10,
+                    runner=runner,
+                    raw_log=log_file,
+                )
+            self.assertTrue(result.read_only_capability)
+            self.assertTrue(log_file.exists())
+            payload = json.loads(log_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["profile"], "jerry-auditor")
+            self.assertEqual(payload["failure_classification"]["category"], "SUCCESS")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,7 @@ class SubprocessRunner:
             list(args),
             cwd=cwd,
             env=dict(env),
+            stdin=subprocess.DEVNULL,
             check=False,
             capture_output=True,
             text=True,
@@ -235,6 +236,30 @@ def resolve_codex(explicit: str | None) -> str | None:
     return shutil.which("codex.cmd") or shutil.which("codex.exe") or shutil.which("codex")
 
 
+def classify_failure(
+    *,
+    completed: CommandResult | None,
+    timeout_occurred: bool,
+    os_error_occurred: bool,
+    evidence: AdmissionEvidence | None,
+) -> tuple[str, str]:
+    if timeout_occurred:
+        return "TIMEOUT", "Process execution exceeded timeout threshold"
+    if os_error_occurred or completed is None:
+        return "STARTUP_FAILURE", "Failed to launch Codex process (OSError)"
+    if not evidence or not evidence.profile_start:
+        return "STARTUP_FAILURE", "Codex process started but thread.started event was not emitted"
+    if completed.returncode != 0:
+        return "COMMAND_EXECUTION_FAILURE", f"Codex process exited with non-zero code {completed.returncode}"
+    if evidence.command_count == 0:
+        return "COMMAND_EXECUTION_FAILURE", "No command_execution event emitted by Codex in read-only sandbox"
+    if evidence.unexpected_completed_items > 0:
+        return "EVIDENCE_PARSING_FAILURE", f"Unexpected completed items count ({evidence.unexpected_completed_items})"
+    if not evidence.child_process_admission:
+        return "EVIDENCE_PARSING_FAILURE", "Command execution output did not match child marker or shell resolution contract"
+    return "SUCCESS", "All admission checks passed"
+
+
 def run_preflight(
     *,
     profile: str,
@@ -244,6 +269,7 @@ def run_preflight(
     environment: Mapping[str, str],
     timeout: float,
     runner: Runner,
+    raw_log: Path | None = None,
 ) -> PreflightResult:
     try:
         validate_profile_contract(profile_file)
@@ -259,20 +285,73 @@ def run_preflight(
         return PreflightResult(False, False, False, removed, "SHELL_UNAVAILABLE")
 
     command = build_command(codex, profile, repo_root, powershell)
+    completed: CommandResult | None = None
+    timeout_occurred = False
+    os_error_occurred = False
+    evidence: AdmissionEvidence | None = None
+    preflight_result: PreflightResult
+
     try:
         completed = runner.run(command, cwd=repo_root, env=child_env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return PreflightResult(False, False, False, removed, "AUDIT_ADMISSION_TIMEOUT")
+        timeout_occurred = True
+        preflight_result = PreflightResult(False, False, False, removed, "AUDIT_ADMISSION_TIMEOUT")
     except OSError:
-        return PreflightResult(False, False, False, removed, "PROFILE_START_FAILED")
+        os_error_occurred = True
+        preflight_result = PreflightResult(False, False, False, removed, "PROFILE_START_FAILED")
+    else:
+        evidence = parse_exec_events(completed.stdout, powershell)
+        child_pass = evidence.child_process_admission and completed.returncode == 0
+        if child_pass:
+            preflight_result = PreflightResult(evidence.profile_start, True, True, removed, "NONE")
+        elif evidence.profile_start:
+            preflight_result = PreflightResult(True, False, False, removed, "AUDIT_ADMISSION_FAILED")
+        else:
+            preflight_result = PreflightResult(False, False, False, removed, "PROFILE_START_FAILED")
 
-    evidence = parse_exec_events(completed.stdout, powershell)
-    child_pass = evidence.child_process_admission and completed.returncode == 0
-    if child_pass:
-        return PreflightResult(evidence.profile_start, True, True, removed, "NONE")
-    if evidence.profile_start:
-        return PreflightResult(True, False, False, removed, "AUDIT_ADMISSION_FAILED")
-    return PreflightResult(False, False, False, removed, "PROFILE_START_FAILED")
+    if raw_log:
+        failure_cat, failure_det = classify_failure(
+            completed=completed,
+            timeout_occurred=timeout_occurred,
+            os_error_occurred=os_error_occurred,
+            evidence=evidence,
+        )
+        raw_events: list[dict[str, object]] = []
+        if completed and completed.stdout:
+            for line in completed.stdout.splitlines():
+                try:
+                    raw_events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        log_payload = {
+            "profile": profile,
+            "codex": codex,
+            "repo_root": str(repo_root),
+            "powershell": powershell,
+            "command": list(command),
+            "timeout_seconds": timeout,
+            "exit_code": completed.returncode if completed else None,
+            "stdout_raw": completed.stdout if completed else "",
+            "stderr_raw": completed.stderr if completed else "",
+            "events_count": len(raw_events),
+            "events": raw_events,
+            "evidence": {
+                "profile_start": evidence.profile_start,
+                "child_process_admission": evidence.child_process_admission,
+                "command_count": evidence.command_count,
+                "unexpected_completed_items": evidence.unexpected_completed_items,
+            } if evidence else None,
+            "failure_classification": {
+                "category": failure_cat,
+                "detail": failure_det,
+            },
+            "stop_reason": preflight_result.stop_reason,
+            "read_only_capability_pass": preflight_result.read_only_capability,
+        }
+        raw_log.parent.mkdir(parents=True, exist_ok=True)
+        raw_log.write_text(json.dumps(log_payload, indent=2), encoding="utf-8")
+
+    return preflight_result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -281,6 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex", help="explicit Codex CLI executable")
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--raw-log", type=Path, help="write raw diagnostic logs as JSON")
     return parser
 
 
@@ -307,6 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         environment=os.environ,
         timeout=args.timeout,
         runner=SubprocessRunner(),
+        raw_log=args.raw_log,
     )
     result.emit(args.profile)
     return 0 if result.read_only_capability else 1
