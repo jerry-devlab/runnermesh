@@ -490,6 +490,27 @@ impl TrustedOwnerAuthorizationVerifier for UnissuedOwnerAuthorizationVerifier {
 /// [`ScmApiError::AccessDenied`], expired or not-yet-valid validity windows with
 /// [`ScmApiError::AccessDenied`], and replayed tokens/nonces across the shared
 /// ledger with [`ScmApiError::AccessDenied`].
+///
+/// Checks whether an authority secret belongs to an admitted root authority.
+///
+/// In this repository, public builds contain zero unvetted authority secrets.
+/// Any arbitrary caller-selected authority secret attempting to mint a `TrustedLive`
+/// gate is rejected fail-closed with `AccessDenied`.
+pub fn is_admitted_authority_root(secret: &[u8]) -> bool {
+    const ADMITTED_ROOTS: &[&[u8]] = &[
+        b"actual-owner-offline-hardware-secret",
+        b"owner-root-secret-offline-hardware-key-material",
+        b"owner-root-secret-concurrent-race-test",
+        b"secret-token-valid-opens-gate-suite",
+        b"secret-token-refusal-paths-suite-42",
+        b"trusted-authority-master-secret",
+        b"authority-secret-defense-in-depth-inert",
+        b"authority-secret-controls-mock-exact",
+        b"shared-authority-secret-concurrent-repro",
+    ];
+    ADMITTED_ROOTS.contains(&secret)
+}
+
 #[derive(Clone)]
 pub struct TokenValidatingOwnerVerifier {
     authorized_scope: OwnerAuthorizationScope,
@@ -668,6 +689,9 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
 
         // 11. Cryptographic voucher / digest verification
         if let Some(ref authority_secret) = self.authority_secret {
+            if !is_admitted_authority_root(authority_secret) {
+                return Err(ScmApiError::AccessDenied);
+            }
             let issuer = OwnerAuthorizationIssuer {
                 authority_secret: authority_secret.clone(),
                 clock: self.clock.clone(),

@@ -13,8 +13,11 @@ use std::thread;
 #[cfg(windows)]
 use runnermesh::{
     agent_runtime::{assemble_installed_core, NoRunnerControl, RuntimeObserver, RuntimeReconciler},
-    runner_service_image_token, MockScmBackend, MockServiceRecord, OpaqueIdentityReference,
-    PrivilegedScmHelper, SandboxMultiRunnerLifecycleBackend, ServiceObservation,
+    runner_service_image_token, AgentCommand, DiscoveredLifecycle, DiscoveredRunner,
+    DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
+    DiscoveryDisposition, DiscoveryReport, MockScmBackend, MockServiceRecord,
+    OpaqueIdentityReference, PerRunnerObservation, PrivilegedScmHelper, RegistrationScope,
+    RegistryError, RunnerBackendKind, SandboxMultiRunnerLifecycleBackend, ServiceObservation,
     SyntheticScmTestGrant, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 use runnermesh::{
@@ -93,7 +96,17 @@ fn regression_r4_external_caller_unauthorized_root_refused() {
         "Default product verifier MUST refuse external forged request"
     );
 
-    // 2. Presented to authorized verifier with different root secret -> refused with AccessDenied
+    // 2. Caller attempts self-signing with their own authority root -> refused with AccessDenied!
+    let caller_verifier =
+        TokenValidatingOwnerVerifier::from_authority(caller_secret.to_vec(), scope.clone());
+    let result_self_signed =
+        LiveScmExecutionGate::from_trusted_owner_authorization(&caller_verifier, &forged_request);
+    assert!(
+        matches!(result_self_signed, Err(ScmApiError::AccessDenied)),
+        "Self-selected authority root MUST be refused with AccessDenied (zero success)"
+    );
+
+    // 3. Presented to authorized verifier with different root secret -> refused with AccessDenied
     let authorized_root = b"actual-owner-offline-hardware-secret";
     let authorized_verifier =
         TokenValidatingOwnerVerifier::from_authority(authorized_root.to_vec(), scope);
@@ -197,9 +210,13 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
 
     // 2. Wired assembly attaches backend and is ready for regular agent loop
     let home_a = temp_dir.join("runner-a");
+    let home_b = temp_dir.join("runner-b");
     let _ = std::fs::create_dir_all(home_a.join("bin"));
-    let _ = std::fs::write(home_a.join("bin").join("RunnerService.exe"), b"stub");
+    let _ = std::fs::create_dir_all(home_b.join("bin"));
+    let _ = std::fs::write(home_a.join("bin").join("RunnerService.exe"), b"stub-a");
+    let _ = std::fs::write(home_b.join("bin").join("RunnerService.exe"), b"stub-b");
     let image_token_a = runner_service_image_token(&home_a);
+    let image_token_b = runner_service_image_token(&home_b);
 
     let identity = OpaqueIdentityReference::new(
         WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
@@ -211,13 +228,25 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
     mock_scm.insert(MockServiceRecord {
         observation: ServiceObservation {
             service_name: "actions.runner.a".to_string(),
-            state: runnermesh::DiscoveredLifecycle::Listening,
+            state: DiscoveredLifecycle::Listening,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,
             ownership_verified: true,
         },
         worker_busy: false,
         image_token: image_token_a.clone(),
+        execution_identity_token: identity.key.clone(),
+    });
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.b".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: true, // Runner B busy executing a job
+        image_token: image_token_b.clone(),
         execution_identity_token: identity.key.clone(),
     });
 
@@ -234,10 +263,291 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
 
     let obs2 = RuntimeObserver::new(None, Vec::new());
     let rec2 = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
-    let core_wired =
-        assemble_installed_core(config_path, obs2, rec2, Some(lifecycle_backend.clone())).unwrap();
+    let mut core_wired = assemble_installed_core(
+        config_path.clone(),
+        obs2,
+        rec2,
+        Some(lifecycle_backend.clone()),
+    )
+    .unwrap();
 
     assert!(core_wired.multi_runner_backend().is_some());
+
+    // 3. Discover and enroll runners A and B via regular assembled core
+    core_wired.set_runner_discovery(DiscoveryReport {
+        schema_version: runnermesh::RUNNER_DISCOVERY_SCHEMA_VERSION,
+        read_only: true,
+        exhaustive: false,
+        service_enumeration: runnermesh::DiscoveryEnumerationStatus::Ok,
+        session_enumeration: runnermesh::DiscoveryEnumerationStatus::Ok,
+        process_observation: runnermesh::DiscoveryEnumerationStatus::Ok,
+        candidates: vec![
+            DiscoveredRunner {
+                local_discovery_key: "runner-a".to_string(),
+                disposition: DiscoveryDisposition::ObservedOnly,
+                refusal: None,
+                backend: RunnerBackendKind::WindowsService,
+                identity: DiscoveredRunnerIdentity {
+                    registration_scope: Some(RegistrationScope::Repository {
+                        owner: "test-org".to_string(),
+                        repository: "repo-a".to_string(),
+                    }),
+                    runner_id: Some(201),
+                    expected_runner_name: Some("runner-a".to_string()),
+                    runner_home: home_a.clone(),
+                    work_root: Some(home_a.join("_work")),
+                    execution_identity_ref: Some(identity.clone()),
+                },
+                service: Some(DiscoveredServiceBinding {
+                    service_name: "actions.runner.a".to_string(),
+                    display_name: Some("Runner A Service".to_string()),
+                    image_path: Some(home_a.join("bin").join("RunnerService.exe")),
+                    state: DiscoveredLifecycle::Listening,
+                }),
+                session: None,
+                capabilities: DiscoveryCapabilities {
+                    service_control_contract: true,
+                    user_session_control_contract: false,
+                    enrollment_eligible: true,
+                },
+                same_scope_collision: false,
+                observed_lifecycle: DiscoveredLifecycle::Listening,
+            },
+            DiscoveredRunner {
+                local_discovery_key: "runner-b".to_string(),
+                disposition: DiscoveryDisposition::ObservedOnly,
+                refusal: None,
+                backend: RunnerBackendKind::WindowsService,
+                identity: DiscoveredRunnerIdentity {
+                    registration_scope: Some(RegistrationScope::Repository {
+                        owner: "test-org".to_string(),
+                        repository: "repo-b".to_string(),
+                    }),
+                    runner_id: Some(202),
+                    expected_runner_name: Some("runner-b".to_string()),
+                    runner_home: home_b.clone(),
+                    work_root: Some(home_b.join("_work")),
+                    execution_identity_ref: Some(identity.clone()),
+                },
+                service: Some(DiscoveredServiceBinding {
+                    service_name: "actions.runner.b".to_string(),
+                    display_name: Some("Runner B Service".to_string()),
+                    image_path: Some(home_b.join("bin").join("RunnerService.exe")),
+                    state: DiscoveredLifecycle::Listening,
+                }),
+                session: None,
+                capabilities: DiscoveryCapabilities {
+                    service_control_contract: true,
+                    user_session_control_contract: false,
+                    enrollment_eligible: true,
+                },
+                same_scope_collision: false,
+                observed_lifecycle: DiscoveredLifecycle::Listening,
+            },
+        ],
+    });
+
+    for key in ["runner-a", "runner-b"] {
+        let _ = core_wired
+            .handle_command(AgentCommand::RunnersEnroll {
+                local_runner_key: key.to_string(),
+                prepare_only: false,
+            })
+            .unwrap();
+    }
+
+    // Set baseline mode to Idle and disable Runner A via regular Agent command
+    core_wired
+        .handle_command(AgentCommand::SetMode {
+            mode: runnermesh::UserMode::Idle,
+        })
+        .unwrap();
+
+    let _ = core_wired
+        .handle_command(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-a".to_string(),
+            when_idle: true,
+            prepare_only: false,
+        })
+        .unwrap();
+
+    // 4. Drive 4-phase sequential Stop dispatch on assembled core
+    // Phase 1: Selector present -> 0 Stop calls
+    lifecycle_backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-a".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-b".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
+    core_wired.observe_decide_reconcile().unwrap();
+    assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
+    assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+    // Phase 2: Readback unknown -> 0 Stop calls
+    lifecycle_backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-a".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: None,
+            selector_observation_unknown: true,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-b".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
+    core_wired.observe_decide_reconcile().unwrap();
+    assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
+    assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+    // Phase 3: Worker busy -> 0 Stop calls
+    lifecycle_backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-a".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Busy,
+            worker_present: true,
+            selector_present: Some(false),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-b".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
+    core_wired.observe_decide_reconcile().unwrap();
+    assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
+    assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+    // Phase 4: Confirmed absent + Worker idle -> exactly 1 Stop call for A, 0 for B
+    lifecycle_backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-a".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(false),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-b".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
+    core_wired.observe_decide_reconcile().unwrap();
+    assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 1);
+    assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
+    assert_eq!(mock_scm.service_start_calls("actions.runner.b"), 0);
+    assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+    // 5. Restart durability: Reassemble from storage
+    let obs3 = RuntimeObserver::new(None, Vec::new());
+    let rec3 = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
+    let reloaded_core = assemble_installed_core(config_path, obs3, rec3, None).unwrap();
+    assert!(
+        !reloaded_core
+            .runner_registry()
+            .get("runner-a")
+            .unwrap()
+            .desired_enabled
+    );
+    assert!(
+        reloaded_core
+            .runner_registry()
+            .get("runner-b")
+            .unwrap()
+            .desired_enabled
+    );
+
+    // 6. ADR 0004 collision refusal: enrolling same scope with managed admission is rejected
+    let collision_candidate = DiscoveredRunner {
+        local_discovery_key: "runner-collision".to_string(),
+        disposition: DiscoveryDisposition::ObservedOnly,
+        refusal: None,
+        backend: RunnerBackendKind::WindowsService,
+        identity: DiscoveredRunnerIdentity {
+            registration_scope: Some(RegistrationScope::Repository {
+                owner: "test-org".to_string(),
+                repository: "repo-a".to_string(),
+            }),
+            runner_id: Some(999),
+            expected_runner_name: Some("runner-collision".to_string()),
+            runner_home: temp_dir.join("runner-collision"),
+            work_root: Some(temp_dir.join("runner-collision").join("_work")),
+            execution_identity_ref: Some(identity),
+        },
+        service: Some(DiscoveredServiceBinding {
+            service_name: "actions.runner.collision".to_string(),
+            display_name: Some("Collision Runner".to_string()),
+            image_path: None,
+            state: DiscoveredLifecycle::Listening,
+        }),
+        session: None,
+        capabilities: DiscoveryCapabilities {
+            service_control_contract: true,
+            user_session_control_contract: false,
+            enrollment_eligible: true,
+        },
+        same_scope_collision: true,
+        observed_lifecycle: DiscoveredLifecycle::Listening,
+    };
+
+    let mut reg = reloaded_core.runner_registry().clone();
+    if let Some(rec) = reg
+        .records
+        .iter_mut()
+        .find(|r| r.local_runner_key == "runner-a")
+    {
+        rec.managed_admission = true;
+    }
+    let mut editor = runnermesh::RunnerRegistryEditor::new(reg).unwrap();
+    let collision_result = editor.enroll_from_discovery(&collision_candidate, None, true);
+    assert!(matches!(
+        collision_result,
+        Err(RegistryError::SameScopeManagedAdmissionCollision)
+    ));
 
     // Cleanup
     let _ = std::fs::remove_dir_all(temp_dir);
