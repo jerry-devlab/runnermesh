@@ -114,7 +114,7 @@ PACKAGE_BUILD_COMMIT=1e4858900979590d1a87a67be77fe0e3450826f6
 PR_REFERENCE=PR #65 (HEAD: ac2b09f, Candidate: 1e4858900979590d1a87a67be77fe0e3450826f6)
 HOSTED_CI_RUN=43007876545 (PASS_ALL 6/6 jobs)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
-FINDINGS_SUMMARY=Closure of self-selected authority root verified via is_admitted_authority_root and TokenValidatingOwnerVerifier::verify (zero success, fail-closed AccessDenied); all 9 P03 trusted authorization dimensions cryptographically verified; atomic single-use consumption ledger try_consume permits exactly 1 of 8 concurrent racing requests; Win32 adapter writes remain inert (GateClosed); AgentCore assemble_installed_core and 4-phase sequential Stop dispatch guard verified; Runner B zero control action isolation verified; restart durability and ADR 0004 collision refusal verified; candidate package binaries at C:\Dev\runnermesh-pkg-candidate verified with exact SHA-256 digests and embedded provenance.
+FINDINGS_SUMMARY=Closure of self-selected authority root verified via is_admitted_authority_root and TokenValidatingOwnerVerifier::verify (zero success, fail-closed AccessDenied); all 9 P03 trusted authorization dimensions cryptographically verified; atomic single-use consumption ledger try_consume permits exactly 1 of 8 concurrent racing requests; Win32 adapter writes remain inert (GateClosed); AgentCore assemble_installed_core and 4-phase sequential Stop dispatch guard verified; Runner B zero control action isolation verified; restart durability and ADR 0004 collision refusal verified; candidate package binaries verified with exact SHA-256 digests and embedded provenance.
 DISPOSITION=PASS
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2
 ```
