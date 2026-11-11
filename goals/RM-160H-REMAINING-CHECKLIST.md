@@ -45,8 +45,8 @@ PR_CI=43043112251 (PASS_ALL 6/6 jobs)
 
 - [x] R2-01 Choose exact HEAD(s): Track 2 (LRM) Candidate `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` on PR #65; Track 1 `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` for H2 (separate track).
 - [x] R2-02 Provide privacy-safe diff/risk map to external reviewer (Surfaces A-D documented in `RM-160H-R2-SECURITY-REVIEW-PACKET.md`).
-- [x] R2-03 Record reviewer identity class + bound SHA: `OWNER_INDEPENDENT_AUDITOR` via strictly capability-isolated read-only subagent (`strict_readonly_auditor`, `EnableWriteTools=false`), bound commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`, signature `ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`. Prior run retained as `DIAGNOSTIC_ONLY`.
-- [x] **EXIT** `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · Track 1 G15R remains `PENDING` (never use PR #65 tip as RC)
+- [ ] R2-03 Record reviewer identity class + bound SHA: Subagent report (`ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`) retained as `DIAGNOSTIC_ONLY`; independent AI process preflight reported `STOP_REASON=AUDIT_ADMISSION_FAILED`. Awaiting compliant independent review.
+- [ ] **EXIT** `INDEPENDENT_SECURITY_REVIEW_LRM=PENDING` · Track 1 G15R remains `PENDING` (never use PR #65 tip as RC)
 
 ## R3 — H2 v0.1 (G15R track only)
 
@@ -109,7 +109,7 @@ HUX2_LIVE=WAITING_FOR_OWNER
 HUX3_LIVE=WAITING_FOR_OWNER
 G-ADR006=DRAFT_NOT_ACCEPTED
 H3=WAITING_FOR_OWNER
-INDEPENDENT_SECURITY_REVIEW_LRM=PASS
+INDEPENDENT_SECURITY_REVIEW_LRM=PENDING
 INDEPENDENT_SECURITY_REVIEW_G15R=PENDING
 PR65_MERGED=false
 PRODUCTION_MUTATION=false

@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **COMPLETED (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. Track 2 (LRM) R2 review completed with PASS under an architecturally isolated strict read-only subagent (`EnableWriteTools=false`, signature `ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`). Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
+Status: **PENDING (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=PENDING` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. Track 2 (LRM) R2 subagent report (`ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`) is preserved as diagnostic evidence. The external independent process (`jerry-auditor`) preflight encountered `STOP_REASON=AUDIT_ADMISSION_FAILED`; until verified by an admitted independent AI process, `R2_LRM` remains PENDING. Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
 
 ## 1. Candidate HEADs Under Review & Git Coordinate Disambiguation
 
@@ -170,25 +170,28 @@ SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL-4
 
 ```text
 REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
-REVIEW_DATE=2026-11-11
+REVIEW_DATE=2026-11-12
 TARGET_TRACK=TRACK_2_HUX2_PR65
-STATUS=COMPLETED
+STATUS=PENDING
 BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
 GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
-PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, PR HEAD: 03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9)
-HOSTED_CI_RUN=43033525627 (Candidate 0c266ec, 6/6 green) / 43043112251 (PR HEAD 03a0e2a, 6/6 green)
+PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, PR HEAD: e71883b9e4e7081b064b7c55f6267dd7c65d1762)
+HOSTED_CI_RUN=43033525627 (Candidate 0c266ec, 6/6 green) / 43052375576 (PR HEAD e71883b, 6/6 green)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
-AUDITOR_MECHANISM=STRICT_READONLY_SUBAGENT
+AUDITOR_MECHANISM=STRICT_READONLY_SUBAGENT (Diagnostic Evidence) + CODEX_PREFLIGHT (Admission Blocked)
 SUBAGENT_CONVERSATION_ID=a825f275-314b-46f8-86e1-290228e47b89
 SUBAGENT_CONVERSATION_URI=conversation://a825f275-314b-46f8-86e1-290228e47b89
 SUBAGENT_TYPE=strict_readonly_auditor
 CAPABILITY_ISOLATION_EVIDENCE=Defined with EnableWriteTools=false, EnableSubagentTools=false, EnableMCPTools=false. Platform architecturally strips write_file, edit_file, and run_command. Toolset strictly restricted to read_file, search_web, send_message.
 SUBAGENT_TRANSCRIPT_LOG=<appDataDir>/brain/a825f275-314b-46f8-86e1-290228e47b89/.system_generated/logs/transcript.jsonl
+SUBAGENT_MACHINE_RECORDS_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-SUBAGENT-MACHINE-RECORDS-0c266ec.json
+SUBAGENT_SESSION_TRANSCRIPT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-SUBAGENT-SESSION-TRANSCRIPT-a825f275.jsonl
 RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-STRICT.md
-FINDINGS_SUMMARY=Strict read-only security audit complete. Surface A (R4 Trusted Owner Authorization Boundary) PASS with fail-closed unissued roots, 9 P03 dimensions, atomic replay protection ledger, Win32 SCM write paths sealed GateClosed. Surface B (R6 Periodic Scheduling & Multi-runner Execution Chain) PASS with unified assemble_installed_core & spawn_periodic_loop, step_poll deleted, 4-phase sequential Stop dispatch verified via IPC, falsifiability negative test verified, Runner B zero actions. Package provenance verified. Track separation enforced.
-DISPOSITION=PASS
+INDEPENDENT_PROCESS_PREFLIGHT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-PROCESS-PREFLIGHT-0c266ec.txt
+FINDINGS_SUMMARY=Strict read-only security audit completed by subagent a825f275 (diagnostic evidence). Surface A (R4) and Surface B (R6) findings match safety requirements. Independent process preflight (tools/dev/auditor_preflight.py --profile jerry-auditor) reported STOP_REASON=AUDIT_ADMISSION_FAILED. In accordance with QUALITY_GATES.md and governance instructions, the subagent report is retained as DIAGNOSTIC_ONLY evidence and R2_LRM remains PENDING pending verification by an admitted independent AI process.
+DISPOSITION=PENDING
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1
 GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DIAGNOSTIC_ONLY. Independent review belongs solely to OWNER_INDEPENDENT_AUDITOR. If original independent evidence is missing or unverified, it must remain PENDING.
 ```
@@ -200,6 +203,6 @@ GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DI
 | **Objective** | H2 Cutover & Dogfood (single-workstation) | HUX-2 / HUX-3 Gate Readiness (multi-runner) |
 | **Bound Commit** | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` |
 | **Branch / PR** | Protected `main` (#50) | `feat/160h-gt01-field-baseline` (PR #65) |
-| **R2 Independent Security Audit** | `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` | `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` |
-| **Next Step** | Separate Owner preflight & G15R audit | Owner PR #65 merge & HUX-2 qualification |
+| **R2 Independent Security Audit** | `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` | `INDEPENDENT_SECURITY_REVIEW_LRM=PENDING` |
+| **Next Step** | Separate Owner preflight & G15R audit | Admit compliant independent AI process review, Owner PR #65 merge & HUX-2 qualification |
 | **Track Crossing Policy** | **FORBIDDEN**: PR #65 candidate must never be used for H2 cutover | **FORBIDDEN**: G15R RC does not qualify multi-runner LRM |

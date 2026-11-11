@@ -80,7 +80,7 @@ HUX2_LIVE=WAITING_FOR_OWNER
 HUX3_LIVE=WAITING_FOR_OWNER
 G-ADR006=DRAFT_NOT_ACCEPTED
 H3=WAITING_FOR_OWNER
-INDEPENDENT_SECURITY_REVIEW_LRM=PASS
+INDEPENDENT_SECURITY_REVIEW_LRM=PENDING
 INDEPENDENT_SECURITY_REVIEW_G15R=PENDING
 PR65_MERGED=false
 PRODUCTION_MUTATION=false
@@ -88,27 +88,23 @@ PRODUCTION_MUTATION=false
 
 ## Independent Security Review Traceability (R2)
 
-Status: R2_LRM=PASS · R2_G15R=PENDING
+Status: R2_LRM=PENDING · R2_G15R=PENDING
 
-### Prior Review Record (Diagnostic Evidence):
-- AUDITOR_ID: OWNER_INDEPENDENT_AUDITOR (subagent 4b64d99a-c794-47a3-9b21-0d0cff66224d)
-- PROFILE_LIMITATION: Builtin 'research' subagent type possessed 'run_command' capability in its toolset. Capability-level sandbox read-only enforcement cannot be proven solely by label.
-- GOVERNANCE_DISPOSITION: Retained strictly as DIAGNOSTIC_ONLY evidence. Cannot count as independent acceptance.
-- RAW_REPORT_ARCHIVE: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec.md
-
-### Strict Read-Only Independent Review (Capability Enforced):
-- AUDITOR_MECHANISM: STRICT_READONLY_SUBAGENT
-- REVIEWER_CLASS: OWNER_INDEPENDENT_AUDITOR
-- SUBAGENT_CONVERSATION_ID: a825f275-314b-46f8-86e1-290228e47b89
-- SUBAGENT_CONVERSATION_URI: conversation://a825f275-314b-46f8-86e1-290228e47b89
-- SUBAGENT_ROLE: Independent Security Auditor
-- SUBAGENT_TYPE: strict_readonly_auditor
+### Diagnostic Evidence (Capability-Isolated Subagent):
+- AUDITOR_ID: OWNER_INDEPENDENT_AUDITOR (subagent a825f275-314b-46f8-86e1-290228e47b89)
+- MECHANISM: STRICT_READONLY_SUBAGENT
 - CAPABILITY_ISOLATION_EVIDENCE: Defined with EnableWriteTools=false, EnableSubagentTools=false, EnableMCPTools=false. Platform architecturally strips write_file, edit_file, and run_command. Toolset restricted strictly to read_file, search_web, send_message.
-- SUBAGENT_TRANSCRIPT_LOG: <appDataDir>/brain/a825f275-314b-46f8-86e1-290228e47b89/.system_generated/logs/transcript.jsonl
-- RAW_REPORT_ARCHIVE: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-STRICT.md
-- SIGNATURE_IDENTIFIER: ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1
-- STATUS: COMPLETED
-- DISPOSITION_LRM: PASS
+- MACHINE_RECORDS_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-SUBAGENT-MACHINE-RECORDS-0c266ec.json
+- RAW_TRANSCRIPT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-SUBAGENT-SESSION-TRANSCRIPT-a825f275.jsonl
+- RAW_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-STRICT.md
+- SUBAGENT_DISPOSITION: PASS (Signature: ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1)
+- GOVERNANCE_CLASSIFICATION: DIAGNOSTIC_ONLY (Platform subagent retained as diagnostic evidence pending compliant independent AI process verification)
+
+### Independent Process Record (Codex jerry-auditor):
+- COMMAND: tools/dev/auditor_preflight.py --profile jerry-auditor
+- STATUS: STOP_REASON=AUDIT_ADMISSION_FAILED (Preflight child admission failed under Windows restricted token sandbox)
+- PREFLIGHT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-PROCESS-PREFLIGHT-0c266ec.txt
+- DISPOSITION_LRM: PENDING
 - DISPOSITION_G15R: PENDING (Track 1 awaiting separate Owner authorization & audit on G15R_RC)
 ```
 
