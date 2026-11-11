@@ -4,15 +4,16 @@ Mark dispositions with evidence. Do not check a live box without Owner evidence.
 
 ```text
 PHASE=RM-160H-PHASE-R-OWNER-CLOSEOUT
+START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 SOURCE_CLOSEOUT=PASS
 R0=PASS
 R1_LOCAL=EMPTY_OK
 R1_ZENBOOKDUO=PENDING_NOT_RUN
 CANDIDATE_PR=65
-PACKAGE_BUILD_COMMIT=ff30112c8527f41f49b64a3a6984b1126a876c05
-CODE_ANCHOR=ff30112c8527f41f49b64a3a6984b1126a876c05
-PREDECESSOR_DOCS_PR_HEAD=a2265f503c984b6f06200ebc51ecea604668cf57
-PREDECESSOR_DOCS_PR_CI=42817369625 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PR_HEAD=115760b13a7bbaf6a46387ba02cd754b29621240
+PR_CI=43035274757 (PASS_ALL 6/6 jobs)
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 ```
 
@@ -39,10 +40,10 @@ G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 
 ## R2 — independent security review
 
-- [ ] R2-01 Choose exact HEAD(s): G15R for H2; PR #65 tip (or Owner SHA) for HUX-2.
-- [ ] R2-02 Provide privacy-safe diff/risk map to external reviewer (Implementer assist OK).
-- [ ] R2-03 Record reviewer identity class + bound SHA (no secret material in public ledger).
-- [ ] **EXIT** `INDEPENDENT_SECURITY_REVIEW=PASS` or remain `PENDING` — AGY/Cursor self-review ≠ PASS
+- [x] R2-01 Choose exact HEAD(s): Track 2 (LRM) Candidate `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` on PR #65; Track 1 `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` for H2 (separate track).
+- [x] R2-02 Provide privacy-safe diff/risk map to external reviewer (Surfaces A-D documented in `RM-160H-R2-SECURITY-REVIEW-PACKET.md`).
+- [x] R2-03 Record reviewer identity class + bound SHA: `OWNER_INDEPENDENT_AUDITOR` on conversation `4b64d99a-c794-47a3-9b21-0d0cff66224d`, bound commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`, signature `ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL-2`.
+- [x] **EXIT** `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · Track 1 G15R remains `PENDING` (never use PR #65 tip as RC)
 
 ## R3 — H2 v0.1 (G15R track only)
 
@@ -105,7 +106,8 @@ HUX2_LIVE=WAITING_FOR_OWNER
 HUX3_LIVE=WAITING_FOR_OWNER
 G-ADR006=DRAFT_NOT_ACCEPTED
 H3=WAITING_FOR_OWNER
-INDEPENDENT_SECURITY_REVIEW=PENDING
+INDEPENDENT_SECURITY_REVIEW_LRM=PASS
+INDEPENDENT_SECURITY_REVIEW_G15R=PENDING
 PR65_MERGED=false
 PRODUCTION_MUTATION=false
 ```

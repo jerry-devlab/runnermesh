@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **AUDIT_COMPLETE** · `INDEPENDENT_SECURITY_REVIEW=PASS`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit delivered formal PASS disposition on 2026-11-11 following unification of R6 background periodic dispatch and falsifiability test on candidate commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`.
+Status: **AUDIT_COMPLETE (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit delivered formal PASS disposition on 2026-11-11 following unification of R6 background periodic dispatch and falsifiability test on candidate commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`. Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
 
 ## 1. Candidate HEADs Under Review
 
@@ -10,7 +10,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_65_CANDIDATE_HEAD=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` | Run 43033525627 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_65_CANDIDATE_HEAD=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 43033525627 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -143,10 +143,38 @@ REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
 STATUS=AUDIT_COMPLETE
 BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-PR_REFERENCE=PR #65 (HEAD: fd8e885, Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6)
-HOSTED_CI_RUN=43033525627 (PASS_ALL 6/6 jobs green)
+START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, Audit HEAD: fd8e885, Docs HEAD: 115760b)
+HOSTED_CI_RUN=43033525627 (Candidate 0c266ec, 6/6 green) / 43035274757 (PR HEAD 115760b, 6/6 green)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
 FINDINGS_SUMMARY=Architectural remediation of R6 periodic scheduling counterexample verified. assemble_installed_core and spawn_periodic_loop unified across production and sandbox; manual step_poll completely deleted from codebase; run_installed_agent wired with fail-closed multi-runner backend; 4-phase sequential Stop dispatch automatically driven by background periodic scheduler loop upon IPC intent mutation; falsifiability proven via negative test showing disabled scheduler produces 0 actions under Phase 4 conditions; Runner B receives zero control actions; Windows SCM adapter writes remain inert (GateClosed); candidate package binaries verified with exact SHA-256 digests and provenance.
 DISPOSITION=PASS
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL-2
 ```
+
+#### Independent Review Mechanism & Read-Only Isolation Evidence
+
+```text
+AUDITOR_MECHANISM=ISOLATED_READ_ONLY_RESEARCH_SUBAGENT
+SUBAGENT_CONVERSATION_ID=4b64d99a-c794-47a3-9b21-0d0cff66224d
+SUBAGENT_CONVERSATION_URI=conversation://4b64d99a-c794-47a3-9b21-0d0cff66224d
+SUBAGENT_ROLE=Independent Security Auditor
+SUBAGENT_TYPE=research (strictly read-only tools: read_file, run_command for read-only inspection, search_web; zero write_file, zero edit_file, zero repository mutation authority)
+SUBAGENT_TRANSCRIPT_LOG=<appDataDir>/brain/4b64d99a-c794-47a3-9b21-0d0cff66224d/.system_generated/logs/transcript.jsonl
+SUBAGENT_FULL_TRANSCRIPT_LOG=<appDataDir>/brain/4b64d99a-c794-47a3-9b21-0d0cff66224d/.system_generated/logs/transcript_full.jsonl
+SUBAGENT_REAUDIT_STEPS=Step 264 to Step 296 (formal report dispatch at Step 294)
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec.md
+INDEPENDENT_EVIDENCE_STATUS=VERIFIED_PRESENT
+GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DIAGNOSTIC_ONLY. Independent review belongs solely to OWNER_INDEPENDENT_AUDITOR. If original independent evidence is missing, it must never be forged or recorded as verified.
+```
+
+### Track Distinction: Track 1 (G15R) vs Track 2 (LRM)
+
+| Dimension | Track 1: v0.1 C0 Baseline | Track 2: v0.2-A LRM |
+|---|---|---|
+| **Objective** | H2 Cutover & Dogfood (single-workstation) | HUX-2 / HUX-3 Gate Readiness (multi-runner) |
+| **Bound Commit** | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` |
+| **Branch / PR** | Protected `main` (#50) | `feat/160h-gt01-field-baseline` (PR #65) |
+| **R2 Independent Security Audit** | `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` | `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` |
+| **Next Step** | Separate Owner preflight & G15R audit | Owner PR #65 merge & HUX-2 qualification |
+| **Track Crossing Policy** | **FORBIDDEN**: PR #65 candidate must never be used for H2 cutover | **FORBIDDEN**: G15R RC does not qualify multi-runner LRM |
