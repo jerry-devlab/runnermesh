@@ -1,28 +1,32 @@
 //! Regression tests for R4 trusted Owner authorization and R6 installed-mode startup assembly.
 //!
 //! Validates:
-//! 1. External callers cannot self-sign via public `new` (zero success, fail closed).
-//! 2. External callers cannot forge authorization with an unauthorized secret (zero success, fail closed).
+//! 1. External callers cannot self-sign via public `new` (zero success, fail closed with AuthorizationNotIssued).
+//! 2. External callers cannot forge authorization with unauthorized material (zero success, fail closed).
 //! 3. Atomic single-use consumption ledger allows EXACTLY ONE success under concurrent racing requests.
 //! 4. Windows SCM write mutations remain sealed (GateClosed) even when a live gate is minted.
-//! 5. Installed-mode assembly path wires the multi-runner lifecycle backend and reconciles runners.
+//! 5. Installed-mode startup path drives Named Pipe IPC, background polling, 4-phase sequential Stop dispatch
+//!    on Runner A, and zero control action isolation on Runner B.
 
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[cfg(windows)]
+use std::time::Duration;
+
+#[cfg(windows)]
 use runnermesh::{
-    agent_runtime::{assemble_installed_core, NoRunnerControl, RuntimeObserver, RuntimeReconciler},
+    agent_runtime::{start_installed_agent_sandbox, InstalledAgentSandboxConfig},
     runner_service_image_token, AgentCommand, DiscoveredLifecycle, DiscoveredRunner,
     DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
-    DiscoveryDisposition, DiscoveryReport, MockScmBackend, MockServiceRecord,
-    OpaqueIdentityReference, PerRunnerObservation, PrivilegedScmHelper, RegistrationScope,
-    RegistryError, RunnerBackendKind, SandboxMultiRunnerLifecycleBackend, ServiceObservation,
-    SyntheticScmTestGrant, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+    DiscoveryDisposition, DiscoveryReport, IpcClient, IpcEndpoint, IpcRequest, MockScmBackend,
+    MockServiceRecord, OpaqueIdentityReference, PerRunnerObservation, PrivilegedScmHelper,
+    RegistrationScope, RegistryError, RunnerBackendKind, SandboxMultiRunnerLifecycleBackend,
+    ServiceObservation, SyntheticScmTestGrant, UserMode, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 use runnermesh::{
-    LiveScmExecutionGate, OwnerAuthorizationIssuer, OwnerAuthorizationScope, ScmApiError,
-    ScmControlBackend, ServiceStartMode, TokenValidatingOwnerVerifier,
+    LiveScmExecutionGate, OwnerAuthorizationScope, ScmApiError, ScmControlBackend,
+    ServiceStartMode, SharedAuthorizationLedger, TokenValidatingOwnerVerifier,
     TrustedOwnerAuthorizationRequest, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
 };
 
@@ -69,7 +73,7 @@ fn regression_r4_external_caller_self_selected_token_refused() {
 }
 
 #[test]
-fn regression_r4_external_caller_unauthorized_root_refused() {
+fn regression_r4_external_caller_unissued_verifier_refuses_all_requests() {
     let caller_secret = b"caller-invented-authority-root-secret";
     let scope = OwnerAuthorizationScope::new(
         "actions.runner.repro-target",
@@ -83,9 +87,21 @@ fn regression_r4_external_caller_unauthorized_root_refused() {
         false,
     );
 
-    let caller_issuer = OwnerAuthorizationIssuer::new(caller_secret);
-    let (forged_request, _voucher) =
-        caller_issuer.issue_for_scope(&scope, 3600, "repro-nonce-root");
+    let forged_request = TrustedOwnerAuthorizationRequest {
+        service_name: "actions.runner.repro-target".to_string(),
+        image_token: "authorized-image-token".to_string(),
+        execution_identity_token: "auth-ident-token".to_string(),
+        target_host_token: "auth-host-token".to_string(),
+        candidate_commit: "ff30112c8527f41f49b64a3a6984b1126a876c05".to_string(),
+        transaction_id: "tx-repro-2".to_string(),
+        allow_start: true,
+        allow_stop: false,
+        allow_change_config: false,
+        not_before_epoch_seconds: 100,
+        expires_at_epoch_seconds: 2_000_000_000,
+        nonce: "repro-nonce-forged".to_string(),
+        owner_material: caller_secret.to_vec(),
+    };
 
     // 1. Presented to standard unissued runtime verifier -> refused with AuthorizationNotIssued
     let unissued_verifier = UnissuedOwnerAuthorizationVerifier;
@@ -93,88 +109,51 @@ fn regression_r4_external_caller_unauthorized_root_refused() {
         LiveScmExecutionGate::from_trusted_owner_authorization(&unissued_verifier, &forged_request);
     assert!(
         matches!(result_unissued, Err(ScmApiError::AuthorizationNotIssued)),
-        "Default product verifier MUST refuse external forged request"
+        "Default product verifier MUST refuse external forged request with AuthorizationNotIssued"
     );
 
-    // 2. Caller attempts self-signing with their own authority root -> refused with AccessDenied!
-    let caller_verifier =
-        TokenValidatingOwnerVerifier::from_authority(caller_secret.to_vec(), scope.clone());
-    let result_self_signed =
+    // 2. Caller instantiates TokenValidatingOwnerVerifier::new -> refused with AuthorizationNotIssued
+    let caller_verifier = TokenValidatingOwnerVerifier::new(caller_secret, scope);
+    let result_caller =
         LiveScmExecutionGate::from_trusted_owner_authorization(&caller_verifier, &forged_request);
     assert!(
-        matches!(result_self_signed, Err(ScmApiError::AccessDenied)),
-        "Self-selected authority root MUST be refused with AccessDenied (zero success)"
-    );
-
-    // 3. Presented to authorized verifier with different root secret -> refused with AccessDenied
-    let authorized_root = b"actual-owner-offline-hardware-secret";
-    let authorized_verifier =
-        TokenValidatingOwnerVerifier::from_authority(authorized_root.to_vec(), scope);
-    let result_auth = LiveScmExecutionGate::from_trusted_owner_authorization(
-        &authorized_verifier,
-        &forged_request,
-    );
-    assert!(
-        matches!(result_auth, Err(ScmApiError::AccessDenied)),
-        "Verifier with authorized root MUST refuse forged voucher with AccessDenied"
+        matches!(result_caller, Err(ScmApiError::AuthorizationNotIssued)),
+        "Verifier instantiated via public new MUST refuse request with AuthorizationNotIssued"
     );
 }
 
 #[test]
-fn regression_r4_concurrent_same_voucher_permits_exactly_one_success() {
-    let authority_secret = b"shared-authority-secret-concurrent-repro";
-    let scope = OwnerAuthorizationScope::new(
-        "actions.runner.repro-concurrent",
-        "authorized-image-token",
-        "auth-ident-token",
-        "auth-host-token",
-        "ff30112c8527f41f49b64a3a6984b1126a876c05",
-        "tx-repro-concurrent",
-        true,
-        false,
-        false,
-    );
-
-    let issuer = OwnerAuthorizationIssuer::new(authority_secret);
-    let verifier = Arc::new(TokenValidatingOwnerVerifier::from_authority(
-        authority_secret.to_vec(),
-        scope.clone(),
-    ));
-
-    let (request, _voucher) = issuer.issue_for_scope(&scope, 3600, "repro-concurrent-shared-nonce");
-    let request = Arc::new(request);
+fn regression_r4_shared_ledger_atomic_concurrency() {
+    let ledger = SharedAuthorizationLedger::new();
+    let token_hash = [0x5Au8; 32];
+    let nonce = "atomic-ledger-race-nonce";
 
     let num_threads = 8;
     let barrier = Arc::new(Barrier::new(num_threads));
     let mut handles = Vec::new();
 
     for _ in 0..num_threads {
-        let v = Arc::clone(&verifier);
-        let req = Arc::clone(&request);
+        let l = ledger.clone();
         let b = Arc::clone(&barrier);
 
         handles.push(thread::spawn(move || {
             b.wait();
-            LiveScmExecutionGate::from_trusted_owner_authorization(&*v, &req)
+            l.try_consume(token_hash, nonce)
         }));
     }
 
-    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let success_count = results.iter().filter(|r| r.is_ok()).count();
-    let denial_count = results
-        .iter()
-        .filter(|r| matches!(r, Err(ScmApiError::AccessDenied)))
-        .count();
+    let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let success_count = results.iter().filter(|&&r| r).count();
+    let failure_count = results.iter().filter(|&&r| !r).count();
 
-    // Atomic consumption ledger: exactly 1 thread succeeds, all remaining threads fail closed!
     assert_eq!(
         success_count, 1,
         "Atomic ledger MUST permit exactly 1 success under concurrent races"
     );
     assert_eq!(
-        denial_count,
+        failure_count,
         num_threads - 1,
-        "All other concurrent racing threads MUST receive AccessDenied"
+        "All other concurrent racing threads MUST be refused"
     );
 }
 
@@ -197,18 +176,10 @@ fn regression_r4_defense_in_depth_real_scm_writes_sealed() {
 
 #[cfg(windows)]
 #[test]
-fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolation() {
-    let temp_dir = std::env::temp_dir().join(format!("runnermesh-r6-reg-{}", std::process::id()));
+fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
+    let temp_dir = std::env::temp_dir().join(format!("runnermesh-r6-sbx-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&temp_dir);
-    let config_path = temp_dir.join("config.json");
 
-    // 1. Unwired assembly has None for multi_runner_backend
-    let obs1 = RuntimeObserver::new(None, Vec::new());
-    let rec1 = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
-    let core_unwired = assemble_installed_core(config_path.clone(), obs1, rec1, None).unwrap();
-    assert!(core_unwired.multi_runner_backend().is_none());
-
-    // 2. Wired assembly attaches backend and is ready for regular agent loop
     let home_a = temp_dir.join("runner-a");
     let home_b = temp_dir.join("runner-b");
     let _ = std::fs::create_dir_all(home_a.join("bin"));
@@ -261,20 +232,7 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
     let helper_a = PrivilegedScmHelper::new(mock_scm.clone(), gate_a);
     let lifecycle_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper_a));
 
-    let obs2 = RuntimeObserver::new(None, Vec::new());
-    let rec2 = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
-    let mut core_wired = assemble_installed_core(
-        config_path.clone(),
-        obs2,
-        rec2,
-        Some(lifecycle_backend.clone()),
-    )
-    .unwrap();
-
-    assert!(core_wired.multi_runner_backend().is_some());
-
-    // 3. Discover and enroll runners A and B via regular assembled core
-    core_wired.set_runner_discovery(DiscoveryReport {
+    let discovery_report = DiscoveryReport {
         schema_version: runnermesh::RUNNER_DISCOVERY_SCHEMA_VERSION,
         read_only: true,
         exhaustive: false,
@@ -345,33 +303,63 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
                 observed_lifecycle: DiscoveredLifecycle::Listening,
             },
         ],
-    });
+    };
 
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("r6-sbx-{}", std::process::id()));
+
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: temp_dir.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(lifecycle_backend.clone()),
+        discovery_report: Some(discovery_report),
+        poll_interval: Duration::from_millis(50),
+    };
+
+    // 1. Start the installed Agent runtime with explicit sandbox configuration
+    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+
+    // 2. Connect via real Named Pipe IPC client
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    // Enroll runners A and B via IPC
     for key in ["runner-a", "runner-b"] {
-        let _ = core_wired
-            .handle_command(AgentCommand::RunnersEnroll {
+        let resp = ipc_client
+            .call(IpcRequest::new(AgentCommand::RunnersEnroll {
                 local_runner_key: key.to_string(),
                 prepare_only: false,
-            })
-            .unwrap();
+            }))
+            .expect("IPC RunnersEnroll must succeed");
+        assert!(matches!(
+            resp.body,
+            runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.applied)
+        ));
     }
 
-    // Set baseline mode to Idle and disable Runner A via regular Agent command
-    core_wired
-        .handle_command(AgentCommand::SetMode {
-            mode: runnermesh::UserMode::Idle,
-        })
-        .unwrap();
+    // Set baseline mode to Idle via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        }))
+        .expect("IPC SetMode must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Accepted { .. })
+    ));
 
-    let _ = core_wired
-        .handle_command(AgentCommand::RunnersDisable {
+    // Disable Runner A via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
             local_runner_key: "runner-a".to_string(),
             when_idle: true,
             prepare_only: false,
-        })
-        .unwrap();
+        }))
+        .expect("IPC RunnersDisable must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.applied)
+    ));
 
-    // 4. Drive 4-phase sequential Stop dispatch on assembled core
+    // 3. Drive 4-phase sequential Stop dispatch via Agent observation & polling
     // Phase 1: Selector present -> 0 Stop calls
     lifecycle_backend.set_observations(vec![
         PerRunnerObservation {
@@ -395,9 +383,32 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
             same_scope_managed_collision: false,
         },
     ]);
-    core_wired.observe_decide_reconcile().unwrap();
+    let _ = runtime.step_poll().unwrap();
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
+
+    // Query status over IPC to verify Draining
+    let list_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersList))
+        .expect("IPC RunnersList must succeed");
+    if let runnermesh::IpcResponseBody::Success(boxed) = list_resp.body {
+        if let runnermesh::AgentResponse::Runners(report) = *boxed {
+            let runner_a = report
+                .records
+                .iter()
+                .find(|r| r.local_runner_key == "runner-a")
+                .unwrap();
+            assert_eq!(
+                runner_a.presentation_status,
+                runnermesh::RunnerPresentationStatus::Disabled
+            );
+            assert!(!runner_a.desired_enabled);
+        } else {
+            panic!("Expected Runners response");
+        }
+    } else {
+        panic!("Expected Success response");
+    }
 
     // Phase 2: Readback unknown -> 0 Stop calls
     lifecycle_backend.set_observations(vec![
@@ -422,7 +433,7 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
             same_scope_managed_collision: false,
         },
     ]);
-    core_wired.observe_decide_reconcile().unwrap();
+    let _ = runtime.step_poll().unwrap();
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
 
@@ -449,7 +460,7 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
             same_scope_managed_collision: false,
         },
     ]);
-    core_wired.observe_decide_reconcile().unwrap();
+    let _ = runtime.step_poll().unwrap();
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
 
@@ -476,29 +487,71 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
             same_scope_managed_collision: false,
         },
     ]);
-    core_wired.observe_decide_reconcile().unwrap();
+    let _ = runtime.step_poll().unwrap();
     assert_eq!(mock_scm.service_stop_calls("actions.runner.a"), 1);
     assert_eq!(mock_scm.service_stop_calls("actions.runner.b"), 0);
     assert_eq!(mock_scm.service_start_calls("actions.runner.b"), 0);
     assert!(mock_scm.service_actions("actions.runner.b").is_empty());
 
-    // 5. Restart durability: Reassemble from storage
-    let obs3 = RuntimeObserver::new(None, Vec::new());
-    let rec3 = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
-    let reloaded_core = assemble_installed_core(config_path, obs3, rec3, None).unwrap();
+    // Query status over IPC to verify Disabled
+    let list_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersList))
+        .expect("IPC RunnersList must succeed");
+    if let runnermesh::IpcResponseBody::Success(boxed) = list_resp.body {
+        if let runnermesh::AgentResponse::Runners(report) = *boxed {
+            let runner_a = report
+                .records
+                .iter()
+                .find(|r| r.local_runner_key == "runner-a")
+                .unwrap();
+            assert_eq!(
+                runner_a.presentation_status,
+                runnermesh::RunnerPresentationStatus::Disabled
+            );
+        } else {
+            panic!("Expected Runners response");
+        }
+    } else {
+        panic!("Expected Success response");
+    }
+
+    // 4. Graceful shutdown via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::ExitAfterDrain))
+        .expect("ExitAfterDrain via IPC must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Accepted { .. })
+    ));
+    runtime.shutdown();
+
+    // 5. Restart durability: Reassemble from persistent disk storage
+    let obs_restart = runnermesh::agent_runtime::RuntimeObserver::new(None, Vec::new());
+    let rec_restart = runnermesh::agent_runtime::RuntimeReconciler::Unconfigured(
+        runnermesh::agent_runtime::NoRunnerControl::new(),
+    );
+    let reloaded_core = runnermesh::agent_runtime::assemble_installed_core(
+        temp_dir.join("config.json"),
+        obs_restart,
+        rec_restart,
+        None,
+    )
+    .unwrap();
     assert!(
         !reloaded_core
             .runner_registry()
             .get("runner-a")
             .unwrap()
-            .desired_enabled
+            .desired_enabled,
+        "Runner A must remain disabled after restart"
     );
     assert!(
         reloaded_core
             .runner_registry()
             .get("runner-b")
             .unwrap()
-            .desired_enabled
+            .desired_enabled,
+        "Runner B must remain enabled after restart"
     );
 
     // 6. ADR 0004 collision refusal: enrolling same scope with managed admission is rejected
@@ -548,7 +601,4 @@ fn regression_r6_installed_assembly_wires_lifecycle_backend_and_preserves_isolat
         collision_result,
         Err(RegistryError::SameScopeManagedAdmissionCollision)
     ));
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(temp_dir);
 }

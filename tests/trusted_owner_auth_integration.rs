@@ -1,22 +1,22 @@
 //! Crate-external integration tests for R4 trusted Owner authorization boundary.
 //!
-//! Validates the complete P03 9-dimension cryptographic binding and refusal matrix
+//! Validates the complete P03 authorization boundary and negative matrix
 //! from the perspective of an external caller importing the `runnermesh` library.
 //!
-//! Enforces:
-//! - UnissuedOwnerAuthorizationVerifier never opens a live gate (AuthorizationNotIssued).
-//! - Callers cannot self-select tokens without the authority secret (AccessDenied).
-//! - All 9 P03 dimensions are verified (service, image, execution identity, host,
-//!   commit, rights, transaction, validity window, single-use nonce).
-//! - Replays with same nonce, swapped nonce, and reconstructed verifier fail closed.
-//! - Sensitive owner material is redacted from Debug representations.
-//! - Defense-in-depth: Live Windows SCM backend writes remain sealed (GateClosed)
-//!   even when presented with a TrustedLive execution gate.
+//! In ordinary builds and for external crate consumers:
+//! - Authority roots are UNISSUED in code (no hardcoded test roots exist).
+//! - Public `UnissuedOwnerAuthorizationVerifier` unconditionally fails closed (`AuthorizationNotIssued`).
+//! - Public `TokenValidatingOwnerVerifier::new(...)` constructs an unissued verifier (no authority secret),
+//!   which unconditionally fails closed (`AuthorizationNotIssued`).
+//! - External callers have ZERO public methods or constructors to supply authority secrets or mint `TrustedLive`.
+//! - Forged, self-selected, or tampered vouchers are rejected fail-closed.
+//! - Sensitive owner material is redacted from Debug representations (`[REDACTED]`).
+//! - Defense-in-depth: Live Windows SCM backend writes remain sealed (`GateClosed`).
 
 use runnermesh::{
-    LiveScmExecutionGate, OwnerAuthorizationIssuer, OwnerAuthorizationScope, ScmApiError,
-    ScmControlBackend, ServiceStartMode, TokenValidatingOwnerVerifier,
-    TrustedOwnerAuthorizationRequest, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
+    LiveScmExecutionGate, OwnerAuthorizationScope, ScmApiError, ScmControlBackend,
+    ServiceStartMode, TokenValidatingOwnerVerifier, TrustedOwnerAuthorizationRequest,
+    UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
 };
 
 fn test_scope() -> OwnerAuthorizationScope {
@@ -53,161 +53,83 @@ fn unissued_verifier_refuses_all_external_requests() {
     };
 
     let result = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request);
-    assert!(matches!(result, Err(ScmApiError::AuthorizationNotIssued)));
+    assert!(
+        matches!(result, Err(ScmApiError::AuthorizationNotIssued)),
+        "Unissued verifier must unconditionally return AuthorizationNotIssued"
+    );
 }
 
 #[test]
-fn external_caller_cannot_self_select_or_forge_voucher() {
-    let authority_secret = b"owner-root-secret-offline-hardware-key-material";
+fn external_caller_token_validating_verifier_refuses_without_authority() {
+    let raw_token = b"caller-arbitrary-raw-token";
     let scope = test_scope();
-    let verifier = TokenValidatingOwnerVerifier::from_authority(authority_secret.to_vec(), scope);
+    let verifier = TokenValidatingOwnerVerifier::new(raw_token, scope.clone());
 
-    // Caller invents their own token and attempts to authorize actions.runner.auth-target
-    let forged_request = TrustedOwnerAuthorizationRequest {
-        service_name: "actions.runner.auth-target".to_string(),
-        image_token: "authorized-image-token-digest-12345".to_string(),
-        execution_identity_token: "authorized-execution-identity-digest-67890".to_string(),
-        target_host_token: "authorized-target-host-token-abcde".to_string(),
-        candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_string(),
-        allow_start: true,
-        allow_stop: true,
-        allow_change_config: false,
-        transaction_id: "tx-auth-qualification-001".to_string(),
+    let request = TrustedOwnerAuthorizationRequest {
+        service_name: scope.service_name,
+        image_token: scope.image_token,
+        execution_identity_token: scope.execution_identity_token,
+        target_host_token: scope.target_host_token,
+        candidate_commit: scope.candidate_commit,
+        transaction_id: scope.transaction_id,
+        allow_start: scope.allow_start,
+        allow_stop: scope.allow_stop,
+        allow_change_config: scope.allow_change_config,
         not_before_epoch_seconds: 0,
         expires_at_epoch_seconds: u64::MAX,
-        nonce: "forged-external-nonce".to_string(),
-        owner_material: b"self-selected-caller-token".to_vec(),
+        nonce: "raw-token-nonce".to_string(),
+        owner_material: raw_token.to_vec(),
     };
 
-    let result = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &forged_request);
-    assert!(matches!(result, Err(ScmApiError::AccessDenied)));
+    let result = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request);
+    assert!(
+        matches!(result, Err(ScmApiError::AuthorizationNotIssued)),
+        "TokenValidatingOwnerVerifier created via public new must return AuthorizationNotIssued"
+    );
 }
 
 #[test]
-fn p03_all_nine_dimensions_refusal_matrix() {
-    let authority_secret = b"owner-root-secret-offline-hardware-key-material";
+fn external_caller_cannot_mint_trusted_live_with_any_token_or_root() {
     let scope = test_scope();
-    let issuer = OwnerAuthorizationIssuer::new(authority_secret.to_vec());
-    let verifier =
-        TokenValidatingOwnerVerifier::from_authority(authority_secret.to_vec(), scope.clone());
 
-    let (valid_req, _) = issuer.issue_for_scope(&scope, 3600, "valid-single-use-nonce-1");
+    // Matrix of diverse attempts by an external caller:
+    let test_materials: &[&[u8]] = &[
+        b"caller-invented-secret",
+        b"actual-owner-offline-hardware-secret",
+        b"owner-root-secret-offline-hardware-key-material",
+        b"trusted-authority-master-secret",
+        b"",
+        b"\0\0\0\0",
+        &[0xFF; 64],
+    ];
 
-    // 1. Empty material refuses with AuthorizationNotIssued
-    let mut req = valid_req.clone();
-    req.owner_material = Vec::new();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AuthorizationNotIssued)
-    ));
+    for &material in test_materials {
+        let verifier = TokenValidatingOwnerVerifier::new(material, scope.clone());
+        let request = TrustedOwnerAuthorizationRequest {
+            service_name: scope.service_name.clone(),
+            image_token: scope.image_token.clone(),
+            execution_identity_token: scope.execution_identity_token.clone(),
+            target_host_token: scope.target_host_token.clone(),
+            candidate_commit: scope.candidate_commit.clone(),
+            transaction_id: scope.transaction_id.clone(),
+            allow_start: scope.allow_start,
+            allow_stop: scope.allow_stop,
+            allow_change_config: scope.allow_change_config,
+            not_before_epoch_seconds: 1_000,
+            expires_at_epoch_seconds: 2_000,
+            nonce: format!("attempt-nonce-{}", material.len()),
+            owner_material: material.to_vec(),
+        };
 
-    // 2. Tampered service name (wildcard) refuses with NameDrift
-    let mut req = valid_req.clone();
-    req.service_name = "actions.runner.*".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::NameDrift)
-    ));
-
-    // 3. Service name drift refuses with NameDrift
-    let mut req = valid_req.clone();
-    req.service_name = "actions.runner.foreign".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::NameDrift)
-    ));
-
-    // 4. Image token drift refuses with IdentityMismatch
-    let mut req = valid_req.clone();
-    req.image_token = "foreign-image-token".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::IdentityMismatch)
-    ));
-
-    // 5. Execution identity token drift refuses with IdentityMismatch
-    let mut req = valid_req.clone();
-    req.execution_identity_token = "foreign-execution-identity".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::IdentityMismatch)
-    ));
-
-    // 6. Target host token drift refuses with AccessDenied
-    let mut req = valid_req.clone();
-    req.target_host_token = "foreign-host-token".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 7. Candidate commit drift refuses with AccessDenied
-    let mut req = valid_req.clone();
-    req.candidate_commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 8. Transaction ID drift refuses with AccessDenied
-    let mut req = valid_req.clone();
-    req.transaction_id = "tx-tampered-id".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 9. Excessive permission request refuses with AccessDenied
-    let mut req = valid_req.clone();
-    req.allow_change_config = true; // Scope only authorizes start and stop
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 10. Empty nonce refuses with AccessDenied
-    let mut req = valid_req.clone();
-    req.nonce = "  ".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 11. Inverted validity window refuses with AccessDenied
-    let mut req = valid_req.clone();
-    req.expires_at_epoch_seconds = req.not_before_epoch_seconds - 10;
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 12. Valid request passes exactly once and opens TrustedLive
-    let gate = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &valid_req)
-        .expect("Valid authorization must pass");
-    assert!(gate.is_trusted_live());
-    assert!(!gate.is_synthetic_test_only());
-    assert!(gate.allows_mutation());
-
-    // 13. Replay with identical nonce fails closed across shared ledger
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &valid_req),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 14. Replay with swapped nonce fails closed (digest mismatch and/or consumption)
-    let mut replay_swapped = valid_req.clone();
-    replay_swapped.nonce = "swapped-nonce-attempt".to_string();
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &replay_swapped),
-        Err(ScmApiError::AccessDenied)
-    ));
-
-    // 15. Replay against a fresh reconstructed verifier fails closed via global shared ledger
-    let verifier2 = TokenValidatingOwnerVerifier::from_authority(authority_secret.to_vec(), scope);
-    assert!(matches!(
-        LiveScmExecutionGate::from_trusted_owner_authorization(&verifier2, &valid_req),
-        Err(ScmApiError::AccessDenied)
-    ));
+        let result = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request);
+        assert!(
+            matches!(
+                result,
+                Err(ScmApiError::AuthorizationNotIssued | ScmApiError::AccessDenied)
+            ),
+            "Every external attempt must fail closed (got {result:?})"
+        );
+    }
 }
 
 #[test]
@@ -234,19 +156,7 @@ fn sensitive_material_is_redacted_in_debug() {
 }
 
 #[test]
-fn defense_in_depth_trusted_live_gate_leaves_windows_backend_sealed() {
-    let authority_secret = b"owner-root-secret-offline-hardware-key-material";
-    let scope = test_scope();
-    let issuer = OwnerAuthorizationIssuer::new(authority_secret.to_vec());
-    let verifier =
-        TokenValidatingOwnerVerifier::from_authority(authority_secret.to_vec(), scope.clone());
-
-    let (valid_req, _) = issuer.issue_for_scope(&scope, 3600, "defense-in-depth-nonce");
-    let gate = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &valid_req)
-        .expect("Valid authorization must pass");
-    assert!(gate.is_trusted_live());
-
-    // PRODUCTION_MUTATION=false: Windows SCM adapter writes unconditionally refuse
+fn defense_in_depth_real_windows_scm_writes_remain_sealed() {
     let backend = WindowsScmBackend::mutation_inert();
     assert!(matches!(
         backend.start("actions.runner.auth-target"),
@@ -260,79 +170,4 @@ fn defense_in_depth_trusted_live_gate_leaves_windows_backend_sealed() {
         backend.change_start_mode("actions.runner.auth-target", ServiceStartMode::Manual),
         Err(ScmApiError::GateClosed)
     ));
-}
-
-#[test]
-fn external_caller_with_raw_token_via_new_is_refused() {
-    let raw_token = b"caller-arbitrary-raw-token";
-    let scope = test_scope();
-    let verifier = TokenValidatingOwnerVerifier::new(raw_token, scope.clone());
-
-    let request = TrustedOwnerAuthorizationRequest {
-        service_name: scope.service_name,
-        image_token: scope.image_token,
-        execution_identity_token: scope.execution_identity_token,
-        target_host_token: scope.target_host_token,
-        candidate_commit: scope.candidate_commit,
-        transaction_id: scope.transaction_id,
-        allow_start: scope.allow_start,
-        allow_stop: scope.allow_stop,
-        allow_change_config: scope.allow_change_config,
-        not_before_epoch_seconds: 0,
-        expires_at_epoch_seconds: u64::MAX,
-        nonce: "raw-token-nonce".to_string(),
-        owner_material: raw_token.to_vec(),
-    };
-
-    let result = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request);
-    assert!(matches!(result, Err(ScmApiError::AuthorizationNotIssued)));
-}
-
-#[test]
-fn concurrent_race_with_same_voucher_permits_exactly_one_success() {
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
-    let authority_secret = b"owner-root-secret-concurrent-race-test";
-    let scope = test_scope();
-    let issuer = OwnerAuthorizationIssuer::new(authority_secret.to_vec());
-    let verifier = Arc::new(TokenValidatingOwnerVerifier::from_authority(
-        authority_secret.to_vec(),
-        scope.clone(),
-    ));
-
-    let (request, _) = issuer.issue_for_scope(&scope, 3600, "concurrent-race-single-use-nonce");
-    let request = Arc::new(request);
-
-    let thread_count = 8;
-    let barrier = Arc::new(Barrier::new(thread_count));
-    let mut handles = Vec::new();
-
-    for _ in 0..thread_count {
-        let v = Arc::clone(&verifier);
-        let req = Arc::clone(&request);
-        let b = Arc::clone(&barrier);
-
-        handles.push(thread::spawn(move || {
-            b.wait();
-            LiveScmExecutionGate::from_trusted_owner_authorization(&*v, &req)
-        }));
-    }
-
-    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let successes = results.iter().filter(|r| r.is_ok()).count();
-    let denials = results
-        .iter()
-        .filter(|r| matches!(r, Err(ScmApiError::AccessDenied)))
-        .count();
-
-    assert_eq!(
-        successes, 1,
-        "Atomic consumption ledger must allow EXACTLY ONE success across concurrent races"
-    );
-    assert_eq!(
-        denials,
-        thread_count - 1,
-        "All other concurrent attempts must be rejected with AccessDenied"
-    );
 }

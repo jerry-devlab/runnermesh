@@ -260,7 +260,7 @@ impl SharedAuthorizationLedger {
         }
     }
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::new_internal()
     }
 
@@ -312,20 +312,25 @@ impl SharedAuthorizationLedger {
 /// plane possessing the Owner root authority secret. Callers cannot self-select
 /// tokens or manufacture valid vouchers without this authority.
 #[derive(Clone, Debug)]
-pub struct OwnerAuthorizationIssuer {
+pub(crate) struct OwnerAuthorizationIssuer {
     authority_secret: Vec<u8>,
+    #[allow(dead_code)]
     clock: Arc<dyn TrustedClock>,
 }
 
+#[allow(dead_code)]
 impl OwnerAuthorizationIssuer {
-    pub fn new(authority_secret: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn new(authority_secret: impl Into<Vec<u8>>) -> Self {
         Self {
             authority_secret: authority_secret.into(),
             clock: Arc::new(SystemClock),
         }
     }
 
-    pub fn with_clock(authority_secret: impl Into<Vec<u8>>, clock: Arc<dyn TrustedClock>) -> Self {
+    pub(crate) fn with_clock(
+        authority_secret: impl Into<Vec<u8>>,
+        clock: Arc<dyn TrustedClock>,
+    ) -> Self {
         Self {
             authority_secret: authority_secret.into(),
             clock,
@@ -334,7 +339,7 @@ impl OwnerAuthorizationIssuer {
 
     /// Computes cryptographic digest voucher binding all 9 P03 dimensions.
     #[allow(clippy::too_many_arguments)]
-    pub fn compute_voucher(
+    pub(crate) fn compute_voucher(
         &self,
         service_name: &str,
         image_token: &str,
@@ -378,7 +383,7 @@ impl OwnerAuthorizationIssuer {
     }
 
     /// Issue a signed authorization request for the specified 9-dimension scope.
-    pub fn issue_for_scope(
+    pub(crate) fn issue_for_scope(
         &self,
         scope: &OwnerAuthorizationScope,
         validity_duration_seconds: u64,
@@ -424,7 +429,7 @@ impl OwnerAuthorizationIssuer {
 
     /// Issue a signed authorization request for the specified parameters.
     #[allow(clippy::too_many_arguments)]
-    pub fn issue(
+    pub(crate) fn issue(
         &self,
         service_name: impl Into<String>,
         image_token: impl Into<String>,
@@ -490,27 +495,6 @@ impl TrustedOwnerAuthorizationVerifier for UnissuedOwnerAuthorizationVerifier {
 /// [`ScmApiError::AccessDenied`], expired or not-yet-valid validity windows with
 /// [`ScmApiError::AccessDenied`], and replayed tokens/nonces across the shared
 /// ledger with [`ScmApiError::AccessDenied`].
-///
-/// Checks whether an authority secret belongs to an admitted root authority.
-///
-/// In this repository, public builds contain zero unvetted authority secrets.
-/// Any arbitrary caller-selected authority secret attempting to mint a `TrustedLive`
-/// gate is rejected fail-closed with `AccessDenied`.
-pub fn is_admitted_authority_root(secret: &[u8]) -> bool {
-    const ADMITTED_ROOTS: &[&[u8]] = &[
-        b"actual-owner-offline-hardware-secret",
-        b"owner-root-secret-offline-hardware-key-material",
-        b"owner-root-secret-concurrent-race-test",
-        b"secret-token-valid-opens-gate-suite",
-        b"secret-token-refusal-paths-suite-42",
-        b"trusted-authority-master-secret",
-        b"authority-secret-defense-in-depth-inert",
-        b"authority-secret-controls-mock-exact",
-        b"shared-authority-secret-concurrent-repro",
-    ];
-    ADMITTED_ROOTS.contains(&secret)
-}
-
 #[derive(Clone)]
 pub struct TokenValidatingOwnerVerifier {
     authorized_scope: OwnerAuthorizationScope,
@@ -531,6 +515,9 @@ impl std::fmt::Debug for TokenValidatingOwnerVerifier {
 
 impl TokenValidatingOwnerVerifier {
     /// Constructs verifier for an expected token hash and bound scope.
+    ///
+    /// In this build, external callers receive an unissued verifier (no authority secret).
+    /// Calling `verify()` unconditionally returns `Err(ScmApiError::AuthorizationNotIssued)`.
     pub fn new(expected_token: &[u8], scope: OwnerAuthorizationScope) -> Self {
         Self::with_clock_and_ledger(
             expected_token,
@@ -541,8 +528,10 @@ impl TokenValidatingOwnerVerifier {
         )
     }
 
-    /// Constructs verifier bound to an authority secret and bound scope.
-    pub fn from_authority(
+    /// Internal test constructor bound to an authority secret.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn from_authority(
         authority_secret: impl Into<Vec<u8>>,
         scope: OwnerAuthorizationScope,
     ) -> Self {
@@ -689,9 +678,6 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
 
         // 11. Cryptographic voucher / digest verification
         if let Some(ref authority_secret) = self.authority_secret {
-            if !is_admitted_authority_root(authority_secret) {
-                return Err(ScmApiError::AccessDenied);
-            }
             let issuer = OwnerAuthorizationIssuer {
                 authority_secret: authority_secret.clone(),
                 clock: self.clock.clone(),
@@ -3395,6 +3381,54 @@ mod tests {
             authority_verifier.verify(&self_selected_req),
             Err(ScmApiError::AccessDenied)
         ));
+    }
+
+    #[test]
+    fn trusted_owner_verifier_concurrent_race_allows_exactly_one_success() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let authority_secret = b"owner-root-secret-concurrent-race-internal";
+        let scope = OwnerAuthorizationScope::test_fixture("fixture.scm.a", "fixture-image");
+        let clock = Arc::new(MockClock::new(1_500));
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, clock.clone());
+        let verifier = Arc::new(TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            scope.clone(),
+            clock,
+        ));
+
+        let (request, _) = issuer.issue_for_scope(&scope, 3600, "concurrent-race-internal-nonce");
+        let request = Arc::new(request);
+
+        let thread_count = 8;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let mut handles = Vec::new();
+
+        for _ in 0..thread_count {
+            let v = Arc::clone(&verifier);
+            let req = Arc::clone(&request);
+            let b = Arc::clone(&barrier);
+
+            handles.push(thread::spawn(move || {
+                b.wait();
+                v.verify(&req)
+            }));
+        }
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let success_count = results.iter().filter(|r| r.is_ok()).count();
+        let denial_count = results
+            .iter()
+            .filter(|r| matches!(r, Err(ScmApiError::AccessDenied)))
+            .count();
+
+        assert_eq!(success_count, 1, "Exactly one thread must succeed");
+        assert_eq!(
+            denial_count,
+            thread_count - 1,
+            "All other racing threads must receive AccessDenied"
+        );
     }
 
     #[test]

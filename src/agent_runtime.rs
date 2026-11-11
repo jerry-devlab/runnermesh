@@ -215,6 +215,126 @@ pub fn assemble_installed_core(
     Ok(core)
 }
 
+/// Explicit sandbox configuration for running the installed Agent in test/qualification environments.
+#[derive(Clone)]
+pub struct InstalledAgentSandboxConfig {
+    pub install_root: PathBuf,
+    pub ipc_endpoint: IpcEndpoint,
+    pub multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+    pub discovery_report: Option<crate::DiscoveryReport>,
+    pub poll_interval: Duration,
+}
+
+/// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
+pub struct RunningInstalledAgentSandbox {
+    core: Arc<Mutex<RuntimeCore>>,
+    exit: Arc<RuntimeExitState>,
+    pipe_thread: Option<thread::JoinHandle<()>>,
+    poll_thread: Option<thread::JoinHandle<()>>,
+}
+
+impl RunningInstalledAgentSandbox {
+    /// Triggers an immediate observation-decision-reconcile cycle on the shared AgentCore.
+    pub fn step_poll(&self) -> Result<AgentSnapshot, String> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| "Agent runtime core mutex poisoned".to_string())?;
+        core.observe_decide_reconcile()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Returns the current snapshot from the running AgentCore.
+    pub fn snapshot(&self) -> AgentSnapshot {
+        self.core.lock().unwrap().snapshot()
+    }
+
+    /// Inspects whether the exit state has been requested.
+    pub fn is_exit_requested(&self) -> bool {
+        self.exit.requested.load(Ordering::Acquire)
+    }
+
+    /// Performs graceful shutdown of the background pipe and polling threads.
+    pub fn shutdown(mut self) {
+        self.exit.requested.store(true, Ordering::Release);
+        if let Some(handle) = self.pipe_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.poll_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Starts an installed Agent runtime under explicit sandbox configuration.
+///
+/// Drives the runtime through the actual installed startup path:
+/// 1. Prepares config, registry, and state paths within the explicit `install_root`.
+/// 2. Assembles the installed AgentCore with attached multi-runner lifecycle backend and discovery report.
+/// 3. Binds the real IPC server on the explicit `ipc_endpoint`.
+/// 4. Spawns the authentic `spawn_pipe_loop` thread for receiving typed IPC commands.
+/// 5. Spawns the authentic periodic polling loop running `observe_decide_reconcile`.
+pub fn start_installed_agent_sandbox(
+    config: InstalledAgentSandboxConfig,
+) -> Result<RunningInstalledAgentSandbox, String> {
+    let state_root = config.install_root.join("agent_state");
+    fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
+    let config_path = config.install_root.join("config.json");
+
+    let observer = RuntimeObserver::new(None, Vec::new());
+    let reconciler = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
+    let mut core = assemble_installed_core(
+        config_path,
+        observer,
+        reconciler,
+        config.multi_runner_backend,
+    )?;
+    if let Some(discovery) = config.discovery_report {
+        core.set_runner_discovery(discovery);
+    }
+
+    let server = IpcServer::bind(config.ipc_endpoint).map_err(|error| error.to_string())?;
+    let _ = core
+        .observe_decide_reconcile()
+        .map_err(|error| error.to_string())?;
+
+    let core = Arc::new(Mutex::new(core));
+    let exit = Arc::new(RuntimeExitState::default());
+    let readiness = Arc::new(RuntimeReadiness::from_runner_home(None, false));
+    let (snapshot_sender, _snapshot_receiver) = mpsc::channel();
+
+    let pipe_thread = spawn_pipe_loop(
+        server,
+        Arc::clone(&core),
+        Arc::clone(&exit),
+        readiness,
+        snapshot_sender,
+        false,
+    );
+
+    let core_for_poll = Arc::clone(&core);
+    let exit_for_poll = Arc::clone(&exit);
+    let poll_interval = config.poll_interval;
+    let poll_thread = thread::spawn(move || {
+        while !exit_for_poll.requested.load(Ordering::Acquire) {
+            thread::sleep(poll_interval);
+            if exit_for_poll.requested.load(Ordering::Acquire) {
+                break;
+            }
+            if let Ok(mut core) = core_for_poll.lock() {
+                let _ = core.observe_decide_reconcile();
+            }
+        }
+    });
+
+    Ok(RunningInstalledAgentSandbox {
+        core,
+        exit,
+        pipe_thread: Some(pipe_thread),
+        poll_thread: Some(poll_thread),
+    })
+}
+
 fn run_agent(
     config_path: PathBuf,
     runtime_state_root: PathBuf,

@@ -21,6 +21,16 @@ pub struct IpcRequest {
     pub command: AgentCommand,
 }
 
+impl IpcRequest {
+    pub fn new(command: AgentCommand) -> Self {
+        Self {
+            protocol_version: IPC_PROTOCOL_VERSION,
+            request_id: 1,
+            command,
+        }
+    }
+}
+
 /// A correlated typed response from the sole Agent authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IpcResponse {
@@ -155,9 +165,10 @@ impl IpcEndpoint {
         )
     }
 
-    #[cfg(all(test, windows))]
-    fn for_test_scope(scope: String) -> Self {
-        Self { scope }
+    pub fn for_test_scope(scope: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+        }
     }
 }
 

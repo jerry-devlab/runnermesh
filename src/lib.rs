@@ -228,16 +228,15 @@ pub use windows_runner_discovery::{
     ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
-    is_admitted_authority_root, opaque_image_token, reconcile_interrupted_scm_journal,
-    runner_service_binary_path, runner_service_image_token, AdmissionSelectorObserver,
-    FakeGithubAdmissionBackend, GatedWindowsScmBackend, LiveScmExecutionGate, MockClock,
-    MockScmBackend, MockServiceRecord, OwnerAuthorizationIssuer, OwnerAuthorizationScope,
-    PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest,
-    ScmApiError, ScmControlBackend, ScmControlExecutor, ScmExactSnapshot, ScmTransactionJournal,
-    ScmTransactionReceipt, ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant,
-    SystemClock, TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
-    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
-    SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
+    opaque_image_token, reconcile_interrupted_scm_journal, runner_service_binary_path,
+    runner_service_image_token, AdmissionSelectorObserver, FakeGithubAdmissionBackend,
+    GatedWindowsScmBackend, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
+    OwnerAuthorizationScope, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
+    PrivilegedScmRequest, ScmApiError, ScmControlBackend, ScmControlExecutor, ScmExactSnapshot,
+    ScmTransactionJournal, ScmTransactionReceipt, ScmTransactionStage, SharedAuthorizationLedger,
+    SyntheticScmTestGrant, SystemClock, TokenValidatingOwnerVerifier, TrustedClock,
+    TrustedOwnerAuthorizationRequest, TrustedOwnerAuthorizationVerifier,
+    UnissuedOwnerAuthorizationVerifier, WindowsScmBackend, SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
