@@ -4,7 +4,11 @@ Mark dispositions with evidence. Do not check a live box without Owner evidence.
 
 ```text
 PHASE=RM-160H-PHASE-R-OWNER-CLOSEOUT
-START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
+PR_BASE=feat/lrm-productization
+PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
+G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 SOURCE_CLOSEOUT=PASS
 R0=PASS
 R1_LOCAL=EMPTY_OK
@@ -12,9 +16,8 @@ R1_ZENBOOKDUO=PENDING_NOT_RUN
 CANDIDATE_PR=65
 PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
 CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-PR_HEAD=115760b13a7bbaf6a46387ba02cd754b29621240
-PR_CI=43035274757 (PASS_ALL 6/6 jobs)
-G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9
+PR_CI=43043112251 (PASS_ALL 6/6 jobs)
 ```
 
 ## R0 — packet polish (safe, no live mutation)
@@ -42,7 +45,7 @@ G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 
 - [x] R2-01 Choose exact HEAD(s): Track 2 (LRM) Candidate `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` on PR #65; Track 1 `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` for H2 (separate track).
 - [x] R2-02 Provide privacy-safe diff/risk map to external reviewer (Surfaces A-D documented in `RM-160H-R2-SECURITY-REVIEW-PACKET.md`).
-- [x] R2-03 Record reviewer identity class + bound SHA: `OWNER_INDEPENDENT_AUDITOR` on conversation `4b64d99a-c794-47a3-9b21-0d0cff66224d`, bound commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`, signature `ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL-2`.
+- [x] R2-03 Record reviewer identity class + bound SHA: `OWNER_INDEPENDENT_AUDITOR` via strictly capability-isolated read-only subagent (`strict_readonly_auditor`, `EnableWriteTools=false`), bound commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`, signature `ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`. Prior run retained as `DIAGNOSTIC_ONLY`.
 - [x] **EXIT** `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · Track 1 G15R remains `PENDING` (never use PR #65 tip as RC)
 
 ## R3 — H2 v0.1 (G15R track only)

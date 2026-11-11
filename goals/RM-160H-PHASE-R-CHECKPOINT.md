@@ -4,7 +4,11 @@
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
 PHASE=RM-160H-PHASE-R-OWNER-CLOSEOUT
 TRAIN=D24-OWNER-ASSIST
-START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
+PR_BASE=feat/lrm-productization
+PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
+G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 R0=PASS
 R1_LOCAL_DEV_HOST=EMPTY_OK
 R1_ZENBOOKDUO=PENDING_NOT_RUN
@@ -15,15 +19,12 @@ PROGRAM_COMPOSITE_PCT≈80
 WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=65
-PR_BASE=feat/lrm-productization
-PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
 CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
 PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-PR_HEAD=115760b13a7bbaf6a46387ba02cd754b29621240
-PR_CI=43035274757 (PASS_ALL 6/6 jobs)
-PREDECESSOR_DOCS_PR_HEAD=9155ad7310ae950a7f14e3e3b7b252ce8a3ce38f
-PREDECESSOR_DOCS_PR_CI=43024450360 (PASS_ALL 6/6 jobs)
-G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9
+PR_CI=43043112251 (PASS_ALL 6/6 jobs)
+PREDECESSOR_DOCS_PR_HEAD=115760b13a7bbaf6a46387ba02cd754b29621240
+PREDECESSOR_DOCS_PR_CI=43035274757 (PASS_ALL 6/6 jobs)
 PRODUCTION_MUTATION=false
 IMPLEMENTER=AGY
 ```
@@ -87,20 +88,28 @@ PRODUCTION_MUTATION=false
 
 ## Independent Security Review Traceability (R2)
 
-```text
-AUDITOR_MECHANISM=ISOLATED_READ_ONLY_RESEARCH_SUBAGENT
-SUBAGENT_CONVERSATION_ID=4b64d99a-c794-47a3-9b21-0d0cff66224d
-SUBAGENT_CONVERSATION_URI=conversation://4b64d99a-c794-47a3-9b21-0d0cff66224d
-SUBAGENT_ROLE=Independent Security Auditor
-SUBAGENT_TYPE=research (strictly read-only tools, no write/edit access, zero parent mutation authority)
-SUBAGENT_TRANSCRIPT_LOG=<appDataDir>/brain/4b64d99a-c794-47a3-9b21-0d0cff66224d/.system_generated/logs/transcript.jsonl
-SUBAGENT_FULL_TRANSCRIPT_LOG=<appDataDir>/brain/4b64d99a-c794-47a3-9b21-0d0cff66224d/.system_generated/logs/transcript_full.jsonl
-SUBAGENT_REAUDIT_STEPS=Step 264 to Step 296 (formal report dispatched at Step 294)
-RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec.md
-INDEPENDENT_EVIDENCE_STATUS=VERIFIED_PRESENT
-DISPOSITION_LRM=PASS
-DISPOSITION_G15R=PENDING (Track 1 awaiting separate Owner authorization & audit on G15R_RC)
-SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL-2
+Status: R2_LRM=PASS · R2_G15R=PENDING
+
+### Prior Review Record (Diagnostic Evidence):
+- AUDITOR_ID: OWNER_INDEPENDENT_AUDITOR (subagent 4b64d99a-c794-47a3-9b21-0d0cff66224d)
+- PROFILE_LIMITATION: Builtin 'research' subagent type possessed 'run_command' capability in its toolset. Capability-level sandbox read-only enforcement cannot be proven solely by label.
+- GOVERNANCE_DISPOSITION: Retained strictly as DIAGNOSTIC_ONLY evidence. Cannot count as independent acceptance.
+- RAW_REPORT_ARCHIVE: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec.md
+
+### Strict Read-Only Independent Review (Capability Enforced):
+- AUDITOR_MECHANISM: STRICT_READONLY_SUBAGENT
+- REVIEWER_CLASS: OWNER_INDEPENDENT_AUDITOR
+- SUBAGENT_CONVERSATION_ID: a825f275-314b-46f8-86e1-290228e47b89
+- SUBAGENT_CONVERSATION_URI: conversation://a825f275-314b-46f8-86e1-290228e47b89
+- SUBAGENT_ROLE: Independent Security Auditor
+- SUBAGENT_TYPE: strict_readonly_auditor
+- CAPABILITY_ISOLATION_EVIDENCE: Defined with EnableWriteTools=false, EnableSubagentTools=false, EnableMCPTools=false. Platform architecturally strips write_file, edit_file, and run_command. Toolset restricted strictly to read_file, search_web, send_message.
+- SUBAGENT_TRANSCRIPT_LOG: <appDataDir>/brain/a825f275-314b-46f8-86e1-290228e47b89/.system_generated/logs/transcript.jsonl
+- RAW_REPORT_ARCHIVE: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-STRICT.md
+- SIGNATURE_IDENTIFIER: ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1
+- STATUS: COMPLETED
+- DISPOSITION_LRM: PASS
+- DISPOSITION_G15R: PENDING (Track 1 awaiting separate Owner authorization & audit on G15R_RC)
 ```
 
 ## Next

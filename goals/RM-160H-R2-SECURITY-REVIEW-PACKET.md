@@ -1,16 +1,28 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **AUDIT_COMPLETE (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. External independent security audit delivered formal PASS disposition on 2026-11-11 following unification of R6 background periodic dispatch and falsifiability test on candidate commit `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`. Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
+Status: **COMPLETED (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=PASS` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. Track 2 (LRM) R2 review completed with PASS under an architecturally isolated strict read-only subagent (`EnableWriteTools=false`, signature `ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`). Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
 
-## 1. Candidate HEADs Under Review
+## 1. Candidate HEADs Under Review & Git Coordinate Disambiguation
 
-This packet provides exact-scope risk and diff maps for external security auditors across two distinct delivery tracks:
+This packet provides exact-scope risk and diff maps for external security auditors across two distinct delivery tracks, with explicit separation of Git baseline coordinates:
+
+### Baseline Coordinates
+
+| Coordinate | Git Ref / Commit SHA | Definition / Purpose |
+|---|---|---|
+| **GOAL_START_MAIN** | `fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Fork/merge-base commit where the 160H delivery branch split from protected `main` (PR #50). |
+| **REMOTE_MAIN** | `d2b37444342d085e650f996e5fb4322f775bbe6f` | Current authoritative `origin/main` tip on GitHub (includes subsequent main commits). |
+| **PR_BASE_HEAD** | `8cd996acfee23e5f2006e7801139c70d0d67551d` | Target base commit of PR #65 on `feat/lrm-productization` (`git merge-base origin/feat/lrm-productization HEAD`). |
+| **G15R_RC** | `fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Immutable single-workstation release candidate commit for Track 1 (v0.1 C0 Baseline) with CI Run 42452639359. |
+| **HISTORICAL_ROADMAP_V3_START** | `490852e219c74a0312e955e3eabeae02737bfc08` | Ancient Roadmap v3 reset point (2026-08-31); historical reference only, never conflated with Goal start main. |
+
+### Track Separation
 
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_65_CANDIDATE_HEAD=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 43033525627 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_65_CANDIDATE_HEAD=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9` | Run 43033525627 (Candidate, 6/6 green)<br>Run 43043112251 (PR HEAD, 6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -135,37 +147,50 @@ DISPOSITION=SUPERSEDED_BY_COUNTEREXAMPLE
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL-3
 ```
 
-### Current Review Intake (Candidate 0c266ec Unified Scheduler Loop & Falsifiability Re-Audit)
+### Historical Review Record (Candidate 0c266ec Diagnostic Evidence — Subagent 4b64d99a)
 
 ```text
 REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
 REVIEW_DATE=2026-11-11
 TARGET_TRACK=TRACK_2_HUX2_PR65
-STATUS=AUDIT_COMPLETE
+STATUS=DIAGNOSTIC_EVIDENCE
 BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, Audit HEAD: fd8e885, Docs HEAD: 115760b)
-HOSTED_CI_RUN=43033525627 (Candidate 0c266ec, 6/6 green) / 43035274757 (PR HEAD 115760b, 6/6 green)
+HOSTED_CI_RUN=43033525627 (PASS_ALL 6/6 jobs green)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
-FINDINGS_SUMMARY=Architectural remediation of R6 periodic scheduling counterexample verified. assemble_installed_core and spawn_periodic_loop unified across production and sandbox; manual step_poll completely deleted from codebase; run_installed_agent wired with fail-closed multi-runner backend; 4-phase sequential Stop dispatch automatically driven by background periodic scheduler loop upon IPC intent mutation; falsifiability proven via negative test showing disabled scheduler produces 0 actions under Phase 4 conditions; Runner B receives zero control actions; Windows SCM adapter writes remain inert (GateClosed); candidate package binaries verified with exact SHA-256 digests and provenance.
-DISPOSITION=PASS
-SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL-2
+FINDINGS_SUMMARY=Architectural remediation of R6 periodic scheduling counterexample verified diagnostically. assemble_installed_core and spawn_periodic_loop unified; step_poll eliminated; 4-phase sequential Stop dispatch driven automatically by periodic loop upon IPC intent mutation; falsifiability test verified; Runner B zero control actions; Windows SCM writes remain inert (GateClosed); package digests verified.
+DISPOSITION=DIAGNOSTIC_ONLY
+AUDITOR_MECHANISM=RESEARCH_SUBAGENT (4b64d99a-c794-47a3-9b21-0d0cff66224d)
+CAPABILITY_LIMITATION=Subagent was launched under builtin 'research' type which possessed 'run_command' capability in its toolset. Although only read-only commands were run, capability-level sandbox read-only enforcement cannot be proven solely by label. Retained strictly as diagnostic evidence; does NOT count as independent acceptance.
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec.md
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-HISTORICAL-4
 ```
 
-#### Independent Review Mechanism & Read-Only Isolation Evidence
+### Current Review Intake (Strict Read-Only Auditor — Capability Enforced)
 
 ```text
-AUDITOR_MECHANISM=ISOLATED_READ_ONLY_RESEARCH_SUBAGENT
-SUBAGENT_CONVERSATION_ID=4b64d99a-c794-47a3-9b21-0d0cff66224d
-SUBAGENT_CONVERSATION_URI=conversation://4b64d99a-c794-47a3-9b21-0d0cff66224d
-SUBAGENT_ROLE=Independent Security Auditor
-SUBAGENT_TYPE=research (strictly read-only tools: read_file, run_command for read-only inspection, search_web; zero write_file, zero edit_file, zero repository mutation authority)
-SUBAGENT_TRANSCRIPT_LOG=<appDataDir>/brain/4b64d99a-c794-47a3-9b21-0d0cff66224d/.system_generated/logs/transcript.jsonl
-SUBAGENT_FULL_TRANSCRIPT_LOG=<appDataDir>/brain/4b64d99a-c794-47a3-9b21-0d0cff66224d/.system_generated/logs/transcript_full.jsonl
-SUBAGENT_REAUDIT_STEPS=Step 264 to Step 296 (formal report dispatch at Step 294)
-RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec.md
-INDEPENDENT_EVIDENCE_STATUS=VERIFIED_PRESENT
-GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DIAGNOSTIC_ONLY. Independent review belongs solely to OWNER_INDEPENDENT_AUDITOR. If original independent evidence is missing, it must never be forged or recorded as verified.
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
+REVIEW_DATE=2026-11-11
+TARGET_TRACK=TRACK_2_HUX2_PR65
+STATUS=COMPLETED
+BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
+PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
+PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, PR HEAD: 03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9)
+HOSTED_CI_RUN=43033525627 (Candidate 0c266ec, 6/6 green) / 43043112251 (PR HEAD 03a0e2a, 6/6 green)
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, IPC
+AUDITOR_MECHANISM=STRICT_READONLY_SUBAGENT
+SUBAGENT_CONVERSATION_ID=a825f275-314b-46f8-86e1-290228e47b89
+SUBAGENT_CONVERSATION_URI=conversation://a825f275-314b-46f8-86e1-290228e47b89
+SUBAGENT_TYPE=strict_readonly_auditor
+CAPABILITY_ISOLATION_EVIDENCE=Defined with EnableWriteTools=false, EnableSubagentTools=false, EnableMCPTools=false. Platform architecturally strips write_file, edit_file, and run_command. Toolset strictly restricted to read_file, search_web, send_message.
+SUBAGENT_TRANSCRIPT_LOG=<appDataDir>/brain/a825f275-314b-46f8-86e1-290228e47b89/.system_generated/logs/transcript.jsonl
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-STRICT.md
+FINDINGS_SUMMARY=Strict read-only security audit complete. Surface A (R4 Trusted Owner Authorization Boundary) PASS with fail-closed unissued roots, 9 P03 dimensions, atomic replay protection ledger, Win32 SCM write paths sealed GateClosed. Surface B (R6 Periodic Scheduling & Multi-runner Execution Chain) PASS with unified assemble_installed_core & spawn_periodic_loop, step_poll deleted, 4-phase sequential Stop dispatch verified via IPC, falsifiability negative test verified, Runner B zero actions. Package provenance verified. Track separation enforced.
+DISPOSITION=PASS
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1
+GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DIAGNOSTIC_ONLY. Independent review belongs solely to OWNER_INDEPENDENT_AUDITOR. If original independent evidence is missing or unverified, it must remain PENDING.
 ```
 
 ### Track Distinction: Track 1 (G15R) vs Track 2 (LRM)

@@ -2,12 +2,14 @@
 
 ```text
 PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001
-START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
+PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
+G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
 CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-PR_HEAD=115760b13a7bbaf6a46387ba02cd754b29621240
-PR_CI=43035274757 (PASS_ALL 6/6 jobs)
-G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9
+PR_CI=43043112251 (PASS_ALL 6/6 jobs)
 SOURCE_AND_SANDBOX_CLOSEOUT=PASS
 LIVE_DELIVERY=WAITING_FOR_OWNER
 ```
@@ -20,7 +22,7 @@ never counts as PASS.
 | Score | % | Meaning |
 |---|---:|---|
 | **SOURCE_AND_SANDBOX** | **100%** | GT-01…GT-07 + P02–P06/P08 source closed; PR #65 CI green |
-| **LIVE_OWNER_CLOSEOUT** | **≈24%** | R0 PASS, R1 local EMPTY_OK, R2 Track 2 (LRM) PASS; live gates waiting for Owner |
+| **LIVE_OWNER_CLOSEOUT** | **≈24%** | R0 PASS, R1 local EMPTY_OK, R2 LRM PASS (G15R PENDING); live gates waiting for Owner |
 | **PROGRAM_COMPOSITE** | **≈81%** | 0.75×source + 0.25×live (source dominated the 160H train) |
 
 ## 2. Package board (P01–P09)
@@ -43,7 +45,7 @@ never counts as PASS.
 |---|---:|---|---:|---|
 | **R0** Packet polish | 4h | `PASS` | **100%** | Complete |
 | **R1** HUX-1 readonly | 4h | `PARTIAL` | **50%** | Local `EMPTY_OK`; **ZenBookDuo=`PENDING_NOT_RUN`** |
-| **R2** Independent security review | 8h | `PASS (LRM)` / `PENDING (G15R)` | **50%** | Track 2 LRM independent audit PASS (OWNER_INDEPENDENT_AUDITOR: ISO-8601-AUDITOR-SEC-RM160H-R2-FINAL-2); Track 1 G15R pending Owner |
+| **R2** Independent security review | 8h | `PASS_LRM` | **50%** | Strict read-only auditor (`ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`) PASS on candidate 0c266ec; Track 1 G15R pending Owner |
 | **R3** H2 v0.1 (G15R only) | 6h+24h | `WAITING` | **0%** | Needs R2(G15R) + Owner token |
 | **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
 | **R5** G-ADR006 | 4h | `BRIEF_READY` | **30%** | Brief published (`goals/RM-160H-R5-ADR006-OWNER-BRIEF.md`); awaits Owner decision |
@@ -73,7 +75,7 @@ PRODUCTION_MUTATION=false
 
 ## 5. What “done” would require next
 
-1. **R2 Track 2 LRM PASS** achieved by external auditor (`OWNER_INDEPENDENT_AUDITOR`); Track 1 G15R remains `PENDING` awaiting separate Owner authorization for H2.
+1. **R2 Track 2 LRM Review**: PASS on candidate 0c266ec (signature `ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`); Track 1 G15R remains `PENDING` awaiting separate Owner authorization for H2.
 2. **R1 ZenBookDuo** counts on physical UX8406 — or honest leave `PENDING_NOT_RUN`.
 3. **R5 Owner decision** on ADR 0006 (`ACCEPTED` | `REJECTED` | `DEFER`).
 4. Owner live transactions R3 and/or R4 with separate `RESTORE`.
