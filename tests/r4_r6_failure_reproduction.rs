@@ -11,16 +11,16 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[cfg(windows)]
-use runnermesh::agent_runtime::{
-    assemble_installed_core, NoRunnerControl, RuntimeObserver, RuntimeReconciler,
+use runnermesh::{
+    agent_runtime::{assemble_installed_core, NoRunnerControl, RuntimeObserver, RuntimeReconciler},
+    runner_service_image_token, MockScmBackend, MockServiceRecord, OpaqueIdentityReference,
+    PrivilegedScmHelper, SandboxMultiRunnerLifecycleBackend, ServiceObservation,
+    SyntheticScmTestGrant, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 use runnermesh::{
-    runner_service_image_token, LiveScmExecutionGate, MockScmBackend, MockServiceRecord,
-    OpaqueIdentityReference, OwnerAuthorizationIssuer, OwnerAuthorizationScope,
-    PrivilegedScmHelper, SandboxMultiRunnerLifecycleBackend, ScmApiError, ScmControlBackend,
-    ServiceObservation, ServiceStartMode, SyntheticScmTestGrant, TokenValidatingOwnerVerifier,
+    LiveScmExecutionGate, OwnerAuthorizationIssuer, OwnerAuthorizationScope, ScmApiError,
+    ScmControlBackend, ServiceStartMode, TokenValidatingOwnerVerifier,
     TrustedOwnerAuthorizationRequest, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
-    WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 
 #[test]
