@@ -494,6 +494,8 @@ where
                     service_name,
                     expected_image_token,
                     expected_execution_identity_token,
+                    target_host_token: String::new(),
+                    candidate_commit: String::new(),
                     transaction_id: transaction_id.to_string(),
                 };
                 reports.push(backend.dispatch_scm(&request));
@@ -597,6 +599,8 @@ where
                     service_name,
                     expected_image_token,
                     expected_execution_identity_token,
+                    target_host_token: String::new(),
+                    candidate_commit: String::new(),
                     transaction_id: transaction_id.to_string(),
                 };
                 reports.push(helper.dispatch(&request));

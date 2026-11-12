@@ -16,8 +16,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
 
 use crate::{
     achieved_from_observation, capture_restore_plan, next_control_phase_with_admission,
@@ -87,7 +91,7 @@ impl OwnerAuthorizationScope {
         Self {
             service_name: service_name.to_string(),
             image_token: image_token.to_string(),
-            execution_identity_token: "fixture-identity-token".to_string(),
+            execution_identity_token: "fixture-identity".to_string(),
             target_host_token: "fixture-host-token".to_string(),
             candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_string(),
             transaction_id: "tx-fixture-1".to_string(),
@@ -337,7 +341,7 @@ impl OwnerAuthorizationIssuer {
         }
     }
 
-    /// Computes cryptographic digest voucher binding all 9 P03 dimensions.
+    /// Computes cryptographic HMAC-SHA256 voucher binding all 9 P03 dimensions.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_voucher(
         &self,
@@ -354,32 +358,37 @@ impl OwnerAuthorizationIssuer {
         expires_at: u64,
         nonce: &str,
     ) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        hasher.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
-        hasher.update(&self.authority_secret);
-        hasher.update(b"\0");
-        hasher.update(service_name.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(image_token.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(execution_identity_token.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(target_host_token.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(candidate_commit.as_bytes());
-        hasher.update(b"\0");
-        hasher.update([
+        let mut mac = HmacSha256::new_from_slice(&self.authority_secret)
+            .expect("HMAC-SHA256 supports arbitrary key lengths");
+        mac.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
+        mac.update(service_name.as_bytes());
+        mac.update(b"\0");
+        mac.update(image_token.as_bytes());
+        mac.update(b"\0");
+        mac.update(execution_identity_token.as_bytes());
+        mac.update(b"\0");
+        mac.update(target_host_token.as_bytes());
+        mac.update(b"\0");
+        mac.update(candidate_commit.as_bytes());
+        mac.update(b"\0");
+        mac.update(&[
             allow_start as u8,
             allow_stop as u8,
             allow_change_config as u8,
         ]);
-        hasher.update(b"\0");
-        hasher.update(transaction_id.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(not_before.to_le_bytes());
-        hasher.update(expires_at.to_le_bytes());
-        hasher.update(nonce.as_bytes());
-        hasher.finalize().to_vec()
+        mac.update(b"\0");
+        mac.update(transaction_id.as_bytes());
+        mac.update(b"\0");
+        mac.update(&not_before.to_le_bytes());
+        mac.update(&expires_at.to_le_bytes());
+        mac.update(nonce.as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    /// Verifies whether two cryptographic vouchers are equal in constant time.
+    #[allow(dead_code)]
+    pub(crate) fn verify_voucher_constant_time(&self, actual: &[u8], expected: &[u8]) -> bool {
+        actual.ct_eq(expected).into()
     }
 
     /// Issue a signed authorization request for the specified 9-dimension scope.
@@ -676,27 +685,35 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
             return Err(ScmApiError::AccessDenied);
         }
 
-        // 11. Cryptographic voucher / digest verification
+        // 11. Cryptographic HMAC-SHA256 voucher verification with constant-time check
         if let Some(ref authority_secret) = self.authority_secret {
-            let issuer = OwnerAuthorizationIssuer {
-                authority_secret: authority_secret.clone(),
-                clock: self.clock.clone(),
-            };
-            let expected_voucher = issuer.compute_voucher(
-                &request.service_name,
-                &request.image_token,
-                &request.execution_identity_token,
-                &request.target_host_token,
-                &request.candidate_commit,
-                request.allow_start,
-                request.allow_stop,
-                request.allow_change_config,
-                &request.transaction_id,
-                request.not_before_epoch_seconds,
-                request.expires_at_epoch_seconds,
-                &request.nonce,
-            );
-            if request.owner_material != expected_voucher {
+            let mut mac = HmacSha256::new_from_slice(authority_secret)
+                .map_err(|_| ScmApiError::AccessDenied)?;
+            mac.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
+            mac.update(request.service_name.as_bytes());
+            mac.update(b"\0");
+            mac.update(request.image_token.as_bytes());
+            mac.update(b"\0");
+            mac.update(request.execution_identity_token.as_bytes());
+            mac.update(b"\0");
+            mac.update(request.target_host_token.as_bytes());
+            mac.update(b"\0");
+            mac.update(request.candidate_commit.as_bytes());
+            mac.update(b"\0");
+            mac.update(&[
+                request.allow_start as u8,
+                request.allow_stop as u8,
+                request.allow_change_config as u8,
+            ]);
+            mac.update(b"\0");
+            mac.update(request.transaction_id.as_bytes());
+            mac.update(b"\0");
+            mac.update(&request.not_before_epoch_seconds.to_le_bytes());
+            mac.update(&request.expires_at_epoch_seconds.to_le_bytes());
+            mac.update(request.nonce.as_bytes());
+
+            // Constant-time verification interface provided by digest/Mac trait
+            if mac.verify_slice(&request.owner_material).is_err() {
                 return Err(ScmApiError::AccessDenied);
             }
         } else {
@@ -715,9 +732,15 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
         LiveScmExecutionGate::mint_trusted_live(
             &request.service_name,
             &request.image_token,
+            &request.execution_identity_token,
+            &request.target_host_token,
+            &request.candidate_commit,
+            &request.transaction_id,
             request.allow_start,
             request.allow_stop,
             request.allow_change_config,
+            request.not_before_epoch_seconds,
+            request.expires_at_epoch_seconds,
         )
     }
 }
@@ -769,12 +792,32 @@ pub struct LiveScmExecutionGate {
     grant_kind: ScmGrantKind,
     bound_service_name: String,
     bound_image_token: String,
+    bound_execution_identity_token: String,
+    bound_target_host_token: String,
+    bound_candidate_commit: String,
+    bound_transaction_id: String,
+    not_before_epoch_seconds: u64,
+    expires_at_epoch_seconds: u64,
 }
 
 impl Default for LiveScmExecutionGate {
     fn default() -> Self {
         Self::CLOSED
     }
+}
+
+/// Execution context presented at dispatch time to be verified against the gate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScmExecutionContext<'a> {
+    pub service_name: &'a str,
+    pub image_token: &'a str,
+    pub execution_identity_token: &'a str,
+    pub target_host_token: &'a str,
+    pub candidate_commit: &'a str,
+    pub transaction_id: &'a str,
+    pub need_start: bool,
+    pub need_stop: bool,
+    pub need_config: bool,
 }
 
 impl LiveScmExecutionGate {
@@ -785,6 +828,12 @@ impl LiveScmExecutionGate {
         grant_kind: ScmGrantKind::Closed,
         bound_service_name: String::new(),
         bound_image_token: String::new(),
+        bound_execution_identity_token: String::new(),
+        bound_target_host_token: String::new(),
+        bound_candidate_commit: String::new(),
+        bound_transaction_id: String::new(),
+        not_before_epoch_seconds: 0,
+        expires_at_epoch_seconds: 0,
     };
 
     /// Opens a **synthetic test** gate. Never use for live Windows mutation.
@@ -799,6 +848,12 @@ impl LiveScmExecutionGate {
             grant_kind: ScmGrantKind::SyntheticTestOnly,
             bound_service_name: grant.service_name.clone(),
             bound_image_token: grant.image_token.clone(),
+            bound_execution_identity_token: String::new(),
+            bound_target_host_token: String::new(),
+            bound_candidate_commit: String::new(),
+            bound_transaction_id: String::new(),
+            not_before_epoch_seconds: 0,
+            expires_at_epoch_seconds: u64::MAX,
         })
     }
 
@@ -815,20 +870,39 @@ impl LiveScmExecutionGate {
     /// Requires non-empty exact `service_name` and `image_token` (no wildcards).
     /// Public boolean construction is prevented: this is only callable by a validated
     /// [`TrustedOwnerAuthorizationVerifier`]. Not accessible outside this crate.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn mint_trusted_live(
         service_name: impl Into<String>,
         image_token: impl Into<String>,
+        execution_identity_token: impl Into<String>,
+        target_host_token: impl Into<String>,
+        candidate_commit: impl Into<String>,
+        transaction_id: impl Into<String>,
         allow_start: bool,
         allow_stop: bool,
         allow_change_config: bool,
+        not_before_epoch_seconds: u64,
+        expires_at_epoch_seconds: u64,
     ) -> Result<Self, ScmApiError> {
         let s = service_name.into();
         let i = image_token.into();
+        let e = execution_identity_token.into();
+        let h = target_host_token.into();
+        let c = candidate_commit.into();
+        let t = transaction_id.into();
         if s.trim().is_empty() || s.contains('*') || s.contains('?') {
             return Err(ScmApiError::NameDrift);
         }
-        if i.trim().is_empty() {
+        if i.trim().is_empty()
+            || e.trim().is_empty()
+            || h.trim().is_empty()
+            || c.trim().is_empty()
+            || t.trim().is_empty()
+        {
             return Err(ScmApiError::IdentityMismatch);
+        }
+        if expires_at_epoch_seconds <= not_before_epoch_seconds {
+            return Err(ScmApiError::AccessDenied);
         }
         Ok(Self {
             allow_start,
@@ -837,6 +911,12 @@ impl LiveScmExecutionGate {
             grant_kind: ScmGrantKind::TrustedLive,
             bound_service_name: s,
             bound_image_token: i,
+            bound_execution_identity_token: e,
+            bound_target_host_token: h,
+            bound_candidate_commit: c,
+            bound_transaction_id: t,
+            not_before_epoch_seconds,
+            expires_at_epoch_seconds,
         })
     }
 
@@ -853,7 +933,163 @@ impl LiveScmExecutionGate {
         matches!(self.grant_kind, ScmGrantKind::TrustedLive)
     }
 
-    fn authorizes(
+    pub fn bound_service_name(&self) -> &str {
+        &self.bound_service_name
+    }
+
+    pub fn bound_image_token(&self) -> &str {
+        &self.bound_image_token
+    }
+
+    pub fn bound_execution_identity_token(&self) -> &str {
+        &self.bound_execution_identity_token
+    }
+
+    pub fn bound_target_host_token(&self) -> &str {
+        &self.bound_target_host_token
+    }
+
+    pub fn bound_candidate_commit(&self) -> &str {
+        &self.bound_candidate_commit
+    }
+
+    pub fn bound_transaction_id(&self) -> &str {
+        &self.bound_transaction_id
+    }
+
+    pub fn not_before_epoch_seconds(&self) -> u64 {
+        self.not_before_epoch_seconds
+    }
+
+    pub fn expires_at_epoch_seconds(&self) -> u64 {
+        self.expires_at_epoch_seconds
+    }
+
+    pub fn authorizes_context(
+        &self,
+        context: &ScmExecutionContext<'_>,
+        clock: &dyn TrustedClock,
+    ) -> Result<(), ScmApiError> {
+        if matches!(self.grant_kind, ScmGrantKind::Closed) {
+            return Err(ScmApiError::GateClosed);
+        }
+
+        // Action permission check
+        if context.need_start && !self.allow_start {
+            return Err(ScmApiError::GateClosed);
+        }
+        if context.need_stop && !self.allow_stop {
+            return Err(ScmApiError::GateClosed);
+        }
+        if context.need_config && !self.allow_change_config {
+            return Err(ScmApiError::GateClosed);
+        }
+
+        // Service name check (must match, case-insensitive)
+        if !self.bound_service_name.is_empty()
+            && !self
+                .bound_service_name
+                .eq_ignore_ascii_case(context.service_name)
+        {
+            return Err(ScmApiError::NameDrift);
+        }
+
+        // Image token check
+        if !self.bound_image_token.is_empty()
+            && !self
+                .bound_image_token
+                .eq_ignore_ascii_case(context.image_token)
+        {
+            return Err(ScmApiError::GateClosed);
+        }
+
+        // For TrustedLive, enforce all remaining P03 dimensions strictly against runtime context and clock
+        if matches!(self.grant_kind, ScmGrantKind::TrustedLive) {
+            // Execution identity check
+            if !self.bound_execution_identity_token.is_empty()
+                && !self
+                    .bound_execution_identity_token
+                    .eq_ignore_ascii_case(context.execution_identity_token)
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+
+            // Target host check
+            if !self.bound_target_host_token.is_empty()
+                && !self
+                    .bound_target_host_token
+                    .eq_ignore_ascii_case(context.target_host_token)
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+
+            // Candidate commit check
+            if !self.bound_candidate_commit.is_empty()
+                && !self
+                    .bound_candidate_commit
+                    .eq_ignore_ascii_case(context.candidate_commit)
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+
+            // Transaction ID check
+            if context.transaction_id.trim().is_empty() {
+                return Err(ScmApiError::RestoreIncomplete);
+            }
+            if !self.bound_transaction_id.is_empty()
+                && self.bound_transaction_id != context.transaction_id
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+
+            // Trusted clock & validity window check (post-mint expiry)
+            let now = clock.now_epoch_seconds();
+            if now < self.not_before_epoch_seconds || now >= self.expires_at_epoch_seconds {
+                return Err(ScmApiError::AccessDenied);
+            }
+        } else if matches!(self.grant_kind, ScmGrantKind::SyntheticTestOnly) {
+            if !self.bound_execution_identity_token.is_empty()
+                && !context.execution_identity_token.is_empty()
+                && !self
+                    .bound_execution_identity_token
+                    .eq_ignore_ascii_case(context.execution_identity_token)
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+            if !self.bound_target_host_token.is_empty()
+                && !context.target_host_token.is_empty()
+                && !self
+                    .bound_target_host_token
+                    .eq_ignore_ascii_case(context.target_host_token)
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+            if !self.bound_candidate_commit.is_empty()
+                && !context.candidate_commit.is_empty()
+                && !self
+                    .bound_candidate_commit
+                    .eq_ignore_ascii_case(context.candidate_commit)
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+            if !self.bound_transaction_id.is_empty()
+                && !context.transaction_id.is_empty()
+                && self.bound_transaction_id != context.transaction_id
+            {
+                return Err(ScmApiError::IdentityMismatch);
+            }
+            if self.expires_at_epoch_seconds > 0 && self.expires_at_epoch_seconds < u64::MAX {
+                let now = clock.now_epoch_seconds();
+                if now >= self.expires_at_epoch_seconds {
+                    return Err(ScmApiError::AccessDenied);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn authorizes(
         &self,
         service_name: &str,
         image_token: &str,
@@ -1447,6 +1683,9 @@ pub struct ScmControlExecutor<B> {
     expected_service_name: String,
     expected_image_token: String,
     expected_execution_identity_token: String,
+    expected_target_host_token: String,
+    expected_candidate_commit: String,
+    clock: Arc<dyn TrustedClock>,
 }
 
 impl<B: ScmControlBackend> ScmControlExecutor<B> {
@@ -1457,13 +1696,33 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
         expected_execution_identity_token: impl Into<String>,
         gate: LiveScmExecutionGate,
     ) -> Self {
+        let expected_target_host_token = gate.bound_target_host_token.clone();
+        let expected_candidate_commit = gate.bound_candidate_commit.clone();
         Self {
             backend,
-            gate,
             expected_service_name: expected_service_name.into(),
             expected_image_token: expected_image_token.into(),
             expected_execution_identity_token: expected_execution_identity_token.into(),
+            expected_target_host_token,
+            expected_candidate_commit,
+            gate,
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn TrustedClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub fn with_host_and_commit(
+        mut self,
+        target_host_token: impl Into<String>,
+        candidate_commit: impl Into<String>,
+    ) -> Self {
+        self.expected_target_host_token = target_host_token.into();
+        self.expected_candidate_commit = candidate_commit.into();
+        self
     }
 
     pub fn capture_prestate(
@@ -1473,6 +1732,11 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
     ) -> Result<ServicePrestateCapture, ScmApiError> {
         let snap = self.query_bound_snapshot()?;
         let observed = &snap.observation;
+        let transaction_id = if !self.gate.bound_transaction_id.is_empty() {
+            self.gate.bound_transaction_id.clone()
+        } else {
+            new_transaction_id()
+        };
         Ok(ServicePrestateCapture {
             service_name: observed.service_name.clone(),
             state: observed.state,
@@ -1483,7 +1747,7 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
             admission_selector_absent,
             image_token: snap.image_token,
             execution_identity_token: snap.execution_identity_token,
-            transaction_id: new_transaction_id(),
+            transaction_id,
         })
     }
 
@@ -1629,18 +1893,23 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
     }
 
     fn execute_stop(&self, restore: Option<ServiceRestorePlan>) -> ScmTransactionReceipt {
-        if !self.gate.authorizes(
-            &self.expected_service_name,
-            &self.expected_image_token,
-            false,
-            true,
-            false,
-        ) {
-            return refused_receipt(
-                &self.expected_service_name,
-                ScmApiError::GateClosed,
-                restore,
-            );
+        let tx_id = restore
+            .as_ref()
+            .map(|r| r.transaction_id.as_str())
+            .unwrap_or(self.gate.bound_transaction_id());
+        let ctx = ScmExecutionContext {
+            service_name: &self.expected_service_name,
+            image_token: &self.expected_image_token,
+            execution_identity_token: &self.expected_execution_identity_token,
+            target_host_token: &self.expected_target_host_token,
+            candidate_commit: &self.expected_candidate_commit,
+            transaction_id: tx_id,
+            need_start: false,
+            need_stop: true,
+            need_config: false,
+        };
+        if let Err(err) = self.gate.authorizes_context(&ctx, self.clock.as_ref()) {
+            return refused_receipt(&self.expected_service_name, err, restore);
         }
         match self.backend.stop(&self.expected_service_name) {
             Ok(()) => match self.observe_verified() {
@@ -1668,18 +1937,23 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
     }
 
     fn execute_start(&self, restore: Option<ServiceRestorePlan>) -> ScmTransactionReceipt {
-        if !self.gate.authorizes(
-            &self.expected_service_name,
-            &self.expected_image_token,
-            true,
-            false,
-            false,
-        ) {
-            return refused_receipt(
-                &self.expected_service_name,
-                ScmApiError::GateClosed,
-                restore,
-            );
+        let tx_id = restore
+            .as_ref()
+            .map(|r| r.transaction_id.as_str())
+            .unwrap_or(self.gate.bound_transaction_id());
+        let ctx = ScmExecutionContext {
+            service_name: &self.expected_service_name,
+            image_token: &self.expected_image_token,
+            execution_identity_token: &self.expected_execution_identity_token,
+            target_host_token: &self.expected_target_host_token,
+            candidate_commit: &self.expected_candidate_commit,
+            transaction_id: tx_id,
+            need_start: true,
+            need_stop: false,
+            need_config: false,
+        };
+        if let Err(err) = self.gate.authorizes_context(&ctx, self.clock.as_ref()) {
+            return refused_receipt(&self.expected_service_name, err, restore);
         }
         match self.backend.start(&self.expected_service_name) {
             Ok(()) => match self.observe_verified() {
@@ -1727,24 +2001,29 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
                 restore_pass: false,
             };
         }
-        if plan.requires_owner_gate
-            && !self.gate.authorizes(
-                &plan.service_name,
-                &plan.image_token,
-                plan.restore_running,
-                !plan.restore_running,
-                true,
-            )
-        {
-            return ScmTransactionReceipt {
-                service_name: plan.service_name.clone(),
-                stage: ScmTransactionStage::RestoreFailed,
-                api_accepted: false,
-                achieved: AchievedServiceControl::Refused,
-                reason: Some(ScmApiError::GateClosed.as_str().to_owned()),
-                restore,
-                restore_pass: false,
+        if plan.requires_owner_gate {
+            let ctx = ScmExecutionContext {
+                service_name: &plan.service_name,
+                image_token: &plan.image_token,
+                execution_identity_token: &plan.execution_identity_token,
+                target_host_token: &self.expected_target_host_token,
+                candidate_commit: &self.expected_candidate_commit,
+                transaction_id: &plan.transaction_id,
+                need_start: plan.restore_running,
+                need_stop: !plan.restore_running,
+                need_config: true,
             };
+            if let Err(err) = self.gate.authorizes_context(&ctx, self.clock.as_ref()) {
+                return ScmTransactionReceipt {
+                    service_name: plan.service_name.clone(),
+                    stage: ScmTransactionStage::RestoreFailed,
+                    api_accepted: false,
+                    achieved: AchievedServiceControl::Refused,
+                    reason: Some(err.as_str().to_owned()),
+                    restore,
+                    restore_pass: false,
+                };
+            }
         }
 
         if let Err(error) = self
@@ -2349,6 +2628,10 @@ pub struct PrivilegedScmRequest {
     pub service_name: String,
     pub expected_image_token: String,
     pub expected_execution_identity_token: String,
+    #[serde(default)]
+    pub target_host_token: String,
+    #[serde(default)]
+    pub candidate_commit: String,
     pub transaction_id: String,
 }
 
@@ -2371,11 +2654,37 @@ pub struct PrivilegedScmReport {
 pub struct PrivilegedScmHelper<B> {
     backend: B,
     gate: LiveScmExecutionGate,
+    clock: Arc<dyn TrustedClock>,
+    target_host_token: String,
+    candidate_commit: String,
 }
 
 impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
     pub fn new(backend: B, gate: LiveScmExecutionGate) -> Self {
-        Self { backend, gate }
+        let target_host_token = gate.bound_target_host_token.clone();
+        let candidate_commit = gate.bound_candidate_commit.clone();
+        Self {
+            backend,
+            target_host_token,
+            candidate_commit,
+            gate,
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn TrustedClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub fn with_host_and_commit(
+        mut self,
+        target_host_token: impl Into<String>,
+        candidate_commit: impl Into<String>,
+    ) -> Self {
+        self.target_host_token = target_host_token.into();
+        self.candidate_commit = candidate_commit.into();
+        self
     }
 
     pub fn dispatch(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport {
@@ -2406,26 +2715,41 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             };
         }
 
-        // 1. Verify gate permission for the specific action
+        // 1. Verify gate permission and complete context for the specific action
         let (need_start, need_stop, need_config) = match request.action {
             PrivilegedScmAction::StartService => (true, false, false),
             PrivilegedScmAction::StopService => (false, true, false),
             PrivilegedScmAction::ChangeStartMode { .. } => (false, false, true),
         };
-        if !self.gate.authorizes(
-            name,
-            &request.expected_image_token,
+        let host_token = if !request.target_host_token.is_empty() {
+            &request.target_host_token
+        } else {
+            &self.target_host_token
+        };
+        let commit = if !request.candidate_commit.is_empty() {
+            &request.candidate_commit
+        } else {
+            &self.candidate_commit
+        };
+        let context = ScmExecutionContext {
+            service_name: name,
+            image_token: &request.expected_image_token,
+            execution_identity_token: &request.expected_execution_identity_token,
+            target_host_token: host_token,
+            candidate_commit: commit,
+            transaction_id: &request.transaction_id,
             need_start,
             need_stop,
             need_config,
-        ) {
+        };
+        if let Err(err) = self.gate.authorizes_context(&context, self.clock.as_ref()) {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
                 transaction_id: request.transaction_id.clone(),
                 applied: false,
                 achieved_state: DiscoveredLifecycle::Unknown,
                 achieved_start_mode: ServiceStartMode::Disabled,
-                refusal_reason: Some(ScmApiError::GateClosed.as_str().to_owned()),
+                refusal_reason: Some(err.as_str().to_owned()),
             };
         }
 
@@ -3486,15 +3810,18 @@ mod tests {
         };
         let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, clock.clone());
         let (request, _voucher) = issuer.issue_for_scope(&scope, 1_000, "mock-exact-nonce");
-        let verifier =
-            TokenValidatingOwnerVerifier::with_authority_and_clock(authority_secret, scope, clock);
+        let verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            scope,
+            clock.clone(),
+        );
         let gate =
             LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &request).unwrap();
         assert!(gate.is_trusted_live());
 
         let mock = MockScmBackend::new();
         mock.insert(fixture_listening());
-        let exec = executor(mock.clone(), gate);
+        let exec = executor(mock.clone(), gate).with_clock(clock);
         let prestate = exec.capture_prestate(false, true).unwrap();
         let receipt = exec.advance(
             DesiredServiceLifecycle::DrainThenStop,
@@ -3968,6 +4295,8 @@ mod tests {
             service_name: "fixture.runner.*".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-1".to_owned(),
         });
         assert!(!report_wildcard.applied);
@@ -3982,6 +4311,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "".to_owned(),
         });
         assert!(!report_empty_tx.applied);
@@ -3996,6 +4327,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "wrong-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-2".to_owned(),
         });
         assert!(!report_foreign.applied);
@@ -4013,6 +4346,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-3".to_owned(),
         });
         assert!(!report_denied_stop.applied);
@@ -4028,6 +4363,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-4".to_owned(),
         });
         assert!(!report_busy.applied);
@@ -4043,6 +4380,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-5".to_owned(),
         });
         assert!(report_start.applied);
@@ -4057,6 +4396,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-6".to_owned(),
         });
         assert!(report_mode.applied);
@@ -4086,6 +4427,8 @@ mod tests {
             service_name: "fixture.runner.svc".to_owned(),
             expected_image_token: "hux2-image".to_owned(),
             expected_execution_identity_token: "hux2-identity".to_owned(),
+            target_host_token: String::new(),
+            candidate_commit: String::new(),
             transaction_id: "tx-timeout".to_owned(),
         });
         assert!(report.applied);
@@ -4196,5 +4539,731 @@ mod tests {
         assert_eq!(receipt_success.stage, ScmTransactionStage::Completed);
         assert!(receipt_success.restore_pass);
         assert_eq!(journal.stage, ScmTransactionStage::Completed);
+    }
+
+    fn parse_hex_test(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn hmac_sha256_rfc4231_standard_known_answer_tests() {
+        // Test Case 1: Key = [0x0b; 20], Data = "Hi There"
+        let key1 = [0x0b; 20];
+        let data1 = b"Hi There";
+        let expected1 =
+            parse_hex_test("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        let mut mac1 = HmacSha256::new_from_slice(&key1).unwrap();
+        mac1.update(data1);
+        let digest1 = mac1.finalize().into_bytes();
+        assert_eq!(digest1.as_slice(), expected1.as_slice());
+        // Constant-time verify_slice
+        let mut v1 = HmacSha256::new_from_slice(&key1).unwrap();
+        v1.update(data1);
+        assert!(v1.verify_slice(&expected1).is_ok());
+        // Altered byte fails
+        let mut bad_digest1 = expected1.clone();
+        bad_digest1[0] ^= 0x01;
+        let mut v1_bad = HmacSha256::new_from_slice(&key1).unwrap();
+        v1_bad.update(data1);
+        assert!(v1_bad.verify_slice(&bad_digest1).is_err());
+
+        // Test Case 2: Key = "Jefe", Data = "what do ya want for nothing?"
+        let key2 = b"Jefe";
+        let data2 = b"what do ya want for nothing?";
+        let expected2 =
+            parse_hex_test("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        let mut mac2 = HmacSha256::new_from_slice(key2).unwrap();
+        mac2.update(data2);
+        assert_eq!(
+            mac2.finalize().into_bytes().as_slice(),
+            expected2.as_slice()
+        );
+
+        // Test Case 3: Key = [0xaa; 20], Data = [0xdd; 50]
+        let key3 = [0xaa; 20];
+        let data3 = [0xdd; 50];
+        let expected3 =
+            parse_hex_test("773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe");
+        let mut mac3 = HmacSha256::new_from_slice(&key3).unwrap();
+        mac3.update(&data3);
+        assert_eq!(
+            mac3.finalize().into_bytes().as_slice(),
+            expected3.as_slice()
+        );
+
+        // Test Case 4: Key = 25 bytes (0x01..=0x19), Data = [0xcd; 50]
+        let mut key4 = [0u8; 25];
+        for (i, item) in key4.iter_mut().enumerate() {
+            *item = (i + 1) as u8;
+        }
+        let data4 = [0xcd; 50];
+        let expected4 =
+            parse_hex_test("82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b");
+        let mut mac4 = HmacSha256::new_from_slice(&key4).unwrap();
+        mac4.update(&data4);
+        assert_eq!(
+            mac4.finalize().into_bytes().as_slice(),
+            expected4.as_slice()
+        );
+
+        // Test Case 6: Key = [0xaa; 131], Data = "Test Using Larger Than Block-Size Key - Hash Key First"
+        let key6 = [0xaa; 131];
+        let data6 = b"Test Using Larger Than Block-Size Key - Hash Key First";
+        let expected6 =
+            parse_hex_test("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+        let mut mac6 = HmacSha256::new_from_slice(&key6).unwrap();
+        mac6.update(data6);
+        assert_eq!(
+            mac6.finalize().into_bytes().as_slice(),
+            expected6.as_slice()
+        );
+    }
+
+    #[test]
+    fn hmac_voucher_known_answer_and_field_tampering_rejection() {
+        let authority_secret = b"owner-root-secret-for-rfc-and-tampering-test";
+        let clock = Arc::new(MockClock::new(10_000));
+        let scope = OwnerAuthorizationScope {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity-token".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            transaction_id: "tx-golden-001".to_owned(),
+        };
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, clock.clone());
+        let (valid_req, voucher) = issuer.issue_for_scope(&scope, 1000, "nonce-golden-001");
+        assert_eq!(voucher.len(), 32);
+
+        // Verify constant-time comparison helper
+        assert!(issuer.verify_voucher_constant_time(&valid_req.owner_material, &voucher));
+        let mut bad_voucher = voucher.clone();
+        bad_voucher[0] ^= 0x01;
+        assert!(!issuer.verify_voucher_constant_time(&bad_voucher, &voucher));
+
+        let verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            scope.clone(),
+            clock.clone(),
+        );
+
+        // 1. Untampered request with valid voucher MUST verify and mint TrustedLive
+        let gate = verifier.verify(&valid_req).unwrap();
+        assert!(gate.is_trusted_live());
+        assert_eq!(gate.bound_service_name(), "fixture.scm.a");
+        assert_eq!(gate.bound_image_token(), "fixture-image");
+        assert_eq!(
+            gate.bound_execution_identity_token(),
+            "fixture-identity-token"
+        );
+        assert_eq!(gate.bound_target_host_token(), "fixture-host-token");
+        assert_eq!(
+            gate.bound_candidate_commit(),
+            "028c7efba9ebd3d3925371b356a187eba428041d"
+        );
+        assert_eq!(gate.bound_transaction_id(), "tx-golden-001");
+        assert_eq!(gate.not_before_epoch_seconds(), 10_000);
+        assert_eq!(gate.expires_at_epoch_seconds(), 11_000);
+
+        // Tampering tests - each variation MUST be rejected
+        let make_verifier = || {
+            TokenValidatingOwnerVerifier::with_authority_and_clock(
+                authority_secret,
+                scope.clone(),
+                clock.clone(),
+            )
+        };
+
+        // 2. Tampered service_name
+        let mut tampered = valid_req.clone();
+        tampered.service_name = "fixture.scm.b".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 3. Tampered image_token
+        let mut tampered = valid_req.clone();
+        tampered.image_token = "tampered-image".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 4. Tampered execution_identity_token
+        let mut tampered = valid_req.clone();
+        tampered.execution_identity_token = "tampered-identity".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 5. Tampered target_host_token
+        let mut tampered = valid_req.clone();
+        tampered.target_host_token = "tampered-host".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 6. Tampered candidate_commit
+        let mut tampered = valid_req.clone();
+        tampered.candidate_commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 7. Tampered allow_start
+        let mut tampered = valid_req.clone();
+        tampered.allow_start = false;
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 8. Tampered allow_stop
+        let mut tampered = valid_req.clone();
+        tampered.allow_stop = false;
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 9. Tampered allow_change_config
+        let mut tampered = valid_req.clone();
+        tampered.allow_change_config = false;
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 10. Tampered transaction_id
+        let mut tampered = valid_req.clone();
+        tampered.transaction_id = "tx-tampered-999".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 11. Tampered not_before
+        let mut tampered = valid_req.clone();
+        tampered.not_before_epoch_seconds = 9_999;
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 12. Tampered expires_at
+        let mut tampered = valid_req.clone();
+        tampered.expires_at_epoch_seconds = 12_000;
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 13. Tampered nonce
+        let mut tampered = valid_req.clone();
+        tampered.nonce = "nonce-tampered-xxx".to_owned();
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 14. Tampered owner_material (1 bit flip)
+        let mut tampered = valid_req.clone();
+        tampered.owner_material[15] ^= 0x01;
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 15. Truncated owner_material
+        let mut tampered = valid_req.clone();
+        tampered.owner_material.truncate(16);
+        assert!(make_verifier().verify(&tampered).is_err());
+
+        // 16. Different authority secret
+        let wrong_secret_verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            b"completely-wrong-authority-secret-xyz",
+            scope,
+            clock,
+        );
+        assert!(wrong_secret_verifier.verify(&valid_req).is_err());
+    }
+
+    #[test]
+    fn dispatch_post_mint_expiry_refuses_with_zero_backend_writes() {
+        let authority_secret = b"owner-root-secret-for-expiry-test";
+        let mock_clock = Arc::new(MockClock::new(1000));
+        let scope = OwnerAuthorizationScope {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            transaction_id: "tx-post-mint-expiry".to_owned(),
+        };
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, mock_clock.clone());
+        let (request, _) = issuer.issue_for_scope(&scope, 500, "nonce-expiry-test");
+        let verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            scope,
+            mock_clock.clone(),
+        );
+        // Mint valid TrustedLive gate at t = 1000, expires at t = 1500
+        let gate = verifier.verify(&request).unwrap();
+        assert!(gate.is_trusted_live());
+
+        // Advance clock past expiration to t = 1501
+        mock_clock.set_time(1501);
+
+        let mock_backend = MockScmBackend::new();
+        mock_backend.insert(test_fixture_record(
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+
+        // 1. ScmControlExecutor::execute_stop refused, 0 backend calls
+        let exec = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            gate.clone(),
+        )
+        .with_clock(mock_clock.clone());
+
+        let prestate = ServicePrestateCapture {
+            service_name: "fixture.scm.a".to_owned(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+            worker_busy: false,
+            admission_selector_absent: true,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            transaction_id: "tx-post-mint-expiry".to_owned(),
+        };
+        let restore_plan = capture_restore_plan(&prestate);
+
+        let receipt_stop = exec.execute_stop(Some(restore_plan.clone()));
+        assert_eq!(receipt_stop.stage, ScmTransactionStage::Refused);
+        assert_eq!(receipt_stop.reason.as_deref(), Some("scm.access-denied"));
+        assert_eq!(mock_backend.stop_calls(), 0);
+
+        // 2. ScmControlExecutor::execute_start refused, 0 backend calls
+        let receipt_start = exec.execute_start(Some(restore_plan.clone()));
+        assert_eq!(receipt_start.stage, ScmTransactionStage::Refused);
+        assert_eq!(receipt_start.reason.as_deref(), Some("scm.access-denied"));
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        // 3. ScmControlExecutor::restore refused, 0 backend calls
+        let mut fake_admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+        let receipt_restore = exec.restore(&restore_plan, &mut fake_admission);
+        assert_eq!(receipt_restore.stage, ScmTransactionStage::RestoreFailed);
+        assert!(!receipt_restore.restore_pass);
+        assert_eq!(receipt_restore.reason.as_deref(), Some("scm.access-denied"));
+        assert_eq!(mock_backend.change_calls(), 0);
+        assert_eq!(mock_backend.start_calls(), 0);
+        assert_eq!(mock_backend.stop_calls(), 0);
+
+        // 4. PrivilegedScmHelper::dispatch refused for start, stop, and config; 0 backend calls
+        let helper = PrivilegedScmHelper::new(mock_backend.clone(), gate).with_clock(mock_clock);
+
+        let req_start = PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.scm.a".to_owned(),
+            expected_image_token: "fixture-image".to_owned(),
+            expected_execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            transaction_id: "tx-post-mint-expiry".to_owned(),
+        };
+        let rep_start = helper.dispatch(&req_start);
+        assert!(!rep_start.applied);
+        assert_eq!(
+            rep_start.refusal_reason.as_deref(),
+            Some("scm.access-denied")
+        );
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        let req_stop = PrivilegedScmRequest {
+            action: PrivilegedScmAction::StopService,
+            ..req_start.clone()
+        };
+        let rep_stop = helper.dispatch(&req_stop);
+        assert!(!rep_stop.applied);
+        assert_eq!(
+            rep_stop.refusal_reason.as_deref(),
+            Some("scm.access-denied")
+        );
+        assert_eq!(mock_backend.stop_calls(), 0);
+
+        let req_config = PrivilegedScmRequest {
+            action: PrivilegedScmAction::ChangeStartMode {
+                mode: ServiceStartMode::Disabled,
+            },
+            ..req_start
+        };
+        let rep_config = helper.dispatch(&req_config);
+        assert!(!rep_config.applied);
+        assert_eq!(
+            rep_config.refusal_reason.as_deref(),
+            Some("scm.access-denied")
+        );
+        assert_eq!(mock_backend.change_calls(), 0);
+
+        // Total write calls MUST be strictly ZERO
+        assert_eq!(mock_backend.stop_calls(), 0);
+        assert_eq!(mock_backend.start_calls(), 0);
+        assert_eq!(mock_backend.change_calls(), 0);
+    }
+
+    #[test]
+    fn dispatch_context_drift_refuses_with_zero_backend_writes() {
+        let authority_secret = b"owner-root-secret-context-drift-test";
+        let mock_clock = Arc::new(MockClock::new(1000));
+        let scope = OwnerAuthorizationScope {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            transaction_id: "tx-drift-001".to_owned(),
+        };
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, mock_clock.clone());
+        let (request, _) = issuer.issue_for_scope(&scope, 10_000, "nonce-drift-test");
+        let verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            scope,
+            mock_clock.clone(),
+        );
+        let gate = verifier.verify(&request).unwrap();
+        assert!(gate.is_trusted_live());
+
+        let mock_backend = MockScmBackend::new();
+        mock_backend.insert(test_fixture_record(
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+
+        // 1. Host drift in helper
+        let helper_drift_host = PrivilegedScmHelper::new(mock_backend.clone(), gate.clone())
+            .with_clock(mock_clock.clone());
+        let req_drift_host = PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.scm.a".to_owned(),
+            expected_image_token: "fixture-image".to_owned(),
+            expected_execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "wrong-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            transaction_id: "tx-drift-001".to_owned(),
+        };
+        let rep_host = helper_drift_host.dispatch(&req_drift_host);
+        assert!(!rep_host.applied);
+        assert_eq!(
+            rep_host.refusal_reason.as_deref(),
+            Some("scm.identity-mismatch")
+        );
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        // 2. Candidate commit drift in helper
+        let req_drift_commit = PrivilegedScmRequest {
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
+            ..req_drift_host.clone()
+        };
+        let rep_commit = helper_drift_host.dispatch(&req_drift_commit);
+        assert!(!rep_commit.applied);
+        assert_eq!(
+            rep_commit.refusal_reason.as_deref(),
+            Some("scm.identity-mismatch")
+        );
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        // 3. Transaction ID drift in helper
+        let req_drift_tx = PrivilegedScmRequest {
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            transaction_id: "tx-drift-wrong".to_owned(),
+            ..req_drift_host.clone()
+        };
+        let rep_tx = helper_drift_host.dispatch(&req_drift_tx);
+        assert!(!rep_tx.applied);
+        assert_eq!(
+            rep_tx.refusal_reason.as_deref(),
+            Some("scm.identity-mismatch")
+        );
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        // 4. Execution identity drift in executor
+        let exec_drift_id = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "wrong-identity",
+            gate.clone(),
+        )
+        .with_clock(mock_clock.clone());
+
+        let prestate = ServicePrestateCapture {
+            service_name: "fixture.scm.a".to_owned(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+            worker_busy: false,
+            admission_selector_absent: true,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "wrong-identity".to_owned(),
+            transaction_id: "tx-drift-001".to_owned(),
+        };
+        let restore_plan = capture_restore_plan(&prestate);
+        let receipt_stop = exec_drift_id.execute_stop(Some(restore_plan));
+        assert_eq!(receipt_stop.stage, ScmTransactionStage::Refused);
+        assert_eq!(
+            receipt_stop.reason.as_deref(),
+            Some("scm.identity-mismatch")
+        );
+        assert_eq!(mock_backend.stop_calls(), 0);
+
+        // Zero write calls on all drift paths
+        assert_eq!(mock_backend.stop_calls(), 0);
+        assert_eq!(mock_backend.start_calls(), 0);
+        assert_eq!(mock_backend.change_calls(), 0);
+    }
+
+    #[test]
+    fn dispatch_privilege_escalation_refuses_with_zero_backend_writes() {
+        let authority_secret = b"owner-root-secret-priv-esc-test";
+        let mock_clock = Arc::new(MockClock::new(1000));
+        let mock_backend = MockScmBackend::new();
+        mock_backend.insert(test_fixture_record(
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            DiscoveredLifecycle::Listening,
+            ServiceStartMode::Manual,
+            false,
+        ));
+
+        // Part 1: Start-only gate refuses StopService & ChangeStartMode
+        let start_only_scope = OwnerAuthorizationScope {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            allow_start: true,
+            allow_stop: false,
+            allow_change_config: false,
+            transaction_id: "tx-start-only".to_owned(),
+        };
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, mock_clock.clone());
+        let (req_start_only, _) =
+            issuer.issue_for_scope(&start_only_scope, 5000, "nonce-start-only");
+        let verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            start_only_scope,
+            mock_clock.clone(),
+        );
+        let start_only_gate = verifier.verify(&req_start_only).unwrap();
+
+        let helper_start_only =
+            PrivilegedScmHelper::new(mock_backend.clone(), start_only_gate.clone())
+                .with_clock(mock_clock.clone());
+        let req_escalate_stop = PrivilegedScmRequest {
+            action: PrivilegedScmAction::StopService,
+            service_name: "fixture.scm.a".to_owned(),
+            expected_image_token: "fixture-image".to_owned(),
+            expected_execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            transaction_id: "tx-start-only".to_owned(),
+        };
+        let rep_esc_stop = helper_start_only.dispatch(&req_escalate_stop);
+        assert!(!rep_esc_stop.applied);
+        assert_eq!(
+            rep_esc_stop.refusal_reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(mock_backend.stop_calls(), 0);
+
+        let req_escalate_config = PrivilegedScmRequest {
+            action: PrivilegedScmAction::ChangeStartMode {
+                mode: ServiceStartMode::Disabled,
+            },
+            ..req_escalate_stop
+        };
+        let rep_esc_cfg = helper_start_only.dispatch(&req_escalate_config);
+        assert!(!rep_esc_cfg.applied);
+        assert_eq!(
+            rep_esc_cfg.refusal_reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(mock_backend.change_calls(), 0);
+
+        let exec_start_only = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            start_only_gate,
+        )
+        .with_clock(mock_clock.clone());
+
+        let prestate = ServicePrestateCapture {
+            service_name: "fixture.scm.a".to_owned(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+            worker_busy: false,
+            admission_selector_absent: true,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            transaction_id: "tx-start-only".to_owned(),
+        };
+        let restore_plan = capture_restore_plan(&prestate);
+        let receipt_stop = exec_start_only.execute_stop(Some(restore_plan));
+        assert_eq!(receipt_stop.stage, ScmTransactionStage::Refused);
+        assert_eq!(receipt_stop.reason.as_deref(), Some("scm.live-gate-closed"));
+        assert_eq!(mock_backend.stop_calls(), 0);
+
+        // Part 2: Stop-only gate refuses execute_start & helper StartService
+        let stop_only_scope = OwnerAuthorizationScope {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            allow_start: false,
+            allow_stop: true,
+            allow_change_config: false,
+            transaction_id: "tx-stop-only".to_owned(),
+        };
+        let (req_stop_only, _) = issuer.issue_for_scope(&stop_only_scope, 5000, "nonce-stop-only");
+        let verifier_stop = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            stop_only_scope,
+            mock_clock.clone(),
+        );
+        let stop_only_gate = verifier_stop.verify(&req_stop_only).unwrap();
+
+        let helper_stop_only =
+            PrivilegedScmHelper::new(mock_backend.clone(), stop_only_gate.clone())
+                .with_clock(mock_clock.clone());
+        let req_escalate_start = PrivilegedScmRequest {
+            action: PrivilegedScmAction::StartService,
+            service_name: "fixture.scm.a".to_owned(),
+            expected_image_token: "fixture-image".to_owned(),
+            expected_execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            transaction_id: "tx-stop-only".to_owned(),
+        };
+        let rep_esc_start = helper_stop_only.dispatch(&req_escalate_start);
+        assert!(!rep_esc_start.applied);
+        assert_eq!(
+            rep_esc_start.refusal_reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        let exec_stop_only = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            stop_only_gate,
+        )
+        .with_clock(mock_clock);
+        let receipt_start = exec_stop_only.execute_start(None);
+        assert_eq!(receipt_start.stage, ScmTransactionStage::Refused);
+        assert_eq!(
+            receipt_start.reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        // Zero backend write calls across all privilege escalation attempts
+        assert_eq!(mock_backend.stop_calls(), 0);
+        assert_eq!(mock_backend.start_calls(), 0);
+        assert_eq!(mock_backend.change_calls(), 0);
+    }
+
+    #[test]
+    fn restore_path_authorization_rules_explicit() {
+        let mock_backend = MockScmBackend::new();
+        mock_backend.insert(test_fixture_record(
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            DiscoveredLifecycle::Stopped,
+            ServiceStartMode::Manual,
+            false,
+        ));
+
+        let prestate = ServicePrestateCapture {
+            service_name: "fixture.scm.a".to_owned(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Automatic,
+            image_path_matches: true,
+            ownership_verified: true,
+            worker_busy: false,
+            admission_selector_absent: true,
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            transaction_id: "tx-restore-rules".to_owned(),
+        };
+        let mut restore_plan = capture_restore_plan(&prestate);
+        let mut fake_admission = FakeGithubAdmissionBackend::new_with_selector_present(false);
+
+        // Rule 1: plan.requires_owner_gate == true with closed gate -> fails closed, 0 writes
+        restore_plan.requires_owner_gate = true;
+        let exec_closed = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            LiveScmExecutionGate::CLOSED,
+        );
+        let receipt_closed = exec_closed.restore(&restore_plan, &mut fake_admission);
+        assert_eq!(receipt_closed.stage, ScmTransactionStage::RestoreFailed);
+        assert!(!receipt_closed.restore_pass);
+        assert_eq!(
+            receipt_closed.reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(mock_backend.change_calls(), 0);
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        // Rule 2: plan.requires_owner_gate == false -> succeeds without gate requirement
+        restore_plan.requires_owner_gate = false;
+        let receipt_no_gate = exec_closed.restore(&restore_plan, &mut fake_admission);
+        assert_eq!(receipt_no_gate.stage, ScmTransactionStage::Completed);
+        assert!(receipt_no_gate.restore_pass);
+        assert_eq!(mock_backend.change_calls(), 1);
+        assert_eq!(mock_backend.start_calls(), 1);
+
+        // Rule 3: plan.requires_owner_gate == true with fully valid unexpired TrustedLive gate -> succeeds
+        restore_plan.requires_owner_gate = true;
+        let authority_secret = b"owner-root-secret-restore-test";
+        let mock_clock = Arc::new(MockClock::new(1000));
+        let scope = OwnerAuthorizationScope {
+            service_name: "fixture.scm.a".to_owned(),
+            image_token: "fixture-image".to_owned(),
+            execution_identity_token: "fixture-identity".to_owned(),
+            target_host_token: "fixture-host-token".to_owned(),
+            candidate_commit: "028c7efba9ebd3d3925371b356a187eba428041d".to_owned(),
+            allow_start: true,
+            allow_stop: true,
+            allow_change_config: true,
+            transaction_id: "tx-restore-rules".to_owned(),
+        };
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, mock_clock.clone());
+        let (req, _) = issuer.issue_for_scope(&scope, 10_000, "nonce-restore-valid");
+        let verifier = TokenValidatingOwnerVerifier::with_authority_and_clock(
+            authority_secret,
+            scope,
+            mock_clock.clone(),
+        );
+        let live_gate = verifier.verify(&req).unwrap();
+
+        let exec_live = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            live_gate,
+        )
+        .with_clock(mock_clock);
+
+        let receipt_live = exec_live.restore(&restore_plan, &mut fake_admission);
+        assert_eq!(receipt_live.stage, ScmTransactionStage::Completed);
+        assert!(receipt_live.restore_pass);
     }
 }
