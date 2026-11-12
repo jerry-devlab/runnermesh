@@ -107,10 +107,11 @@ fn parse_runners_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
     let json = arguments.iter().any(|argument| argument == "--json");
     let prepare_only = arguments.iter().any(|argument| argument == "--prepare");
     let when_idle = arguments.iter().any(|argument| argument == "--when-idle");
+    let all = arguments.iter().any(|argument| argument == "--all");
     let positional: Vec<&str> = arguments
         .iter()
         .map(String::as_str)
-        .filter(|argument| !matches!(*argument, "--json" | "--prepare" | "--when-idle"))
+        .filter(|argument| !matches!(*argument, "--json" | "--prepare" | "--when-idle" | "--all"))
         .collect();
     let command = match positional.as_slice() {
         ["runners", "list"] => AgentCommand::RunnersList,
@@ -124,6 +125,14 @@ fn parse_runners_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
         },
         ["runners", "enable", key] => AgentCommand::RunnersEnable {
             local_runner_key: (*key).to_owned(),
+            prepare_only,
+        },
+        ["runners", "disable-all"] => AgentCommand::RunnersDisableAll {
+            when_idle,
+            prepare_only,
+        },
+        ["runners", "disable"] if all => AgentCommand::RunnersDisableAll {
+            when_idle,
             prepare_only,
         },
         ["runners", "disable", key] => AgentCommand::RunnersDisable {

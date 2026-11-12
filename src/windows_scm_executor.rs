@@ -315,11 +315,19 @@ impl SharedAuthorizationLedger {
 /// In production, Owner vouchers are issued solely by an authorized control
 /// plane possessing the Owner root authority secret. Callers cannot self-select
 /// tokens or manufacture valid vouchers without this authority.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct OwnerAuthorizationIssuer {
     authority_secret: Vec<u8>,
     #[allow(dead_code)]
     clock: Arc<dyn TrustedClock>,
+}
+
+impl std::fmt::Debug for OwnerAuthorizationIssuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerAuthorizationIssuer")
+            .field("authority_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 #[allow(dead_code)]
@@ -923,6 +931,10 @@ impl LiveScmExecutionGate {
     pub fn allows_mutation(&self) -> bool {
         !matches!(self.grant_kind, ScmGrantKind::Closed)
             && (self.allow_start || self.allow_stop || self.allow_change_config)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self.grant_kind, ScmGrantKind::Closed)
     }
 
     pub fn is_synthetic_test_only(&self) -> bool {
@@ -1715,6 +1727,10 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
         self
     }
 
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
     pub fn with_host_and_commit(
         mut self,
         target_host_token: impl Into<String>,
@@ -2001,18 +2017,45 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
                 restore_pass: false,
             };
         }
-        if plan.requires_owner_gate {
-            let ctx = ScmExecutionContext {
-                service_name: &plan.service_name,
-                image_token: &plan.image_token,
-                execution_identity_token: &plan.execution_identity_token,
-                target_host_token: &self.expected_target_host_token,
-                candidate_commit: &self.expected_candidate_commit,
-                transaction_id: &plan.transaction_id,
-                need_start: plan.restore_running,
-                need_stop: !plan.restore_running,
-                need_config: true,
+        if self.gate.is_closed() {
+            return ScmTransactionReceipt {
+                service_name: plan.service_name.clone(),
+                stage: ScmTransactionStage::RestoreFailed,
+                api_accepted: false,
+                achieved: AchievedServiceControl::Refused,
+                reason: Some(ScmApiError::GateClosed.as_str().to_owned()),
+                restore,
+                restore_pass: false,
             };
+        }
+
+        let ctx = ScmExecutionContext {
+            service_name: &plan.service_name,
+            image_token: &plan.image_token,
+            execution_identity_token: &plan.execution_identity_token,
+            target_host_token: &self.expected_target_host_token,
+            candidate_commit: &self.expected_candidate_commit,
+            transaction_id: &plan.transaction_id,
+            need_start: plan.restore_running,
+            need_stop: !plan.restore_running,
+            need_config: true,
+        };
+
+        if self.gate.is_trusted_live() || plan.requires_owner_gate {
+            if let Err(err) = self.gate.authorizes_context(&ctx, self.clock.as_ref()) {
+                return ScmTransactionReceipt {
+                    service_name: plan.service_name.clone(),
+                    stage: ScmTransactionStage::RestoreFailed,
+                    api_accepted: false,
+                    achieved: AchievedServiceControl::Refused,
+                    reason: Some(err.as_str().to_owned()),
+                    restore,
+                    restore_pass: false,
+                };
+            }
+        }
+
+        if self.gate.is_trusted_live() || plan.requires_owner_gate {
             if let Err(err) = self.gate.authorizes_context(&ctx, self.clock.as_ref()) {
                 return ScmTransactionReceipt {
                     service_name: plan.service_name.clone(),
@@ -2065,6 +2108,20 @@ impl<B: ScmControlBackend> ScmControlExecutor<B> {
                 restore,
                 restore_pass: false,
             };
+        }
+
+        if self.gate.is_trusted_live() || plan.requires_owner_gate {
+            if let Err(err) = self.gate.authorizes_context(&ctx, self.clock.as_ref()) {
+                return ScmTransactionReceipt {
+                    service_name: plan.service_name.clone(),
+                    stage: ScmTransactionStage::RestoreFailed,
+                    api_accepted: false,
+                    achieved: AchievedServiceControl::Refused,
+                    reason: Some(err.as_str().to_owned()),
+                    restore,
+                    restore_pass: false,
+                };
+            }
         }
 
         let run_result = if plan.restore_running {
@@ -2178,7 +2235,9 @@ fn new_transaction_id() -> String {
 
 /// Opaque fingerprint helper for image paths (never store raw private paths).
 pub fn opaque_image_token(image_path: &str) -> String {
-    let digest = Sha256::digest(image_path.trim().to_ascii_lowercase().as_bytes());
+    let clean = crate::windows_runner_discovery::service_image_path_token(image_path)
+        .unwrap_or_else(|| image_path.trim_matches('"'));
+    let digest = Sha256::digest(clean.trim().to_ascii_lowercase().as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -2677,6 +2736,10 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
         self
     }
 
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
     pub fn with_host_and_commit(
         mut self,
         target_host_token: impl Into<String>,
@@ -2721,22 +2784,35 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             PrivilegedScmAction::StopService => (false, true, false),
             PrivilegedScmAction::ChangeStartMode { .. } => (false, false, true),
         };
-        let host_token = if !request.target_host_token.is_empty() {
-            &request.target_host_token
-        } else {
-            &self.target_host_token
-        };
-        let commit = if !request.candidate_commit.is_empty() {
-            &request.candidate_commit
-        } else {
-            &self.candidate_commit
-        };
+        if !request.target_host_token.is_empty()
+            && request.target_host_token != self.target_host_token
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+            };
+        }
+        if !request.candidate_commit.is_empty() && request.candidate_commit != self.candidate_commit
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+            };
+        }
         let context = ScmExecutionContext {
             service_name: name,
             image_token: &request.expected_image_token,
             execution_identity_token: &request.expected_execution_identity_token,
-            target_host_token: host_token,
-            candidate_commit: commit,
+            target_host_token: &self.target_host_token,
+            candidate_commit: &self.candidate_commit,
             transaction_id: &request.transaction_id,
             need_start,
             need_stop,
@@ -2812,6 +2888,17 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
         }
 
         // 4. Perform narrow mutation
+        if let Err(err) = self.gate.authorizes_context(&context, self.clock.as_ref()) {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: snapshot.observation.state,
+                achieved_start_mode: snapshot.observation.start_mode,
+                refusal_reason: Some(err.as_str().to_owned()),
+            };
+        }
+
         let mutate_result = match request.action {
             PrivilegedScmAction::StartService => self.backend.start(name),
             PrivilegedScmAction::StopService => self.backend.stop(name),
@@ -5221,11 +5308,32 @@ mod tests {
         assert_eq!(mock_backend.change_calls(), 0);
         assert_eq!(mock_backend.start_calls(), 0);
 
-        // Rule 2: plan.requires_owner_gate == false -> succeeds without gate requirement
+        // Rule 2: plan.requires_owner_gate == false still fails closed on LiveScmExecutionGate::CLOSED
+        // Non-gated restore is permitted ONLY under explicit SyntheticTestOnly gates, never CLOSED
         restore_plan.requires_owner_gate = false;
-        let receipt_no_gate = exec_closed.restore(&restore_plan, &mut fake_admission);
-        assert_eq!(receipt_no_gate.stage, ScmTransactionStage::Completed);
-        assert!(receipt_no_gate.restore_pass);
+        let receipt_closed_bypass_attempt = exec_closed.restore(&restore_plan, &mut fake_admission);
+        assert_eq!(
+            receipt_closed_bypass_attempt.stage,
+            ScmTransactionStage::RestoreFailed
+        );
+        assert!(!receipt_closed_bypass_attempt.restore_pass);
+        assert_eq!(
+            receipt_closed_bypass_attempt.reason.as_deref(),
+            Some("scm.live-gate-closed")
+        );
+        assert_eq!(mock_backend.change_calls(), 0);
+        assert_eq!(mock_backend.start_calls(), 0);
+
+        let exec_synthetic = ScmControlExecutor::new(
+            mock_backend.clone(),
+            "fixture.scm.a",
+            "fixture-image",
+            "fixture-identity",
+            open_synthetic_gate(),
+        );
+        let receipt_synthetic = exec_synthetic.restore(&restore_plan, &mut fake_admission);
+        assert_eq!(receipt_synthetic.stage, ScmTransactionStage::Completed);
+        assert!(receipt_synthetic.restore_pass);
         assert_eq!(mock_backend.change_calls(), 1);
         assert_eq!(mock_backend.start_calls(), 1);
 
@@ -5265,5 +5373,177 @@ mod tests {
         let receipt_live = exec_live.restore(&restore_plan, &mut fake_admission);
         assert_eq!(receipt_live.stage, ScmTransactionStage::Completed);
         assert!(receipt_live.restore_pass);
+    }
+
+    fn mock_backend_c1() -> MockScmBackend {
+        let backend = MockScmBackend::new();
+        backend.insert(MockServiceRecord {
+            observation: ServiceObservation {
+                service_name: "fixture.audit.a".into(),
+                state: DiscoveredLifecycle::Listening,
+                start_mode: ServiceStartMode::Manual,
+                image_path_matches: true,
+                ownership_verified: true,
+            },
+            worker_busy: false,
+            image_token: "fixture-image".into(),
+            execution_identity_token: "fixture-identity".into(),
+        });
+        backend
+    }
+
+    fn live_gate_c1() -> LiveScmExecutionGate {
+        LiveScmExecutionGate::mint_trusted_live(
+            "fixture.audit.a",
+            "fixture-image",
+            "fixture-identity",
+            "host-a",
+            "candidate-a",
+            "tx-a",
+            false,
+            true,
+            false,
+            1000,
+            1100,
+        )
+        .unwrap()
+    }
+
+    fn request_c1() -> PrivilegedScmRequest {
+        PrivilegedScmRequest {
+            action: PrivilegedScmAction::StopService,
+            service_name: "fixture.audit.a".into(),
+            expected_image_token: "fixture-image".into(),
+            expected_execution_identity_token: "fixture-identity".into(),
+            target_host_token: "host-a".into(),
+            candidate_commit: "candidate-a".into(),
+            transaction_id: "tx-a".into(),
+        }
+    }
+
+    struct ExpiringBackend {
+        backend: MockScmBackend,
+        clock: Arc<MockClock>,
+    }
+
+    impl ScmControlBackend for ExpiringBackend {
+        fn query_exact(&self, name: &str) -> Result<ScmExactSnapshot, ScmApiError> {
+            self.clock.set_time(1200);
+            self.backend.query_exact(name)
+        }
+        fn start(&self, name: &str) -> Result<(), ScmApiError> {
+            self.backend.start(name)
+        }
+        fn stop(&self, name: &str) -> Result<(), ScmApiError> {
+            self.backend.stop(name)
+        }
+        fn change_start_mode(&self, name: &str, mode: ServiceStartMode) -> Result<(), ScmApiError> {
+            self.backend.change_start_mode(name, mode)
+        }
+    }
+
+    struct AbsentAdmission;
+    impl AdmissionSelectorObserver for AbsentAdmission {
+        fn observe_selector_absent(&mut self) -> Result<bool, ScmApiError> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn regression_c1_request_cannot_override_executor_host_and_candidate() {
+        let backend = mock_backend_c1();
+        let helper = PrivilegedScmHelper::new(backend.clone(), live_gate_c1())
+            .with_clock(Arc::new(MockClock::new(1000)))
+            .with_host_and_commit("host-b", "candidate-b");
+        let result = helper.dispatch(&request_c1());
+        assert!(
+            !result.applied,
+            "request must not override executor host/candidate context"
+        );
+        assert_eq!(
+            backend.stop_calls(),
+            0,
+            "must produce zero write calls on context mismatch"
+        );
+    }
+
+    #[test]
+    fn regression_c1_expiry_during_readback_refuses_with_zero_writes() {
+        let backend = mock_backend_c1();
+        let clock = Arc::new(MockClock::new(1000));
+        let helper = PrivilegedScmHelper::new(
+            ExpiringBackend {
+                backend: backend.clone(),
+                clock: clock.clone(),
+            },
+            live_gate_c1(),
+        )
+        .with_clock(clock.clone());
+        let result = helper.dispatch(&request_c1());
+        assert_eq!(clock.now_epoch_seconds(), 1200);
+        assert!(
+            !result.applied,
+            "mutation must be refused if gate expired during query/readback"
+        );
+        assert_eq!(
+            backend.stop_calls(),
+            0,
+            "must produce zero write calls after expiry"
+        );
+    }
+
+    #[test]
+    fn regression_c1_restore_flag_false_cannot_bypass_closed_gate() {
+        let backend = mock_backend_c1();
+        let executor = ScmControlExecutor::new(
+            backend.clone(),
+            "fixture.audit.a",
+            "fixture-image",
+            "fixture-identity",
+            LiveScmExecutionGate::CLOSED,
+        );
+        let mut plan = capture_restore_plan(&executor.capture_prestate(false, true).unwrap());
+        plan.requires_owner_gate = false;
+        let result = executor.restore(&plan, &mut AbsentAdmission);
+        assert_eq!(
+            result.stage,
+            ScmTransactionStage::RestoreFailed,
+            "closed gate must refuse restore"
+        );
+        assert!(
+            !result.restore_pass,
+            "restore_pass must be false when gate is closed"
+        );
+        assert_eq!(
+            backend.change_calls(),
+            0,
+            "must produce zero change_start_mode calls"
+        );
+        assert_eq!(backend.start_calls(), 0, "must produce zero start calls");
+    }
+
+    #[test]
+    fn regression_c1_issuer_debug_redacts_authority_secret() {
+        let issuer = OwnerAuthorizationIssuer::new(b"super-secret-key-material-never-log");
+        let debug_str = format!("{:?}", issuer);
+        assert!(!debug_str.contains("super-secret-key-material-never-log"));
+        assert!(debug_str.contains("<redacted>"));
+    }
+
+    #[test]
+    fn regression_c2_image_path_token_unified_across_quoted_and_args() {
+        let bare = r"C:\runners\a\bin\RunnerService.exe";
+        let quoted = r#""C:\runners\a\bin\RunnerService.exe""#;
+        let with_args = r#""C:\runners\a\bin\RunnerService.exe" --run"#;
+        let unquoted_args = r"C:\runners\a\bin\RunnerService.exe -service";
+
+        let token_bare = opaque_image_token(bare);
+        let token_quoted = opaque_image_token(quoted);
+        let token_with_args = opaque_image_token(with_args);
+        let token_unquoted_args = opaque_image_token(unquoted_args);
+
+        assert_eq!(token_bare, token_quoted);
+        assert_eq!(token_bare, token_with_args);
+        assert_eq!(token_bare, token_unquoted_args);
     }
 }

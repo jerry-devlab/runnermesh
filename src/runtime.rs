@@ -534,6 +534,10 @@ pub enum AgentCommand {
         when_idle: bool,
         prepare_only: bool,
     },
+    RunnersDisableAll {
+        when_idle: bool,
+        prepare_only: bool,
+    },
     RunnersReconcile {
         local_runner_key: String,
         prepare_only: bool,

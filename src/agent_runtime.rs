@@ -26,14 +26,14 @@ use tray_icon::{
 use crate::{
     ActivityWorkloadProbe, AdmissionAgentReconciler, AdmissionControlSnapshot, AdmissionController,
     AdmissionDecision, AgentCommand, AgentCore, AgentHealth, AgentObservation, AgentObserver,
-    AgentReconciler, AgentResponse, AgentSnapshot, BuildProvenance, DesiredAdmissionState,
-    DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
-    ExecutionIdentityEvidence, FileConfigStore, HardSafetyState, HostSnapshot, HostSource,
-    Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    LiveScmExecutionGate, LocalAgentTransport, MultiRunnerLifecycleBackend, NativeTrayEventLoop,
-    OfficialRunnerObserver, OwnershipEvidence, PrivilegedScmHelper, ProcessListProbe, ReasonCode,
-    RunnerPhase, SandboxMultiRunnerLifecycleBackend, ThemePreference, TrayIconGlyph, TrayMenuEntry,
-    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
+    AgentReconciler, AgentResponse, AgentSnapshot, AuthoritativeMultiRunnerLifecycleBackend,
+    BuildProvenance, DesiredAdmissionState, DoctorCheck, DoctorReport, DoctorStatus,
+    EffectiveLocale, EffectiveTheme, ExecutionIdentityEvidence, FileConfigStore, HardSafetyState,
+    HostSnapshot, HostSource, Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind,
+    LinkSnapshot, LinkState, LiveScmExecutionGate, LocalAgentTransport,
+    MultiRunnerLifecycleBackend, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
+    PrivilegedScmHelper, ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph,
+    TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
     WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
     WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
     WindowsUserSessionSupervisorAdapter,
@@ -119,6 +119,7 @@ pub fn run_development_agent(
         RuntimeReconciler::Unconfigured(NoRunnerControl),
         None,
         true,
+        None,
     )
 }
 
@@ -150,13 +151,13 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
         .runtime_binding()
         .map_err(|error| error.to_string())?;
     let (observer, reconciler) = match binding {
-        Some(binding) => {
+        Some(ref binding) => {
             let backend = crate::windows_github_admission_backend(binding.admission.clone())
                 .map_err(|error| error.to_string())?;
             let observer = RuntimeObserver::new_bound(
                 &binding.local,
                 &binding.admission,
-                binding.process_probe_executables,
+                binding.process_probe_executables.clone(),
             );
             (
                 observer,
@@ -179,7 +180,7 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
         return Err("installed Agent state root is a reparse point".to_owned());
     }
     let multi_runner_backend: Arc<dyn MultiRunnerLifecycleBackend> = Arc::new(
-        SandboxMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
+        AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
             WindowsScmBackend::mutation_inert(),
             LiveScmExecutionGate::CLOSED,
         )),
@@ -191,6 +192,7 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
         reconciler,
         Some(multi_runner_backend),
         false,
+        binding.as_ref(),
     )
 }
 
@@ -369,6 +371,7 @@ fn run_agent(
     reconciler: RuntimeReconciler,
     multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     development_controls: bool,
+    runtime_binding: Option<&crate::InstalledRuntimeBinding>,
 ) -> Result<(), String> {
     // Acquire the user-scoped authority guard before constructing a configured
     // core or performing any observation/reconciliation that could mutate the
@@ -383,6 +386,9 @@ fn run_agent(
     ));
     let mut core =
         assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)?;
+    if let Some(binding) = runtime_binding {
+        let _ = core.migrate_v01_binding_if_needed(binding, None);
+    }
     let initial_snapshot = core
         .observe_decide_reconcile()
         .map_err(|error| error.to_string())?;

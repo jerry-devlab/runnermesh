@@ -23,8 +23,8 @@ use crate::{
     PerRunnerAchieved, PerRunnerDesired, PerRunnerObservation, PerRunnerPlan, PrivilegedScmAction,
     PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ProbeId, ProbeRuntimeState,
     ProbeSnapshot, ReasonCode, RegistryBackendBinding, RegistryError, RegistryStore, RunnerPhase,
-    RunnerRegistry, RunnerRegistryEditor, ScmControlBackend, SystemPreferences, UiPreferences,
-    UserMode, ZenOverride,
+    RunnerRecord, RunnerRegistry, RunnerRegistryEditor, ScmControlBackend, SystemPreferences,
+    UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -229,6 +229,12 @@ pub struct MemoryConfigStore {
 }
 
 impl MemoryConfigStore {
+    pub fn new(initial: AgentConfig) -> Self {
+        Self {
+            config: RefCell::new(Some(initial)),
+        }
+    }
+
     pub fn persisted(&self) -> Option<AgentConfig> {
         self.config.borrow().clone()
     }
@@ -261,6 +267,23 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
         scope: &crate::RegistrationScope,
         runner_id: u64,
     ) -> Result<bool, String>;
+
+    /// Coordinates advertisement of the reserved admission selector for the given scope and runner.
+    fn advertise_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String>;
+
+    /// Dispatches an owned user-session action.
+    fn dispatch_session(
+        &self,
+        record: &RunnerRecord,
+        action: crate::runner_session_backend::PreparedSessionAction,
+    ) -> Result<bool, String> {
+        let _ = (record, action);
+        Ok(false)
+    }
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -268,6 +291,9 @@ pub struct SandboxMultiRunnerLifecycleBackend<B> {
     helper: PrivilegedScmHelper<B>,
     observations: Arc<Mutex<Vec<PerRunnerObservation>>>,
     withdrawn_selectors: Arc<Mutex<Vec<(crate::RegistrationScope, u64)>>>,
+    advertised_selectors: Arc<Mutex<Vec<(crate::RegistrationScope, u64)>>>,
+    dispatched_session_actions:
+        Arc<Mutex<Vec<(String, crate::runner_session_backend::PreparedSessionAction)>>>,
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> SandboxMultiRunnerLifecycleBackend<B> {
@@ -276,6 +302,8 @@ impl<B: ScmControlBackend + Send + Sync + 'static> SandboxMultiRunnerLifecycleBa
             helper,
             observations: Arc::new(Mutex::new(Vec::new())),
             withdrawn_selectors: Arc::new(Mutex::new(Vec::new())),
+            advertised_selectors: Arc::new(Mutex::new(Vec::new())),
+            dispatched_session_actions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -285,6 +313,22 @@ impl<B: ScmControlBackend + Send + Sync + 'static> SandboxMultiRunnerLifecycleBa
 
     pub fn withdrawn_selectors(&self) -> Vec<(crate::RegistrationScope, u64)> {
         self.withdrawn_selectors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub fn advertised_selectors(&self) -> Vec<(crate::RegistrationScope, u64)> {
+        self.advertised_selectors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub fn dispatched_session_actions(
+        &self,
+    ) -> Vec<(String, crate::runner_session_backend::PreparedSessionAction)> {
+        self.dispatched_session_actions
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
@@ -315,6 +359,106 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
             .unwrap_or_else(|p| p.into_inner())
             .push((scope.clone(), runner_id));
         Ok(true)
+    }
+
+    fn advertise_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String> {
+        self.advertised_selectors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((scope.clone(), runner_id));
+        Ok(true)
+    }
+
+    fn dispatch_session(
+        &self,
+        record: &RunnerRecord,
+        action: crate::runner_session_backend::PreparedSessionAction,
+    ) -> Result<bool, String> {
+        self.dispatched_session_actions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((record.local_runner_key.clone(), action));
+        Ok(true)
+    }
+}
+
+/// Authoritative multi-runner lifecycle backend for installed production runtime.
+///
+/// Obtains fresh observations from the Windows SCM and runner processes for each enrolled runner key,
+/// dispatches narrow SCM actions through PrivilegedScmHelper (sealed closed in production),
+/// and coordinates admission label advertisement and withdrawal with fail-closed semantics.
+pub struct AuthoritativeMultiRunnerLifecycleBackend<B> {
+    helper: PrivilegedScmHelper<B>,
+}
+
+impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifecycleBackend<B> {
+    pub fn new(helper: PrivilegedScmHelper<B>) -> Self {
+        Self { helper }
+    }
+}
+
+impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
+    for AuthoritativeMultiRunnerLifecycleBackend<B>
+{
+    fn observe_runners(&self, local_runner_keys: &[String]) -> Vec<PerRunnerObservation> {
+        let mut observations = Vec::new();
+        for key in local_runner_keys {
+            let snap = self.helper.backend().query_exact(key);
+            let (lifecycle, ownership, worker_present) = match snap {
+                Ok(s) => {
+                    let busy = matches!(s.observation.state, DiscoveredLifecycle::Busy);
+                    (
+                        s.observation.state,
+                        s.observation.ownership_verified && s.observation.image_path_matches,
+                        busy,
+                    )
+                }
+                Err(_) => (DiscoveredLifecycle::Unknown, false, false),
+            };
+            observations.push(PerRunnerObservation {
+                local_runner_key: key.clone(),
+                ownership_verified: ownership,
+                lifecycle,
+                worker_present,
+                selector_present: None,
+                selector_observation_unknown: true,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            });
+        }
+        observations
+    }
+
+    fn dispatch_scm(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport {
+        self.helper.dispatch(request)
+    }
+
+    fn withdraw_selector(
+        &self,
+        _scope: &crate::RegistrationScope,
+        _runner_id: u64,
+    ) -> Result<bool, String> {
+        Err("admission.unconfigured-fail-closed".to_owned())
+    }
+
+    fn advertise_selector(
+        &self,
+        _scope: &crate::RegistrationScope,
+        _runner_id: u64,
+    ) -> Result<bool, String> {
+        Err("admission.unconfigured-fail-closed".to_owned())
+    }
+
+    fn dispatch_session(
+        &self,
+        _record: &RunnerRecord,
+        _action: crate::runner_session_backend::PreparedSessionAction,
+    ) -> Result<bool, String> {
+        Err("session.unconfigured-fail-closed".to_owned())
     }
 }
 
@@ -443,21 +587,18 @@ where
                 continue;
             };
 
-            let service_name = match &record.backend {
-                RegistryBackendBinding::WindowsService { service_name } => service_name.clone(),
-                RegistryBackendBinding::UserSession => continue,
-            };
-
             let obs = observations
                 .iter()
                 .find(|o| o.local_runner_key == result.local_runner_key);
 
-            // Step 1: If plan requires selector withdrawal, coordinate withdrawal
+            // Step 1: If plan requires selector withdrawal or advertisement, coordinate it
             if result.plan == PerRunnerPlan::WithdrawSelector {
                 let _ = backend.withdraw_selector(&record.registration_scope, record.runner_id);
+            } else if result.plan == PerRunnerPlan::AdvertiseSelector {
+                let _ = backend.advertise_selector(&record.registration_scope, record.runner_id);
             }
 
-            // Step 2: Strictly verify dispatch guards before issuing StopService
+            // Step 2: Strictly verify dispatch guards before issuing Stop
             let selector_confirmed_absent = obs
                 .map(|o| o.selector_present == Some(false) && !o.selector_observation_unknown)
                 .unwrap_or(false);
@@ -469,36 +610,65 @@ where
                 && (result.achieved == PerRunnerAchieved::Drained
                     || result.achieved == PerRunnerAchieved::Offline);
 
-            let action = if (!record.desired_enabled || result.desired == PerRunnerDesired::Offline)
-                && result.observed_lifecycle != DiscoveredLifecycle::Stopped
-                && selector_confirmed_absent
-                && worker_idle
-                && plan_allows_stop
-            {
-                Some(PrivilegedScmAction::StopService)
-            } else if record.desired_enabled
-                && result.desired == PerRunnerDesired::Full
-                && result.observed_lifecycle == DiscoveredLifecycle::Stopped
-            {
-                Some(PrivilegedScmAction::StartService)
-            } else {
-                None
-            };
+            match &record.backend {
+                RegistryBackendBinding::WindowsService { service_name } => {
+                    let action = if (!record.desired_enabled
+                        || result.desired == PerRunnerDesired::Offline)
+                        && result.observed_lifecycle != DiscoveredLifecycle::Stopped
+                        && selector_confirmed_absent
+                        && worker_idle
+                        && plan_allows_stop
+                    {
+                        Some(PrivilegedScmAction::StopService)
+                    } else if record.desired_enabled
+                        && result.desired == PerRunnerDesired::Full
+                        && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+                    {
+                        Some(PrivilegedScmAction::StartService)
+                    } else {
+                        None
+                    };
 
-            if let Some(action) = action {
-                let expected_image_token = crate::runner_service_image_token(&record.runner_home);
-                let expected_execution_identity_token = record.execution_identity_ref.key.clone();
+                    if let Some(action) = action {
+                        let expected_image_token =
+                            crate::runner_service_image_token(&record.runner_home);
+                        let expected_execution_identity_token =
+                            record.execution_identity_ref.key.clone();
 
-                let request = PrivilegedScmRequest {
-                    action,
-                    service_name,
-                    expected_image_token,
-                    expected_execution_identity_token,
-                    target_host_token: String::new(),
-                    candidate_commit: String::new(),
-                    transaction_id: transaction_id.to_string(),
-                };
-                reports.push(backend.dispatch_scm(&request));
+                        let request = PrivilegedScmRequest {
+                            action,
+                            service_name: service_name.clone(),
+                            expected_image_token,
+                            expected_execution_identity_token,
+                            target_host_token: String::new(),
+                            candidate_commit: String::new(),
+                            transaction_id: transaction_id.to_string(),
+                        };
+                        reports.push(backend.dispatch_scm(&request));
+                    }
+                }
+                RegistryBackendBinding::UserSession => {
+                    let session_action = if (!record.desired_enabled
+                        || result.desired == PerRunnerDesired::Offline)
+                        && result.observed_lifecycle != DiscoveredLifecycle::Stopped
+                        && selector_confirmed_absent
+                        && worker_idle
+                        && plan_allows_stop
+                    {
+                        Some(crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop)
+                    } else if record.desired_enabled
+                        && result.desired == PerRunnerDesired::Full
+                        && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+                    {
+                        Some(crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener)
+                    } else {
+                        None
+                    };
+
+                    if let Some(action) = session_action {
+                        let _ = backend.dispatch_session(record, action);
+                    }
+                }
             }
         }
 
@@ -757,6 +927,7 @@ where
             | AgentCommand::RunnersEnroll { .. }
             | AgentCommand::RunnersEnable { .. }
             | AgentCommand::RunnersDisable { .. }
+            | AgentCommand::RunnersDisableAll { .. }
             | AgentCommand::RunnersReconcile { .. }
             | AgentCommand::RunnersForget { .. }
             | AgentCommand::RunnersStatus { .. } => self.handle_runners_command(command),
@@ -1016,18 +1187,8 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{
-        write_bytes_atomically_with, AgentConfig, AgentCore, AgentObservation, AgentObserver,
-        AgentReconciler, ConfigStore, ConfigStoreError, FileConfigStore, MemoryConfigStore,
-        CONFIG_SCHEMA_VERSION,
-    };
-    use crate::{
-        AdmissionControlSnapshot, AdmissionDecision, AgentCommand, AgentHealth, AgentResponse,
-        BuildProvenance, DesiredAdmissionState, ExecutionIdentityEvidence, LinkKind, LinkSnapshot,
-        LinkState, NodeState, OwnershipEvidence, ProbeId, ProbeRuntimeState, ProbeSnapshot,
-        ReasonCode, RunnerPhase, SystemPreferences, ThemePreference, UiPreferences, UserMode,
-        ZenOverride,
-    };
+    use super::*;
+    use crate::*;
 
     #[test]
     fn observe_decide_reconcile_keeps_manual_policy_in_agent_authority() {
@@ -2487,6 +2648,355 @@ mod tests {
         assert_eq!(
             reports_inert[0].refusal_reason.as_deref(),
             Some(ScmApiError::GateClosed.as_str())
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn regression_c2_authoritative_backend_exact_scm_readback_and_fail_closed() {
+        let mock_scm = crate::MockScmBackend::new();
+        mock_scm.insert(crate::MockServiceRecord {
+            observation: crate::ServiceObservation {
+                service_name: "actions.runner.live-1".to_string(),
+                state: DiscoveredLifecycle::Listening,
+                start_mode: crate::ServiceStartMode::Manual,
+                image_path_matches: true,
+                ownership_verified: true,
+            },
+            worker_busy: false,
+            image_token: "tok-1".to_string(),
+            execution_identity_token: "ident-1".to_string(),
+        });
+
+        let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+        let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
+
+        // 1. Exact observation readback
+        let obs = backend.observe_runners(&[
+            "actions.runner.live-1".to_string(),
+            "actions.runner.unknown".to_string(),
+        ]);
+        assert_eq!(obs.len(), 2);
+        assert_eq!(obs[0].local_runner_key, "actions.runner.live-1");
+        assert_eq!(obs[0].lifecycle, DiscoveredLifecycle::Listening);
+        assert!(obs[0].ownership_verified);
+        assert!(!obs[0].worker_present);
+
+        assert_eq!(obs[1].local_runner_key, "actions.runner.unknown");
+        assert_eq!(obs[1].lifecycle, DiscoveredLifecycle::Unknown);
+        assert!(!obs[1].ownership_verified);
+
+        // 2. Fail-closed selector actions without live admission authorization
+        let scope = crate::RegistrationScope::Repository {
+            owner: "org".to_string(),
+            repository: "repo".to_string(),
+        };
+        assert!(backend.withdraw_selector(&scope, 101).is_err());
+        assert!(backend.advertise_selector(&scope, 101).is_err());
+    }
+
+    #[test]
+    fn regression_c2_reconcile_dispatches_advertise_selector() {
+        let root = std::env::temp_dir().join(format!("test-adv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let mock_scm = crate::MockScmBackend::new();
+        let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+        let sandbox_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper));
+
+        let store = MemoryConfigStore::new(AgentConfig::default());
+        let mut core = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation(); 10]),
+            RecordingReconciler::default(),
+            store,
+            BuildProvenance {
+                version: "0.1.0".to_string(),
+                commit: "test".to_string(),
+                channel: "dev".to_string(),
+                target: "win".to_string(),
+            },
+            Box::new(crate::FileRegistryStore::new(root.join("reg.json"))),
+        )
+        .unwrap();
+        core.set_multi_runner_backend(sandbox_backend.clone());
+
+        let identity = crate::OpaqueIdentityReference::new(
+            crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+
+        // Enroll a runner
+        let discovery = DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![crate::DiscoveredRunner {
+                local_discovery_key: "runner-adv".to_string(),
+                disposition: crate::DiscoveryDisposition::ObservedOnly,
+                refusal: None,
+                backend: crate::RunnerBackendKind::WindowsService,
+                identity: crate::DiscoveredRunnerIdentity {
+                    registration_scope: Some(crate::RegistrationScope::Repository {
+                        owner: "org-a".to_string(),
+                        repository: "repo-a".to_string(),
+                    }),
+                    runner_id: Some(555),
+                    expected_runner_name: Some("runner-adv".to_string()),
+                    runner_home: root.join("home"),
+                    work_root: Some(root.join("work")),
+                    execution_identity_ref: Some(identity.clone()),
+                },
+                service: Some(crate::DiscoveredServiceBinding {
+                    service_name: "actions.runner.adv".to_string(),
+                    display_name: None,
+                    image_path: None,
+                    state: DiscoveredLifecycle::Listening,
+                }),
+                session: None,
+                capabilities: crate::DiscoveryCapabilities {
+                    service_control_contract: true,
+                    user_session_control_contract: false,
+                    enrollment_eligible: true,
+                },
+                same_scope_collision: false,
+                observed_lifecycle: DiscoveredLifecycle::Listening,
+            }],
+        };
+        core.set_runner_discovery(discovery);
+        core.handle_command(AgentCommand::RunnersEnroll {
+            local_runner_key: "runner-adv".to_string(),
+            prepare_only: false,
+        })
+        .unwrap();
+
+        // Runner is enabled, mode is ForceCi -> Reconcile will plan AdvertiseSelector
+        core.handle_command(AgentCommand::SetMode {
+            mode: UserMode::ForceCi,
+        })
+        .unwrap();
+
+        sandbox_backend.set_observations(vec![PerRunnerObservation {
+            local_runner_key: "runner-adv".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(false), // Needs to be advertised!
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        }]);
+
+        let _ = core.observe_decide_reconcile().unwrap();
+
+        let adv = sandbox_backend.advertised_selectors();
+        assert_eq!(
+            adv.len(),
+            1,
+            "AdvertiseSelector must be dispatched to backend"
+        );
+        assert_eq!(adv[0].1, 555);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn regression_c3_reconcile_dispatches_user_session_action() {
+        let root = std::env::temp_dir().join(format!("test-session-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let mock_scm = crate::MockScmBackend::new();
+        let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+        let sandbox_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper));
+
+        let store = MemoryConfigStore::new(AgentConfig::default());
+        let mut core = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation(); 10]),
+            RecordingReconciler::default(),
+            store,
+            BuildProvenance {
+                version: "0.1.0".to_string(),
+                commit: "test".to_string(),
+                channel: "dev".to_string(),
+                target: "win".to_string(),
+            },
+            Box::new(crate::FileRegistryStore::new(root.join("reg.json"))),
+        )
+        .unwrap();
+        core.set_multi_runner_backend(sandbox_backend.clone());
+
+        let identity = crate::OpaqueIdentityReference::new(
+            crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+
+        // Enroll a UserSession runner
+        let discovery = DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![crate::DiscoveredRunner {
+                local_discovery_key: "runner-sess".to_string(),
+                disposition: crate::DiscoveryDisposition::ObservedOnly,
+                refusal: None,
+                backend: crate::RunnerBackendKind::UserSession,
+                identity: crate::DiscoveredRunnerIdentity {
+                    registration_scope: Some(crate::RegistrationScope::Repository {
+                        owner: "org-sess".to_string(),
+                        repository: "repo-sess".to_string(),
+                    }),
+                    runner_id: Some(777),
+                    expected_runner_name: Some("runner-sess".to_string()),
+                    runner_home: root.join("home"),
+                    work_root: Some(root.join("work")),
+                    execution_identity_ref: Some(identity.clone()),
+                },
+                service: None,
+                session: Some(crate::DiscoveredSessionBinding {
+                    current_user_owned: true,
+                    listener_present: true,
+                    worker_present: false,
+                }),
+                capabilities: crate::DiscoveryCapabilities {
+                    service_control_contract: false,
+                    user_session_control_contract: true,
+                    enrollment_eligible: true,
+                },
+                same_scope_collision: false,
+                observed_lifecycle: DiscoveredLifecycle::Listening,
+            }],
+        };
+        core.set_runner_discovery(discovery);
+        core.handle_command(AgentCommand::RunnersEnroll {
+            local_runner_key: "runner-sess".to_string(),
+            prepare_only: false,
+        })
+        .unwrap();
+
+        // Disable runner -> should dispatch RequestGracefulStop
+        core.handle_command(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-sess".to_string(),
+            when_idle: true,
+            prepare_only: false,
+        })
+        .unwrap();
+
+        sandbox_backend.set_observations(vec![PerRunnerObservation {
+            local_runner_key: "runner-sess".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(false),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        }]);
+
+        let _ = core.observe_decide_reconcile().unwrap();
+
+        let actions = sandbox_backend.dispatched_session_actions();
+        assert_eq!(
+            actions.len(),
+            1,
+            "Graceful stop must be dispatched for user session runner"
+        );
+        assert_eq!(actions[0].0, "runner-sess");
+        assert_eq!(
+            actions[0].1,
+            crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn regression_c3_v01_binding_migration_is_idempotent_and_persisted() {
+        let root = std::env::temp_dir().join(format!("test-mig-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let reg_path = root.join("reg.json");
+
+        let store = MemoryConfigStore::new(AgentConfig::default());
+        let mut core = AgentCore::with_registry_store(
+            crate::agent_runtime::RuntimeObserver::new(None, Vec::new()),
+            crate::agent_runtime::RuntimeReconciler::Unconfigured(
+                crate::agent_runtime::NoRunnerControl::new(),
+            ),
+            store,
+            BuildProvenance {
+                version: "0.1.0".to_string(),
+                commit: "test".to_string(),
+                channel: "dev".to_string(),
+                target: "win".to_string(),
+            },
+            Box::new(crate::FileRegistryStore::new(reg_path.clone())),
+        )
+        .unwrap();
+
+        let scope = crate::RegistrationScope::Repository {
+            owner: "owner-mig".to_string(),
+            repository: "repo-mig".to_string(),
+        };
+        let binding = crate::InstalledRuntimeBinding::new(
+            crate::AdmissionBinding::new(
+                scope.clone(),
+                888,
+                "legacy-runner",
+                crate::CredentialReference::new("windows-credential-manager", "fixture-ref")
+                    .unwrap(),
+                Some(crate::ReservedLabelOwnership::for_runner(scope, 888)),
+            )
+            .unwrap(),
+            crate::ExactLocalRunnerBinding::new(
+                root.join("runner_home"),
+                root.join("work"),
+                crate::OpaqueIdentityReference::new(
+                    crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        // First migration succeeds and creates record
+        let migrated_key = core
+            .migrate_v01_binding_if_needed(&binding, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(core.runner_registry().records.len(), 1);
+        let record = core.runner_registry().get(&migrated_key).unwrap();
+        assert_eq!(record.runner_id, 888);
+
+        // Second migration is idempotent (no-op)
+        let second_migrated = core
+            .migrate_v01_binding_if_needed(&binding, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated_key, second_migrated);
+        assert_eq!(core.runner_registry().records.len(), 1);
+
+        // Reload from disk store to prove durability
+        let loaded = crate::FileRegistryStore::new(reg_path)
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(
+            loaded.legacy_v01_binding_key.as_deref(),
+            Some(migrated_key.as_str())
         );
 
         let _ = fs::remove_dir_all(root);

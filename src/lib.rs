@@ -60,8 +60,9 @@ pub use admission::{
 };
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
-    ConfigStore, ConfigStoreError, FileConfigStore, MemoryConfigStore, MultiRunnerLifecycleBackend,
-    SandboxMultiRunnerLifecycleBackend, CONFIG_SCHEMA_VERSION,
+    AuthoritativeMultiRunnerLifecycleBackend, ConfigStore, ConfigStoreError, FileConfigStore,
+    MemoryConfigStore, MultiRunnerLifecycleBackend, SandboxMultiRunnerLifecycleBackend,
+    CONFIG_SCHEMA_VERSION,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]
@@ -225,7 +226,8 @@ pub use windows_github::{
 };
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
-    ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
+    service_image_path_token, ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary,
+    WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
     opaque_image_token, reconcile_interrupted_scm_journal, runner_service_binary_path,

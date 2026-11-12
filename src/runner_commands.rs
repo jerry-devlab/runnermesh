@@ -361,6 +361,55 @@ pub fn handle_runners_command(
             *prepare_only,
             "runners-disable",
         ),
+        crate::AgentCommand::RunnersDisableAll { prepare_only, .. } => {
+            let keys: Vec<String> = editor
+                .registry()
+                .active_records()
+                .map(|r| r.local_runner_key.clone())
+                .collect();
+            let mut report = RunnerCommandReport::from_registry(
+                editor.registry(),
+                false,
+                *prepare_only,
+                !*prepare_only && !keys.is_empty(),
+                if *prepare_only {
+                    Some(static_reason("runners-disable-all-prepared"))
+                } else {
+                    Some(static_reason("runners-disable-all-applied"))
+                },
+                Vec::new(),
+                0,
+            );
+            if !*prepare_only {
+                for key in &keys {
+                    if let Err(_e) = editor.set_desired_enabled(key, false) {
+                        report = report.with_item_outcome(
+                            key,
+                            false,
+                            Some(static_reason("runners-item-failed")),
+                        );
+                    } else {
+                        report = report.with_item_outcome(key, true, None);
+                    }
+                }
+                let updated = editor.registry();
+                for r in &mut report.records {
+                    if let Some(record) = updated.get(&r.local_runner_key) {
+                        r.desired_enabled = record.desired_enabled;
+                        r.presentation_status = presentation_status_for(record);
+                    }
+                }
+            } else {
+                for key in &keys {
+                    report = report.with_item_outcome(
+                        key,
+                        true,
+                        Some(static_reason("runners-disable-prepared")),
+                    );
+                }
+            }
+            Ok(report)
+        }
         crate::AgentCommand::RunnersReconcile {
             local_runner_key,
             prepare_only,
@@ -697,5 +746,77 @@ mod tests {
         // Optimistic batch apply flag must not erase per-item failure evidence.
         assert!(report.applied);
         assert!(report.partial_failure);
+    }
+
+    #[test]
+    fn disable_all_sets_all_active_runners_to_disabled_with_item_receipts() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut discovery = discovery_report();
+        let mut second = discovery.candidates[0].clone();
+        second.local_discovery_key = "key-b".to_owned();
+        second.identity.runner_id = Some(8);
+        second.identity.expected_runner_name = Some("fixture-8".to_owned());
+        second.identity.runner_home = PathBuf::from(r"C:\fixture\runners\b");
+        second.identity.work_root = Some(PathBuf::from(r"C:\fixture\runners\b\_work"));
+        second.identity.registration_scope = Some(RegistrationScope::Repository {
+            owner: "fixture-owner".to_owned(),
+            repository: "repo-b".to_owned(),
+        });
+        discovery.candidates.push(second);
+
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-a".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-b".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+
+        assert!(editor.registry().get("key-a").unwrap().desired_enabled);
+        assert!(editor.registry().get("key-b").unwrap().desired_enabled);
+
+        // Dry-run prepare
+        let prepared = handle_runners_command(
+            &mut editor,
+            None,
+            &AgentCommand::RunnersDisableAll {
+                when_idle: true,
+                prepare_only: true,
+            },
+        )
+        .unwrap();
+        assert!(prepared.prepare_only);
+        assert!(!prepared.applied);
+        assert!(editor.registry().get("key-a").unwrap().desired_enabled);
+        assert!(editor.registry().get("key-b").unwrap().desired_enabled);
+
+        // Actual apply
+        let applied = handle_runners_command(
+            &mut editor,
+            None,
+            &AgentCommand::RunnersDisableAll {
+                when_idle: true,
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+        assert!(applied.applied);
+        assert!(!applied.prepare_only);
+        assert!(!editor.registry().get("key-a").unwrap().desired_enabled);
+        assert!(!editor.registry().get("key-b").unwrap().desired_enabled);
+        assert_eq!(applied.records.len(), 2);
+        assert!(applied.records.iter().all(|r| !r.desired_enabled));
+        assert!(applied.records.iter().all(|r| r.item_applied == Some(true)));
     }
 }
