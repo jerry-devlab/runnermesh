@@ -1,7 +1,7 @@
 # RM-160H R2 Security Review Packet (Independent Review Assist)
 
-Status: **PENDING (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=PENDING` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING`
-Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. Track 2 (LRM) R2 subagent report (`ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`) is preserved as diagnostic evidence. The external independent process (`jerry-auditor`) preflight encountered `STOP_REASON=AUDIT_ADMISSION_FAILED`; until verified by an admitted independent AI process, `R2_LRM` remains PENDING. Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
+Status: **BLOCKED (Track 2 LRM)** · `INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED` · `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` · `BLOCKER_LATCHED=true`
+Governance Invariant: Implementer (AGY/Cursor) self-review is strictly `SOURCE_LOCAL_PASS` / `DIAGNOSTIC_ONLY` and NEVER counts as `INDEPENDENT_SECURITY_REVIEW=PASS`. The admitted independent process (`jerry-auditor`) preflight passed (`STOP_REASON=NONE`). The formal independent security audit completed by Codex `jerry-auditor` on exact settled HEAD `a31f13d` yielded `DISPOSITION=BLOCKED` with two substantive Surface A security findings (P03 HMAC-SHA256 mismatch and scope loss at dispatch), latching `BLOCKER_LATCHED=true`. Track 1 (G15R) remains PENDING and requires its own separate review before H2 cutover. Track crossing is strictly forbidden.
 
 ## 1. Candidate HEADs Under Review & Git Coordinate Disambiguation
 
@@ -199,6 +199,30 @@ SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1
 GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DIAGNOSTIC_ONLY. Independent review belongs solely to OWNER_INDEPENDENT_AUDITOR. If original independent evidence is missing or unverified, it must remain PENDING.
 ```
 
+### Formal Review Record (Admitted Independent AI Process — Codex jerry-auditor)
+
+```text
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
+REVIEW_DATE=2026-11-12
+TARGET_TRACK=TRACK_2_HUX2_PR65
+STATUS=BLOCKED
+BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+EXACT_REVIEWED_HEAD=a31f13d8009bb31481d68351a021966a4bc2ca41
+PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, PR HEAD: a31f13d8009bb31481d68351a021966a4bc2ca41)
+HOSTED_CI_RUN=43129977634 (PASS_ALL 6/6 jobs green)
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Preflight Tooling
+AUDITOR_MECHANISM=INDEPENDENT_OS_PROCESS_CODEX (profile: jerry-auditor, sandbox_mode: read-only, approval_policy: never)
+AUDITOR_PREFLIGHT=PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, STOP_REASON=NONE)
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-CODEX.md
+RAW_EXECUTION_DATA_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-CODEX-AUDIT-RAW-0c266ec.json
+PREFLIGHT_DIAGNOSTIC_JSON_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-0c266ec.json
+FINDINGS_SUMMARY=Formal R2 review completed by admitted independent AI process (Codex jerry-auditor) on exact settled HEAD a31f13d. Tool hardening verified: is_trusted_powershell_path anchors strictly to canonical system roots; parse_exec_events enforces strict event accounting (commands_started == commands_completed == 1); delivery program checklist ambiguity resolved (V01_G15R=REQUALIFICATION_REQUIRED). Runtime remains fail-closed (mutation_inert, GateClosed, PRODUCTION_MUTATION=false). Review identified two substantive security findings on Surface A: (1) Cryptographic contract mismatch: P03 requires HMAC-SHA256, but src/windows_scm_executor.rs:357 computes plain secret-prefix SHA-256; (2) Authorization scope retention: TokenValidatingOwnerVerifier validates nine dimensions, but TrustedLive gate retains only service, image, and rights, so host, commit, expiry, and transaction binding are not enforced at mutation time. Disposition is BLOCKED pending P03 crypto/scope repair.
+DISPOSITION=BLOCKED
+BLOCKER_STATUS=BLOCKER_LATCHED=true
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-1
+GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker Policy v2. No production mutation, no merge, no release.
+```
+
 ### Track Distinction: Track 1 (G15R) vs Track 2 (LRM)
 
 | Dimension | Track 1: v0.1 C0 Baseline | Track 2: v0.2-A LRM |
@@ -206,6 +230,6 @@ GOVERNANCE_RULE=Implementer (AGY) self-review is strictly SOURCE_LOCAL_PASS / DI
 | **Objective** | H2 Cutover & Dogfood (single-workstation) | HUX-2 / HUX-3 Gate Readiness (multi-runner) |
 | **Bound Commit** | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` |
 | **Branch / PR** | Protected `main` (#50) | `feat/160h-gt01-field-baseline` (PR #65) |
-| **R2 Independent Security Audit** | `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` | `INDEPENDENT_SECURITY_REVIEW_LRM=PENDING` |
+| **R2 Independent Security Audit** | `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` | `INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED` |
 | **Next Step** | Separate Owner preflight & G15R audit | Admit compliant independent AI process review, Owner PR #65 merge & HUX-2 qualification |
 | **Track Crossing Policy** | **FORBIDDEN**: PR #65 candidate must never be used for H2 cutover | **FORBIDDEN**: G15R RC does not qualify multi-runner LRM |

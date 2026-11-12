@@ -45,7 +45,7 @@ never counts as PASS.
 |---|---:|---|---:|---|
 | **R0** Packet polish | 4h | `PASS` | **100%** | Complete |
 | **R1** HUX-1 readonly | 4h | `PARTIAL` | **50%** | Local `EMPTY_OK`; **ZenBookDuo=`PENDING_NOT_RUN`** |
-| **R2** Independent security review | 8h | `PENDING` | **0%** | Subagent report (`ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1`) retained as `DIAGNOSTIC_ONLY`; independent process preflight failed with `EVIDENCE_PARSING_FAILURE` (pwsh vs powershell); `BLOCKER_LATCHED=true`; Track 1 G15R pending Owner |
+| **R2** Independent security review | 8h | `BLOCKED` | **0%** | Admitted independent process (Codex `jerry-auditor`) preflight PASS; formal review completed on settled HEAD `a31f13d`; `DISPOSITION=BLOCKED` on P03 HMAC-SHA256 & dispatch scope loss; `BLOCKER_LATCHED=true`; Track 1 G15R pending Owner |
 | **R3** H2 v0.1 (G15R only) | 6h+24h | `WAITING` | **0%** | Needs R2(G15R) + Owner token |
 | **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
 | **R5** G-ADR006 | 4h | `BRIEF_READY` | **30%** | Brief published (`goals/RM-160H-R5-ADR006-OWNER-BRIEF.md`); awaits Owner decision |
@@ -67,7 +67,7 @@ HUX2_LIVE=WAITING_FOR_OWNER
 HUX3_LIVE=WAITING_FOR_OWNER
 G-ADR006=DRAFT_NOT_ACCEPTED
 H3=WAITING_FOR_OWNER
-INDEPENDENT_SECURITY_REVIEW_LRM=PENDING
+INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED
 INDEPENDENT_SECURITY_REVIEW_G15R=PENDING
 PR65_MERGED=false
 PRODUCTION_MUTATION=false
@@ -76,7 +76,7 @@ BLOCKER_LATCHED=true
 
 ## 5. What “done” would require next
 
-1. **R2 Track 2 LRM Review**: Retained as `DIAGNOSTIC_ONLY` pending verification by an admitted independent AI process (`jerry-auditor` preflight `EVIDENCE_PARSING_FAILURE`: pwsh vs powershell; `BLOCKER_LATCHED=true`); Track 1 G15R remains `PENDING` awaiting separate Owner authorization for H2.
+1. **R2 Track 2 LRM Review**: Formal independent review by admitted process (Codex `jerry-auditor`) completed with `BLOCKED` (`BLOCKER_LATCHED=true`) on Surface A P03 findings; Track 1 G15R remains `PENDING` awaiting separate Owner authorization for H2.
 2. **R1 ZenBookDuo** counts on physical UX8406 — or honest leave `PENDING_NOT_RUN`.
 3. **R5 Owner decision** on ADR 0006 (`ACCEPTED` | `REJECTED` | `DEFER`).
 4. Owner live transactions R3 and/or R4 with separate `RESTORE`.

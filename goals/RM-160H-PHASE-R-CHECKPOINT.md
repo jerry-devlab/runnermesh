@@ -80,7 +80,7 @@ HUX2_LIVE=WAITING_FOR_OWNER
 HUX3_LIVE=WAITING_FOR_OWNER
 G-ADR006=DRAFT_NOT_ACCEPTED
 H3=WAITING_FOR_OWNER
-INDEPENDENT_SECURITY_REVIEW_LRM=PENDING
+INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED
 INDEPENDENT_SECURITY_REVIEW_G15R=PENDING
 PR65_MERGED=false
 PRODUCTION_MUTATION=false
@@ -89,7 +89,7 @@ BLOCKER_LATCHED=true
 
 ## Independent Security Review Traceability (R2)
 
-Status: R2_LRM=PENDING · R2_G15R=PENDING
+Status: R2_LRM=BLOCKED · R2_G15R=PENDING · BLOCKER_LATCHED=true
 
 ### Diagnostic Evidence (Capability-Isolated Subagent):
 - AUDITOR_ID: OWNER_INDEPENDENT_AUDITOR (subagent a825f275-314b-46f8-86e1-290228e47b89)
@@ -101,18 +101,20 @@ Status: R2_LRM=PENDING · R2_G15R=PENDING
 - SUBAGENT_DISPOSITION: PASS (Signature: ISO-8601-AUDITOR-SEC-RM160H-R2-STRICT-1)
 - GOVERNANCE_CLASSIFICATION: DIAGNOSTIC_ONLY (Platform subagent retained as diagnostic evidence pending compliant independent AI process verification)
 
-### Independent Process Record (Codex jerry-auditor):
-- COMMAND: tools/dev/auditor_preflight.py --profile jerry-auditor
-- STATUS: STOP_REASON=AUDIT_ADMISSION_FAILED (Preflight child admission failed under Windows restricted token sandbox)
+### Admitted Independent Process Record (Codex jerry-auditor):
+- PREFLIGHT_COMMAND: tools/dev/auditor_preflight.py --profile jerry-auditor --timeout 60.0
+- PREFLIGHT_STATUS: PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, AUDITOR_READ_ONLY_CAPABILITY_PASS=true, STOP_REASON=NONE)
 - PREFLIGHT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-PROCESS-PREFLIGHT-0c266ec.txt
 - PREFLIGHT_DIAGNOSTIC_JSON=<audit-dir>/2026-11-11/R4-R6-R2/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-0c266ec.json
-- FAILURE_DIFFERENTIATION:
-  - 启动失败: NO (Profile start succeeded, thread.started emitted, exit code 0)
-  - 超时: NO (Execution completed in ~20s, well within 60s timeout)
-  - 命令执行失败: NO (Child process executed with exit_code 0, emitted RUNNERMESH_AUDITOR_CHILD_PROCESS_OK)
-  - 证据解析失败: YES (Codex shell tool selected PowerShell 7 pwsh.exe instead of inbox powershell.exe, failing exact regex contract)
+- EXACT_REVIEWED_HEAD: a31f13d8009bb31481d68351a021966a4bc2ca41 (PR #65, CI Run 43129977634: 6/6 green)
+- FORMAL_REVIEW_COMMAND: codex exec --profile jerry-auditor --sandbox read-only --ask-for-approval never
+- FORMAL_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-CODEX.md
+- FORMAL_RAW_EXECUTION_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-CODEX-AUDIT-RAW-0c266ec.json
+- FINDINGS:
+  1. Cryptographic contract mismatch: P03 requires HMAC-SHA256, but src/windows_scm_executor.rs computes plain secret-prefix SHA-256.
+  2. Scope retention at dispatch: TokenValidatingOwnerVerifier validates nine dimensions, but TrustedLive gate retains only service, image, and rights.
+- DISPOSITION_LRM: BLOCKED
 - BLOCKER_STATUS: BLOCKER_LATCHED=true
-- DISPOSITION_LRM: PENDING
 - DISPOSITION_G15R: PENDING (Track 1 awaiting separate Owner authorization & audit on G15R_RC)
 ```
 
@@ -120,7 +122,7 @@ Status: R2_LRM=PENDING · R2_G15R=PENDING
 
 ```text
 NEXT_ACTION=WAITING_FOR_OWNER
-D24_STATUS=ASSIST_PACKETS_READY (R2 LRM diagnostic-only subagent verified; independent process preflight admission blocked; R5 brief, HUX2/HUX3 readiness refreshed; G15R review PENDING; BLOCKER_LATCHED=true)
+D24_STATUS=ASSIST_PACKETS_READY (R2 LRM formal review BLOCKED on P03 crypto/scope; preflight PASS; BLOCKER_LATCHED=true; G15R review PENDING)
 R2_SECURITY_PACKET=goals/RM-160H-R2-SECURITY-REVIEW-PACKET.md
 R5_OWNER_BRIEF=goals/RM-160H-R5-ADR006-OWNER-BRIEF.md
 HUX2_READINESS_PACKAGE=goals/RM-HUX-2-READINESS-PACKAGE.md
