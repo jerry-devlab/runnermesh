@@ -22,7 +22,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_65_CANDIDATE_HEAD=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`<br>`PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9` | Run 43033525627 (Candidate, 6/6 green)<br>Run 43043112251 (PR HEAD, 6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb`<br>`PR_65_CANDIDATE_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb`<br>`PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb` | Run 43161254344 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -32,20 +32,20 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=e6d9dabfdcecf75779e6ad54867b7e422708a779acd5412d9e78e53b98efec18
-CANDIDATE_ZIP_BYTES=1171857
+CANDIDATE_ZIP_SHA256=36e5446dfe51dc2e901161759ab0e0dbb76d924ba624669054675da5371ee004
+CANDIDATE_ZIP_BYTES=1183040
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=7bd7e591e8781857d0db8e51777ff032436885be03acbb9384580de7ab00b8f5
-CANDIDATE_HELPER_BYTES=1782272
+CANDIDATE_HELPER_SHA256=beb158033ef37e7615d5c0d486e88ed236f007460bba8211844ef7b5c13a31b2
+CANDIDATE_HELPER_BYTES=1758720
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PROVENANCE_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
 INDEPENDENT_HASH_CHECK=PASS
 EXTRACT_TEST=PASS
 INSTALL_TEST=PASS
-SANDBOX_LIFECYCLE_TESTS=PASS (357/357 cargo tests)
+SANDBOX_LIFECYCLE_TESTS=PASS (335/335 cargo tests)
 ```
 
 ## 2. Risk & Architecture Map
@@ -206,20 +206,21 @@ REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
 REVIEW_DATE=2026-11-12
 TARGET_TRACK=TRACK_2_HUX2_PR65
 STATUS=BLOCKED
-BOUND_COMMIT_SHA=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-EXACT_REVIEWED_HEAD=a31f13d8009bb31481d68351a021966a4bc2ca41
-PR_REFERENCE=PR #65 (Candidate: 0c266ec4c48bda49d090d7cd58781cf2c61ea9a6, PR HEAD: a31f13d8009bb31481d68351a021966a4bc2ca41)
-HOSTED_CI_RUN=43129977634 (PASS_ALL 6/6 jobs green)
+BOUND_COMMIT_SHA=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+EXACT_REVIEWED_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PR_REFERENCE=PR #65 (Candidate: 2703a1e57bd3ced0c350ba8266c11ad08851abdb, PR HEAD: 2703a1e57bd3ced0c350ba8266c11ad08851abdb)
+HOSTED_CI_RUN=43161254344 (PASS_ALL 6/6 jobs green)
 SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Preflight Tooling
 AUDITOR_MECHANISM=INDEPENDENT_OS_PROCESS_CODEX (profile: jerry-auditor, sandbox_mode: read-only, approval_policy: never)
 AUDITOR_PREFLIGHT=PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, STOP_REASON=NONE)
-RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-0c266ec-CODEX.md
-RAW_EXECUTION_DATA_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-CODEX-AUDIT-RAW-0c266ec.json
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-2703a1e-CODEX.md
+RAW_EXECUTION_DATA_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-CODEX-AUDIT-RAW-2703a1e.json
 PREFLIGHT_DIAGNOSTIC_JSON_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-0c266ec.json
-FINDINGS_SUMMARY=Formal R2 review completed by admitted independent AI process (Codex jerry-auditor) on exact settled HEAD a31f13d. Tool hardening verified: is_trusted_powershell_path anchors strictly to canonical system roots; parse_exec_events enforces strict event accounting (commands_started == commands_completed == 1); delivery program checklist ambiguity resolved (V01_G15R=REQUALIFICATION_REQUIRED). Runtime remains fail-closed (mutation_inert, GateClosed, PRODUCTION_MUTATION=false). Review identified two substantive security findings on Surface A: (1) Cryptographic contract mismatch: P03 requires HMAC-SHA256, but src/windows_scm_executor.rs:357 computes plain secret-prefix SHA-256; (2) Authorization scope retention: TokenValidatingOwnerVerifier validates nine dimensions, but TrustedLive gate retains only service, image, and rights, so host, commit, expiry, and transaction binding are not enforced at mutation time. Disposition is BLOCKED pending P03 crypto/scope repair.
+FINDINGS_SUMMARY=Formal R2 review executed by admitted independent AI process (Codex jerry-auditor) on exact settled HEAD 2703a1e. Diagnostic review verified prior HMAC-SHA256 and dispatch-scope findings addressed in src/windows_scm_executor.rs; production assembly remains inert via WindowsScmBackend::mutation_inert(). Independent acceptance unproven due to environment admission failure (conda/Python unavailable in subshell, TLS UnknownIssuer on child process admission attempt). Disposition is BLOCKED pending environment admission / independent acceptance.
 DISPOSITION=BLOCKED
+INDEPENDENT_ACCEPTANCE_PENDING=true
 BLOCKER_STATUS=BLOCKER_LATCHED=true
-SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-1
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-2
 GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker Policy v2. No production mutation, no merge, no release.
 ```
 
@@ -228,7 +229,7 @@ GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker 
 | Dimension | Track 1: v0.1 C0 Baseline | Track 2: v0.2-A LRM |
 |---|---|---|
 | **Objective** | H2 Cutover & Dogfood (single-workstation) | HUX-2 / HUX-3 Gate Readiness (multi-runner) |
-| **Bound Commit** | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | `PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` |
+| **Bound Commit** | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | `PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb` |
 | **Branch / PR** | Protected `main` (#50) | `feat/160h-gt01-field-baseline` (PR #65) |
 | **R2 Independent Security Audit** | `INDEPENDENT_SECURITY_REVIEW_G15R=PENDING` | `INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED` |
 | **Next Step** | Separate Owner preflight & G15R audit | Admit compliant independent AI process review, Owner PR #65 merge & HUX-2 qualification |

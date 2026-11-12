@@ -7,16 +7,16 @@ It does **not** authorize live label mutation, live service mutation, or product
 Implementer self-review is not independent acceptance.
 
 ```text
-PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+CODE_ANCHOR=2703a1e57bd3ced0c350ba8266c11ad08851abdb
 GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-PR_HEAD=e71883b9e4e7081b064b7c55f6267dd7c65d1762
-PR_CI=43052375576 (PASS_ALL 6/6 jobs)
-PREDECESSOR_DOCS_PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9
-PREDECESSOR_DOCS_PR_CI=43043112251 (PASS_ALL 6/6 jobs)
+PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PR_CI=43161254344 (PASS_ALL 6/6 jobs)
+PREDECESSOR_DOCS_PR_HEAD=b78cb49f33cf2df6128fbfe32f6b864a7da21e64
+PREDECESSOR_DOCS_PR_CI=43142693463 (PASS_ALL 6/6 jobs)
 SANDBOX_TWO_RUNNER_PASS=PASS        # prepare_two_runner_sandbox layout + tests
 AGENT_CORE_MULTI_RUNNER=PASS        # single authority multi-runner matrix
 AGENT_ENTRYPOINT_ISOLATION=PASS     # agent_entrypoint_runner_a_disable_preserves_runner_b_intent_and_active_execution

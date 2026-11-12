@@ -7,17 +7,17 @@ authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
-PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
+PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+CODE_ANCHOR=2703a1e57bd3ced0c350ba8266c11ad08851abdb
 GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-PR_HEAD=a31f13d8009bb31481d68351a021966a4bc2ca41
-PR_CI=43129977634 (PASS_ALL 6/6 jobs)
-PREDECESSOR_DOCS_PR_HEAD=fb70fda53aa67341ea2fe10260959fc9222eb613
-PREDECESSOR_DOCS_PR_CI=43058356677 (PASS_ALL 6/6 jobs)
-SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (357/357 cargo tests)
+PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PR_CI=43161254344 (PASS_ALL 6/6 jobs)
+PREDECESSOR_DOCS_PR_HEAD=b78cb49f33cf2df6128fbfe32f6b864a7da21e64
+PREDECESSOR_DOCS_PR_CI=43142693463 (PASS_ALL 6/6 jobs)
+SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (335/335 cargo tests)
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
 TRUSTED_AUTH_VERIFIER=VERIFIED      # TokenValidatingOwnerVerifier + refusal paths tested
 INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED # Formal independent review by admitted process (Codex jerry-auditor) completed with BLOCKED (BLOCKER_LATCHED=true); preflight PASS

@@ -14,10 +14,10 @@ R0=PASS
 R1_LOCAL=EMPTY_OK
 R1_ZENBOOKDUO=PENDING_NOT_RUN
 CANDIDATE_PR=65
-PACKAGE_BUILD_COMMIT=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-CODE_ANCHOR=0c266ec4c48bda49d090d7cd58781cf2c61ea9a6
-PR_HEAD=03a0e2af40ae9fd16727d7d97d2b7e7a0bdae0f9
-PR_CI=43043112251 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+CODE_ANCHOR=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PR_CI=43161254344 (PASS_ALL 6/6 jobs)
 ```
 
 ## R0 — packet polish (safe, no live mutation)
@@ -43,9 +43,9 @@ PR_CI=43043112251 (PASS_ALL 6/6 jobs)
 
 ## R2 — independent security review
 
-- [x] R2-01 Choose exact HEAD(s): Track 2 (LRM) Candidate `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6` on PR #65; Track 1 `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` for H2 (separate track).
+- [x] R2-01 Choose exact HEAD(s): Track 2 (LRM) Candidate `2703a1e57bd3ced0c350ba8266c11ad08851abdb` on PR #65; Track 1 `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` for H2 (separate track).
 - [x] R2-02 Provide privacy-safe diff/risk map to external reviewer (Surfaces A-D documented in `RM-160H-R2-SECURITY-REVIEW-PACKET.md`).
-- [x] R2-03 Record reviewer identity class + bound SHA: Admitted independent process (`jerry-auditor`) preflight passed (`STOP_REASON=NONE`). Formal review completed by Codex `jerry-auditor` on exact settled HEAD `a31f13d8009bb31481d68351a021966a4bc2ca41` (Candidate: `0c266ec4c48bda49d090d7cd58781cf2c61ea9a6`, CI Run `43129977634`: 6/6 PASS). Disposition: `BLOCKED` on Surface A P03 HMAC-SHA256 and dispatch scope binding. `BLOCKER_LATCHED=true`.
+- [x] R2-03 Record reviewer identity class + bound SHA: Admitted independent process (`jerry-auditor`) preflight passed (`STOP_REASON=NONE`). Formal review executed by Codex `jerry-auditor` on exact settled HEAD `2703a1e57bd3ced0c350ba8266c11ad08851abdb` (CI Run `43161254344`: 6/6 PASS). Diagnostic review verified Surface A HMAC-SHA256 and dispatch-scope findings addressed. Disposition: `BLOCKED` on audit environment admission failure (conda/Python unavailable in subshell, TLS UnknownIssuer on child admission). `BLOCKER_LATCHED=true`.
 - [ ] **EXIT** `INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED` · `BLOCKER_LATCHED=true` · Track 1 G15R remains `PENDING` (never use PR #65 tip as RC)
 
 ## R3 — H2 v0.1 (G15R track only)
