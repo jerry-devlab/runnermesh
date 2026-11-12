@@ -19,6 +19,8 @@ from typing import Mapping, Protocol, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_PROFILES = ("jerry-auditor", "jerry-supervisor")
 CHILD_MARKER = "RUNNERMESH_AUDITOR_CHILD_PROCESS_OK"
+PS7_POWERSHELL_NAME = "pwsh.exe"
+INBOX_POWERSHELL_NAME = "powershell.exe"
 
 
 @dataclass(frozen=True)
@@ -108,9 +110,63 @@ def remove_windowsapps_from_path(value: str) -> tuple[str, bool]:
     return ";".join(kept), removed
 
 
+def normalize_executable_path(path_str: str) -> str:
+    """Normalize repeated path separators in an executable path."""
+    return re.sub(r"[\\/]+", r"\\", path_str).strip()
+
+
+def is_trusted_powershell_path(candidate: str | Path, environment: Mapping[str, str]) -> bool:
+    norm = normalize_executable_path(str(candidate))
+    pure = PureWindowsPath(norm)
+    name = pure.name.lower()
+    if name not in (PS7_POWERSHELL_NAME, INBOX_POWERSHELL_NAME):
+        return False
+    if not os.path.isfile(norm):
+        return False
+
+    norm_lower = norm.lower()
+    for forbidden in ("windowsapps", "temp", "appdata", "users", "desktop"):
+        if forbidden in norm_lower:
+            return False
+
+    standard_program_files = [r"c:\program files", r"c:\program files (x86)"]
+    if "ProgramFiles" in environment and environment["ProgramFiles"]:
+        pf = environment["ProgramFiles"].rstrip(r"\/").lower()
+        if pf not in standard_program_files:
+            standard_program_files.append(pf)
+    if "ProgramW6432" in environment and environment["ProgramW6432"]:
+        pw = environment["ProgramW6432"].rstrip(r"\/").lower()
+        if pw not in standard_program_files:
+            standard_program_files.append(pw)
+
+    standard_system_roots = [r"c:\windows"]
+    if "SystemRoot" in environment and environment["SystemRoot"]:
+        sr = environment["SystemRoot"].rstrip(r"\/").lower()
+        if sr not in standard_system_roots:
+            standard_system_roots.append(sr)
+    if "WINDIR" in environment and environment["WINDIR"]:
+        wd = environment["WINDIR"].rstrip(r"\/").lower()
+        if wd not in standard_system_roots:
+            standard_system_roots.append(wd)
+
+    if name == PS7_POWERSHELL_NAME:
+        valid_ps7_roots = [
+            f"{pf}\\powershell\\7\\pwsh.exe" for pf in standard_program_files
+        ]
+        return any(norm_lower == root for root in valid_ps7_roots)
+
+    if name == INBOX_POWERSHELL_NAME:
+        valid_inbox_roots = []
+        for sr in standard_system_roots:
+            valid_inbox_roots.append(f"{sr}\\system32\\windowspowershell\\v1.0\\powershell.exe")
+            valid_inbox_roots.append(f"{sr}\\syswow64\\windowspowershell\\v1.0\\powershell.exe")
+        return any(norm_lower == root for root in valid_inbox_roots)
+
+    return False
+
+
 def resolve_inbox_powershell(environment: Mapping[str, str]) -> str | None:
     """Resolve only the Windows inbox PowerShell executable."""
-
     system_root = environment.get("SystemRoot") or environment.get("WINDIR")
     if not system_root:
         return None
@@ -119,9 +175,32 @@ def resolve_inbox_powershell(environment: Mapping[str, str]) -> str | None:
         / "System32"
         / "WindowsPowerShell"
         / "v1.0"
-        / "powershell.exe"
+        / INBOX_POWERSHELL_NAME
     )
-    return candidate if os.path.isfile(candidate) else None
+    return candidate if is_trusted_powershell_path(candidate, environment) else None
+
+
+def resolve_trusted_powershell(
+    environment: Mapping[str, str], explicit: str | None = None
+) -> str | None:
+    """Resolve an explicit or standard trusted PowerShell executable."""
+    if explicit:
+        norm = normalize_executable_path(explicit)
+        return norm if is_trusted_powershell_path(norm, environment) else None
+
+    # Priority 1: PowerShell 7 if installed and trusted
+    path_pwsh = shutil.which(PS7_POWERSHELL_NAME, path=environment.get("PATH"))
+    if path_pwsh and is_trusted_powershell_path(path_pwsh, environment):
+        return normalize_executable_path(path_pwsh)
+
+    program_files = environment.get("ProgramFiles") or environment.get("ProgramW6432")
+    if program_files:
+        pwsh_candidate = str(PureWindowsPath(program_files) / "PowerShell" / "7" / PS7_POWERSHELL_NAME)
+        if is_trusted_powershell_path(pwsh_candidate, environment):
+            return pwsh_candidate
+
+    # Priority 2: Windows Inbox PowerShell 5.1
+    return resolve_inbox_powershell(environment)
 
 
 def validate_profile_contract(profile_file: Path) -> None:
@@ -137,66 +216,116 @@ def validate_profile_contract(profile_file: Path) -> None:
         raise ValueError("profile approval_policy must be never")
 
 
+HARMLSS_ARGS_PATTERN = re.compile(
+    rf"^-NoProfile\s+-Command\s+(?:"
+    rf'"Write-Output\s+\'{re.escape(CHILD_MARKER)}\'\s*;\s*exit\s+0"|'
+    rf"'Write-Output\s+\"{re.escape(CHILD_MARKER)}\"\s*;\s*exit\s+0'"
+    rf")$",
+    re.IGNORECASE,
+)
+
+
 def command_attests_harmless_child(command: object, powershell: str) -> bool:
     if not isinstance(command, str):
         return False
-    rendered = command.strip().replace("/", "\\")
-    expected_shell = re.escape(str(PureWindowsPath(powershell)))
-    if rendered.count(CHILD_MARKER) != 1:
+    stripped = command.strip()
+    if stripped.count(CHILD_MARKER) != 1:
         return False
-    harmless_command = re.compile(
-        rf'^(?:"{expected_shell}"|{expected_shell})\s+'
-        rf'-NoProfile\s+-Command\s+(?:'
-        rf'"Write-Output\s+\'{re.escape(CHILD_MARKER)}\'\s*;\s*exit\s+0"|'
-        rf"'Write-Output\s+\"{re.escape(CHILD_MARKER)}\"\s*;\s*exit\s+0'"
-        rf')$',
-        re.IGNORECASE,
-    )
-    return harmless_command.fullmatch(rendered) is not None
+
+    if stripped.startswith('"'):
+        end_quote = stripped.find('"', 1)
+        if end_quote == -1:
+            return False
+        raw_exe = stripped[1:end_quote]
+        rest = stripped[end_quote + 1:].strip()
+    else:
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            return False
+        raw_exe = parts[0]
+        rest = parts[1].strip()
+
+    normalized_exe = normalize_executable_path(raw_exe)
+    expected_exe = normalize_executable_path(powershell)
+    if PureWindowsPath(normalized_exe) != PureWindowsPath(expected_exe):
+        return False
+
+    return HARMLSS_ARGS_PATTERN.fullmatch(rest) is not None
 
 
 def parse_exec_events(output: str, powershell: str) -> AdmissionEvidence:
     profile_start = False
-    command_count = 0
+    commands_started = 0
+    commands_completed = 0
     admitted = False
     unexpected_completed_items = 0
+    non_json_lines = 0
+
     for line in output.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
         try:
-            event = json.loads(line)
+            event = json.loads(trimmed)
         except json.JSONDecodeError:
+            non_json_lines += 1
             continue
-        if event.get("type") == "thread.started":
+
+        event_type = event.get("type")
+        if event_type == "thread.started":
             profile_start = True
-        if event.get("type") != "item.completed":
             continue
-        item = event.get("item")
-        if not isinstance(item, dict):
-            unexpected_completed_items += 1
+
+        if event_type == "item.started":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "command_execution":
+                commands_started += 1
+                cmd = item.get("command")
+                if not command_attests_harmless_child(cmd, powershell):
+                    unexpected_completed_items += 1
             continue
-        item_type = item.get("type")
-        if item_type in ("agent_message", "reasoning"):
+
+        if event_type == "item.completed":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                unexpected_completed_items += 1
+                continue
+            item_type = item.get("type")
+            if item_type in ("agent_message", "reasoning"):
+                continue
+            if item_type != "command_execution":
+                unexpected_completed_items += 1
+                continue
+
+            commands_completed += 1
+            output_text = str(item.get("aggregated_output") or item.get("output") or "")
+            if (
+                item.get("exit_code") == 0
+                and command_attests_harmless_child(item.get("command"), powershell)
+                and CHILD_MARKER in output_text
+            ):
+                admitted = True
+            else:
+                unexpected_completed_items += 1
             continue
-        if item_type != "command_execution":
-            unexpected_completed_items += 1
+
+        if event_type in ("turn.started", "turn.completed"):
             continue
-        command_count += 1
-        if (
-            item.get("exit_code") == 0
-            and command_attests_harmless_child(item.get("command"), powershell)
-            and CHILD_MARKER in str(item.get("aggregated_output") or "")
-        ):
-            admitted = True
+
+    commands_consistent = commands_started == 0 or commands_started == commands_completed
     child_admitted = (
         profile_start
         and admitted
-        and command_count == 1
+        and commands_completed == 1
+        and commands_consistent
         and unexpected_completed_items == 0
+        and non_json_lines == 0
     )
     return AdmissionEvidence(
         profile_start,
         child_admitted,
-        command_count,
-        unexpected_completed_items,
+        commands_completed,
+        unexpected_completed_items + non_json_lines,
     )
 
 
@@ -270,6 +399,7 @@ def run_preflight(
     timeout: float,
     runner: Runner,
     raw_log: Path | None = None,
+    powershell: str | None = None,
 ) -> PreflightResult:
     try:
         validate_profile_contract(profile_file)
@@ -280,11 +410,11 @@ def run_preflight(
     child_env["PATH"], removed = remove_windowsapps_from_path(
         child_env.get("PATH", "")
     )
-    powershell = resolve_inbox_powershell(child_env)
-    if not powershell:
+    resolved_powershell = resolve_trusted_powershell(child_env, explicit=powershell)
+    if not resolved_powershell:
         return PreflightResult(False, False, False, removed, "SHELL_UNAVAILABLE")
 
-    command = build_command(codex, profile, repo_root, powershell)
+    command = build_command(codex, profile, repo_root, resolved_powershell)
     completed: CommandResult | None = None
     timeout_occurred = False
     os_error_occurred = False
@@ -300,7 +430,7 @@ def run_preflight(
         os_error_occurred = True
         preflight_result = PreflightResult(False, False, False, removed, "PROFILE_START_FAILED")
     else:
-        evidence = parse_exec_events(completed.stdout, powershell)
+        evidence = parse_exec_events(completed.stdout, resolved_powershell)
         child_pass = evidence.child_process_admission and completed.returncode == 0
         if child_pass:
             preflight_result = PreflightResult(evidence.profile_start, True, True, removed, "NONE")
@@ -327,7 +457,7 @@ def run_preflight(
             "profile": profile,
             "codex": codex,
             "repo_root": str(repo_root),
-            "powershell": powershell,
+            "powershell": resolved_powershell,
             "command": list(command),
             "timeout_seconds": timeout,
             "exit_code": completed.returncode if completed else None,
@@ -358,6 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=ALLOWED_PROFILES, default="jerry-auditor")
     parser.add_argument("--codex", help="explicit Codex CLI executable")
+    parser.add_argument("--powershell", help="explicit trusted PowerShell executable path")
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--raw-log", type=Path, help="write raw diagnostic logs as JSON")
@@ -388,6 +519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout=args.timeout,
         runner=SubprocessRunner(),
         raw_log=args.raw_log,
+        powershell=args.powershell,
     )
     result.emit(args.profile)
     return 0 if result.read_only_capability else 1
