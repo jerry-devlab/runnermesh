@@ -617,7 +617,6 @@ fn service_fact_from_scm(
 ///
 /// Handles quoted paths with trailing arguments and unquoted first-token forms.
 /// Empty / unclosed-quote / whitespace-only inputs fail closed (`None`).
-#[cfg(any(windows, test))]
 pub fn service_image_path_token(binary_path_name: &str) -> Option<&str> {
     let trimmed = binary_path_name.trim();
     if trimmed.is_empty() {

@@ -189,12 +189,11 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
         return Err("installed Agent state root is a reparse point".to_owned());
     }
-    let mut authoritative_backend = AuthoritativeMultiRunnerLifecycleBackend::new(
-        PrivilegedScmHelper::new(
+    let mut authoritative_backend =
+        AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
             WindowsScmBackend::mutation_inert(),
             LiveScmExecutionGate::CLOSED,
-        ),
-    );
+        ));
     if let Some(coord) = admission_coord {
         authoritative_backend = authoritative_backend.with_admission_coordinator(coord);
     }
@@ -303,7 +302,9 @@ impl RunningInstalledAgentSandbox {
     /// Reads the current recorded runtime stage if present.
     pub fn stage(&self) -> Option<String> {
         let stage_file = self.state_root.join("runtime-stage.txt");
-        fs::read_to_string(stage_file).ok().map(|s| s.trim().to_string())
+        fs::read_to_string(stage_file)
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     /// Performs graceful shutdown of the background pipe and polling threads.
@@ -330,7 +331,10 @@ impl RunningInstalledAgentSandbox {
         #[cfg(windows)]
         {
             let woken = crate::ipc::wake_listener(&self.endpoint);
-            println!("[sandbox:shutdown] stage=pipe-listener-woken ok={}", woken.is_ok());
+            println!(
+                "[sandbox:shutdown] stage=pipe-listener-woken ok={}",
+                woken.is_ok()
+            );
             let _ = write_runtime_stage(&self.state_root, "pipe-listener-woken");
         }
 
@@ -357,18 +361,27 @@ impl RunningInstalledAgentSandbox {
 
         if let Some(handle) = self.pipe_thread.take() {
             let _ = handle.join();
-            println!("[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}", start.elapsed().as_millis());
+            println!(
+                "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
+                start.elapsed().as_millis()
+            );
             let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
         }
 
         let poll_start = std::time::Instant::now();
         if let Some(handle) = self.poll_thread.take() {
             let _ = handle.join();
-            println!("[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}", poll_start.elapsed().as_millis());
+            println!(
+                "[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}",
+                poll_start.elapsed().as_millis()
+            );
             let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
         }
 
-        println!("[sandbox:shutdown] stage=shutdown-complete total_elapsed_ms={}", start.elapsed().as_millis());
+        println!(
+            "[sandbox:shutdown] stage=shutdown-complete total_elapsed_ms={}",
+            start.elapsed().as_millis()
+        );
         let _ = write_runtime_stage(&self.state_root, "shutdown-complete");
     }
 }

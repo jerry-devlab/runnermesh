@@ -20,10 +20,10 @@ use runnermesh::{
     runner_service_image_token, AgentCommand, DiscoveredLifecycle, DiscoveredRunner,
     DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
     DiscoveryDisposition, DiscoveryReport, IpcClient, IpcEndpoint, IpcRequest, MockScmBackend,
-    MockServiceRecord, OpaqueIdentityReference, PerRunnerObservation, PrivilegedScmHelper,
-    RegistrationScope, RegistryError, RunnerBackendKind, SandboxMultiRunnerLifecycleBackend,
-    ServiceObservation, SyntheticScmTestGrant, UserMode, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
-    MultiRunnerLifecycleBackend,
+    MockServiceRecord, MultiRunnerLifecycleBackend, OpaqueIdentityReference, PerRunnerObservation,
+    PrivilegedScmHelper, RegistrationScope, RegistryError, RunnerBackendKind,
+    SandboxMultiRunnerLifecycleBackend, ServiceObservation, SyntheticScmTestGrant, UserMode,
+    WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 use runnermesh::{
     LiveScmExecutionGate, OwnerAuthorizationScope, ScmApiError, ScmControlBackend,
@@ -908,10 +908,7 @@ fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
     );
     authoritative_backend.register_runner_target("c5-runner", scope.clone(), 901);
 
-    let ipc_endpoint = IpcEndpoint::for_test_scope(format!(
-        "c5-test-{}",
-        std::process::id()
-    ));
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("c5-test-{}", std::process::id()));
 
     let home = temp_dir.join("runner-home");
     std::fs::create_dir_all(&home).unwrap();
@@ -1032,7 +1029,10 @@ fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
     runtime.shutdown();
     let shutdown_elapsed = shutdown_start.elapsed();
     println!("[c5_lifecycle] Phase 9 complete: runtime shut down in {shutdown_elapsed:?}");
-    assert!(shutdown_elapsed < Duration::from_secs(3), "shutdown took too long: {shutdown_elapsed:?}");
+    assert!(
+        shutdown_elapsed < Duration::from_secs(3),
+        "shutdown took too long: {shutdown_elapsed:?}"
+    );
 
     // 10. Clean uninstall
     println!("[c5_lifecycle] Phase 10: Clean uninstall");
@@ -1065,10 +1065,8 @@ fn setup_test_sandbox_runtime(
     let install_root = temp_dir.join("installed");
     std::fs::create_dir_all(&install_root).unwrap();
 
-    let ipc_endpoint = IpcEndpoint::for_test_scope(format!(
-        "c5-{test_name}-{}",
-        std::process::id()
-    ));
+    let ipc_endpoint =
+        IpcEndpoint::for_test_scope(format!("c5-{test_name}-{}", std::process::id()));
 
     let sandbox_config = InstalledAgentSandboxConfig {
         install_root,
@@ -1095,7 +1093,10 @@ fn regression_c5_shutdown_without_client_unblocks_cleanly() {
     runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_shutdown_without_client] shutdown completed in {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "shutdown took too long: {elapsed:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     println!("[test:c5_shutdown_without_client] PASS");
@@ -1116,7 +1117,10 @@ fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
     runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_exit_after_drain] shutdown completed in {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "shutdown took too long: {elapsed:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     println!("[test:c5_exit_after_drain] PASS");
@@ -1166,7 +1170,10 @@ fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
     runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_connection_failure] shutdown completed in {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "shutdown took too long: {elapsed:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     println!("[test:c5_connection_failure] PASS");
@@ -1198,7 +1205,10 @@ fn regression_c5_shutdown_race_under_concurrent_ipc_unblocks_cleanly() {
     runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_shutdown_race] shutdown completed in {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "shutdown took too long: {elapsed:?}"
+    );
 
     stop_worker.store(true, std::sync::atomic::Ordering::Release);
     let _ = worker.join();

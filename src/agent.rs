@@ -24,8 +24,7 @@ use crate::{
     PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ProbeId, ProbeRuntimeState,
     ProbeSnapshot, ReasonCode, RegistryBackendBinding, RegistryError, RegistryStore, RunnerPhase,
     RunnerPresentationStatus, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
-    ScmControlBackend, SystemPreferences,
-    UiPreferences, UserMode, ZenOverride,
+    ScmControlBackend, SystemPreferences, UiPreferences, UserMode, ZenOverride,
 };
 
 /// The currently supported persisted Agent configuration schema.
@@ -292,7 +291,8 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
         _local_runner_key: &str,
         _scope: crate::RegistrationScope,
         _runner_id: u64,
-    ) {}
+    ) {
+    }
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -452,20 +452,32 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
             return Err("session.entrypoint-missing".to_owned());
         }
         if !record.work_root.exists()
-            && !record.work_root.parent().map(|p| p.is_dir()).unwrap_or(false)
+            && !record
+                .work_root
+                .parent()
+                .map(|p| p.is_dir())
+                .unwrap_or(false)
         {
             return Err("session.work-root-not-owned".to_owned());
         }
         match action {
             crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => Ok(true),
             crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener => {
-                let supervisor = crate::WindowsUserSessionSupervisorAdapter::for_runner_home(
-                    &record.runner_home,
-                );
-                if supervisor.readiness() != crate::WindowsSupervisorReadiness::Ready {
-                    return Err("session.readiness-check-failed".to_owned());
+                #[cfg(windows)]
+                {
+                    let supervisor = crate::WindowsUserSessionSupervisorAdapter::for_runner_home(
+                        &record.runner_home,
+                    );
+                    if supervisor.readiness() != crate::WindowsSupervisorReadiness::Ready {
+                        return Err("session.readiness-check-failed".to_owned());
+                    }
+                    Ok(true)
                 }
-                Ok(true)
+                #[cfg(not(windows))]
+                {
+                    let _ = record;
+                    Ok(true)
+                }
             }
             crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => Ok(true),
         }
@@ -1264,8 +1276,12 @@ where
                         self.runner_registry = registry_before;
                         return Err(error);
                     }
-                    if let AgentCommand::RunnersEnroll { local_runner_key, .. } = &command {
-                        if let Some(record) = self.runner_registry.registry().get(local_runner_key) {
+                    if let AgentCommand::RunnersEnroll {
+                        local_runner_key, ..
+                    } = &command
+                    {
+                        if let Some(record) = self.runner_registry.registry().get(local_runner_key)
+                        {
                             if let Some(backend) = &self.multi_runner_backend {
                                 backend.register_runner_target(
                                     &record.local_runner_key,
@@ -3287,6 +3303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn regression_c3_v01_binding_migration_is_idempotent_and_persisted() {
         let root = std::env::temp_dir().join(format!("test-mig-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -3390,9 +3407,8 @@ mod tests {
             repository: "c2-repo".to_string(),
         };
 
-        let admission_coord = Arc::new(
-            InProcessAdmissionCoordinator::new().with_selector(scope.clone(), 555, true),
-        );
+        let admission_coord =
+            Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope.clone(), 555, true));
         let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
         let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper)
             .with_admission_coordinator(admission_coord.clone());
@@ -3454,7 +3470,8 @@ mod tests {
             managed_admission: false,
         };
 
-        let helper = PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
+        let helper =
+            PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
         let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
 
         // Valid session dispatch for graceful stop and launch
@@ -3651,7 +3668,8 @@ mod tests {
         assert_eq!(enable_report.records[1].item_applied, Some(true));
 
         // 3. Status reflects attached observation
-        let helper = PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
+        let helper =
+            PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
         let sandbox_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper));
         sandbox_backend.set_observations(vec![
             PerRunnerObservation {
@@ -3685,8 +3703,16 @@ mod tests {
         else {
             panic!("expected runners response");
         };
-        let r1 = status_report.records.iter().find(|r| r.local_runner_key == "r1").unwrap();
-        let r2 = status_report.records.iter().find(|r| r.local_runner_key == "r2").unwrap();
+        let r1 = status_report
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "r1")
+            .unwrap();
+        let r2 = status_report
+            .records
+            .iter()
+            .find(|r| r.local_runner_key == "r2")
+            .unwrap();
         assert_eq!(r1.presentation_status, RunnerPresentationStatus::Busy);
         assert_eq!(r2.presentation_status, RunnerPresentationStatus::Stopped);
 
