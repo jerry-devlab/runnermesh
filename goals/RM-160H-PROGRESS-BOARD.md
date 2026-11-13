@@ -6,10 +6,10 @@ GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-PACKAGE_BUILD_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad
-CODE_ANCHOR=c43dfd34208a0db8d641d40dc780a498f3ce56ad
-PR_HEAD=c43dfd34208a0db8d641d40dc780a498f3ce56ad
-PR_CI=PENDING_PUSH
+PACKAGE_BUILD_COMMIT=c43dfd39c7f8db58c18f73f41c5f80956e3607f
+CODE_ANCHOR=c43dfd39c7f8db58c18f73f41c5f80956e3607f
+PR_HEAD=f2169014b0591ae92086603e0a953c43f4fddc1a
+PR_CI=43471398821 (PASS_ALL 6/6 jobs)
 SOURCE_AND_SANDBOX_CLOSEOUT=PASS
 LIVE_DELIVERY=WAITING_FOR_OWNER
 ```
@@ -45,7 +45,7 @@ never counts as PASS.
 |---|---:|---|---:|---|
 | **R0** Packet polish | 4h | `PASS` | **100%** | Complete |
 | **R1** HUX-1 readonly | 4h | `PARTIAL` | **50%** | Local `EMPTY_OK`; **ZenBookDuo=`PENDING_NOT_RUN`** |
-| **R2** Independent security review | 8h | `BLOCKED` | **0%** | Admitted independent process (Codex `jerry-auditor`) review completed on candidate `d0e75e1`; preflight PASS; `DISPOSITION=BLOCKED` (5 findings: selector advertisement check, SCM observation real service name, multi-runner admission coordinator isolation, preflight NoProfile enforcement, durable SCM ledger replay protection); `BLOCKER_LATCHED=true`; Track 1 G15R pending Owner |
+| **R2** Independent security review | 8h | `BLOCKED` | **0%** | Admitted independent process (Codex `jerry-auditor`) review completed on candidate `c43dfd3`; preflight PASS; `DISPOSITION=BLOCKED` (Findings: SCM observation Running/Worker busy mapping, cross-process replay ledger locking, registry duplicate validation on load); `BLOCKER_LATCHED=true`; Track 1 G15R pending Owner |
 | **R3** H2 v0.1 (G15R only) | 6h+24h | `WAITING` | **0%** | Needs R2(G15R) + Owner token |
 | **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
 | **R5** G-ADR006 | 4h | `BRIEF_READY` | **30%** | Brief published (`goals/RM-160H-R5-ADR006-OWNER-BRIEF.md`); awaits Owner decision |

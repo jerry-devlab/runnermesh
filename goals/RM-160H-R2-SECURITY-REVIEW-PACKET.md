@@ -22,7 +22,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad`<br>`PR_65_CANDIDATE_HEAD=c43dfd34208a0db8d641d40dc780a498f3ce56ad`<br>`PR_HEAD=c43dfd34208a0db8d641d40dc780a498f3ce56ad` | PENDING_PUSH | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=c43dfd39c7f8db58c18f73f41c5f80956e3607f`<br>`PR_65_CANDIDATE_HEAD=c43dfd39c7f8db58c18f73f41c5f80956e3607f`<br>`PR_HEAD=f2169014b0591ae92086603e0a953c43f4fddc1a` | Run 43471398821 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -38,7 +38,7 @@ CANDIDATE_HELPER=runnermesh-package.exe
 CANDIDATE_HELPER_SHA256=171d36ccfe5eb41681fecbdb8d251c2cbb83ffcdc677b228e0250ff665b0bcab
 CANDIDATE_HELPER_BYTES=1758720
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad
+PROVENANCE_COMMIT=c43dfd39c7f8db58c18f73f41c5f80956e3607f
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
@@ -246,6 +246,34 @@ DISPOSITION=BLOCKED
 INDEPENDENT_ACCEPTANCE_PASS=false
 BLOCKER_STATUS=BLOCKER_LATCHED=true
 SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-3
+GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker Policy v2. No production mutation, no merge, no release without resolving findings.
+```
+
+### Formal Review Record (Admitted Independent AI Process — Candidate c43dfd3)
+
+```text
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
+REVIEW_DATE=2026-11-13
+TARGET_TRACK=TRACK_2_HUX2_PR65
+STATUS=BLOCKED
+BOUND_COMMIT_SHA=c43dfd39c7f8db58c18f73f41c5f80956e3607f
+EXACT_REVIEWED_HEAD=c43dfd39c7f8db58c18f73f41c5f80956e3607f
+CHECKED_OUT_HEAD=f2169014b0591ae92086603e0a953c43f4fddc1a
+PR_REFERENCE=PR #65 (Candidate: c43dfd39c7f8db58c18f73f41c5f80956e3607f, PR HEAD: f2169014b0591ae92086603e0a953c43f4fddc1a)
+HOSTED_CI_RUN=43471398821 (PASS_ALL 6/6 jobs green)
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, Preflight Tooling, IPC Shutdown
+AUDITOR_MECHANISM=INDEPENDENT_OS_PROCESS_CODEX (profile: jerry-auditor, sandbox_mode: read-only, approval_policy: never)
+AUDITOR_PREFLIGHT=PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, STOP_REASON=NONE)
+PREFLIGHT_DIAGNOSTIC_JSON_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-c43dfd3.json
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-c43dfd3-CODEX.md
+HISTORICAL_ARCHIVES:
+  - d0e75e1 Audit Report: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-d0e75e1-CODEX.md
+  - 17e3529 Review Aborted Record: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-17e3529-ABORTED.md
+FINDINGS_SUMMARY=Formal R2 review executed by admitted independent AI process (Codex jerry-auditor) on candidate commit c43dfd3. Read-only review confirmed zero production mutation and verified installed runtime SCM mutation sealed with mutation_inert() and LiveScmExecutionGate::CLOSED at agent_runtime.rs:194. Auditor identified: (1) Blocking safety: Real SCM observation maps SERVICE_RUNNING to Listening and never observes Runner.Worker.exe; Agent stop guard and helper reject stopping only on Busy state (windows_scm_executor.rs:2537-2625, agent.rs:1022-1038); (2) High live-path: Durable authorization replay protection uses per-process mutexes and atomic file replacement without cross-process locking/CAS (windows_scm_executor.rs:292-377); (3) Medium persistence: Registry load validation checks record shape and unique local keys but does not check duplicate work roots, runner identities, or service bindings on load (runner_registry.rs:143-153, 538-590).
+DISPOSITION=BLOCKED
+INDEPENDENT_ACCEPTANCE_PASS=false
+BLOCKER_STATUS=BLOCKER_LATCHED=true
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-4
 GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker Policy v2. No production mutation, no merge, no release without resolving findings.
 ```
 

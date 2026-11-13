@@ -19,12 +19,12 @@ PROGRAM_COMPOSITE_PCT≈80
 WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=65
-CODE_ANCHOR=c43dfd34208a0db8d641d40dc780a498f3ce56ad
-PACKAGE_BUILD_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad
-PR_HEAD=c43dfd34208a0db8d641d40dc780a498f3ce56ad
-PR_CI=PENDING_PUSH
-PREDECESSOR_DOCS_PR_HEAD=50f6b613149ba5e1d71cb9431bf1c65d6fe6e0c6
-PREDECESSOR_DOCS_PR_CI=43463580773
+CODE_ANCHOR=c43dfd39c7f8db58c18f73f41c5f80956e3607f
+PACKAGE_BUILD_COMMIT=c43dfd39c7f8db58c18f73f41c5f80956e3607f
+PR_HEAD=f2169014b0591ae92086603e0a953c43f4fddc1a
+PR_CI=43471398821 (PASS_ALL 6/6 jobs)
+PREDECESSOR_DOCS_PR_HEAD=ceefca0ab8d76874da31d3ddb0b417d655e2ba8b
+PREDECESSOR_DOCS_PR_CI=43365050713 (PASS_ALL 6/6 jobs)
 PRODUCTION_MUTATION=false
 IMPLEMENTER=AGY
 ```
@@ -41,7 +41,7 @@ CANDIDATE_HELPER=runnermesh-package.exe
 CANDIDATE_HELPER_SHA256=171d36ccfe5eb41681fecbdb8d251c2cbb83ffcdc677b228e0250ff665b0bcab
 CANDIDATE_HELPER_BYTES=1758720
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad
+PROVENANCE_COMMIT=c43dfd39c7f8db58c18f73f41c5f80956e3607f
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
@@ -104,25 +104,24 @@ Status: R2_LRM=BLOCKED · R2_G15R=PENDING · BLOCKER_LATCHED=true
 ### Admitted Independent Process Record (Codex jerry-auditor):
 - PREFLIGHT_COMMAND: tools/dev/auditor_preflight.py --profile jerry-auditor --timeout 60.0
 - PREFLIGHT_STATUS: PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, AUDITOR_READ_ONLY_CAPABILITY_PASS=true, STOP_REASON=NONE)
-- PREFLIGHT_DIAGNOSTIC_JSON=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-d0e75e1.json
-- EXACT_REVIEWED_HEAD: d0e75e1470b4a24d8cd4deba61b11e9e18ecca21 (PR #65, CI Run 43361527538: 6/6 green)
+- PREFLIGHT_DIAGNOSTIC_JSON=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-c43dfd3.json
+- EXACT_REVIEWED_HEAD: c43dfd39c7f8db58c18f73f41c5f80956e3607f (Checked-out HEAD: f2169014b0591ae92086603e0a953c43f4fddc1a, PR #65, CI Run 43471398821: 6/6 green)
 - FORMAL_REVIEW_COMMAND: codex exec --profile jerry-auditor --sandbox read-only --ask-for-approval never
-- FORMAL_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-d0e75e1-CODEX.md
+- FORMAL_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-c43dfd3-CODEX.md
 - HISTORICAL_ARCHIVES:
-  - 17e3529 Review Aborted Record: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-17e3529-ABORTED.md (Root cause: powershell pipe EOF stall on redirected stdin)
+  - d0e75e1 Audit Report: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-d0e75e1-CODEX.md
+  - 17e3529 Review Aborted Record: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-17e3529-ABORTED.md
   - 2703a1e Audit Report: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-2703a1e-CODEX.md
 - EVALUATION_SUMMARY:
-  - Reviewed candidate commit d0e75e1470b4a24d8cd4deba61b11e9e18ecca21 in repository worktree.
-  - Review executed in read-only sandbox mode; no files mutated; untracked files preserved.
+  - Reviewed candidate commit c43dfd39c7f8db58c18f73f41c5f80956e3607f in repository worktree.
+  - Review executed in read-only sandbox mode; no files, git refs, or production state mutated.
   - Installed runtime SCM mutation sealed with mutation_inert() and LiveScmExecutionGate::CLOSED at src/agent_runtime.rs:194.
-  - Local diff check: PASS; CI Gate: PASS (GitHub run 43361527538).
+  - CI Gate: PASS (GitHub run 43471398821: 6/6 green); Local tests: PASS (386/386 cargo tests).
   - Material findings identified by independent auditor:
-    1. High: Selector-advertisement failures ignored before start (runner_reconcile.rs:366, agent.rs:904, 933).
-    2. High: SCM observation uses opaque discovery key instead of real service name (agent.rs:691).
-    3. High: Single admission coordinator used across multi-runner backend (agent_runtime.rs:151, agent.rs:512, 704).
-    4. High: -NoProfile became optional in preflight regex (auditor_preflight.py:219).
-    5. Pre-live: Process-local replay protection in SCM executor (windows_scm_executor.rs:227, 2974).
-- DISPOSITION_LRM: BLOCKED (STOP_REASON=AUDIT_ADMISSION_FAILED)
+    1. Blocking safety: Real SCM observation maps SERVICE_RUNNING to Listening and never observes Runner.Worker.exe; Agent stop guard and helper reject stopping only on Busy state (windows_scm_executor.rs:2537-2625, agent.rs:1022-1038).
+    2. High live-path: Durable authorization replay protection uses per-process mutexes and atomic file replacement without cross-process locking/CAS (windows_scm_executor.rs:292-377).
+    3. Medium persistence: Registry load validation checks record shape and unique local keys but does not check duplicate work roots, runner identities, or service bindings on load (runner_registry.rs:143-153, 538-590).
+- DISPOSITION_LRM: BLOCKED
 - INDEPENDENT_ACCEPTANCE_PASS=false
 - BLOCKER_STATUS: BLOCKER_LATCHED=true
 - DISPOSITION_G15R: PENDING (Track 1 awaiting separate Owner authorization & audit on G15R_RC)
