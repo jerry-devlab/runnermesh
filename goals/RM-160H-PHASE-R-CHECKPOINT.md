@@ -112,7 +112,7 @@ Status: R2_LRM=BLOCKED · R2_G15R=PENDING · BLOCKER_LATCHED=true
   - 17e3529 Review Aborted Record: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-17e3529-ABORTED.md (Root cause: powershell pipe EOF stall on redirected stdin)
   - 2703a1e Audit Report: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-2703a1e-CODEX.md
 - EVALUATION_SUMMARY:
-  - Reviewed candidate commit d0e75e1470b4a24d8cd4deba61b11e9e18ecca21 in C:\Dev\src\runnermesh-160h.
+  - Reviewed candidate commit d0e75e1470b4a24d8cd4deba61b11e9e18ecca21 in repository worktree.
   - Review executed in read-only sandbox mode; no files mutated; untracked files preserved.
   - Installed runtime SCM mutation sealed with mutation_inert() and LiveScmExecutionGate::CLOSED at src/agent_runtime.rs:194.
   - Local diff check: PASS; CI Gate: PASS (GitHub run 43361527538).
