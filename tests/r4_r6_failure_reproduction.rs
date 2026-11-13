@@ -834,6 +834,7 @@ fn regression_r6_falsifiability_proves_disabled_scheduler_produces_zero_actions(
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
     let temp_dir = std::env::temp_dir().join(format!(
         "runnermesh-c5-pkg-{}",
@@ -1082,6 +1083,7 @@ fn setup_test_sandbox_runtime(
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c5_shutdown_without_client_unblocks_cleanly() {
     println!("[test:c5_shutdown_without_client] START");
     let (temp_dir, runtime, _endpoint) = setup_test_sandbox_runtime("no-client");
@@ -1103,6 +1105,7 @@ fn regression_c5_shutdown_without_client_unblocks_cleanly() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
     println!("[test:c5_exit_after_drain] START");
     let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("exit-drain");
@@ -1127,6 +1130,7 @@ fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
     println!("[test:c5_connection_failure] START");
     let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("conn-fail");
@@ -1180,6 +1184,7 @@ fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c5_shutdown_race_under_concurrent_ipc_unblocks_cleanly() {
     println!("[test:c5_shutdown_race] START");
     let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("race");
