@@ -22,7 +22,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb`<br>`PR_65_CANDIDATE_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb`<br>`PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb` | Run 43161254344 (6/6 green) | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=fced794c5b1754086dcb21fc85e4edcefb47ee33`<br>`PR_65_CANDIDATE_HEAD=fced794c5b1754086dcb21fc85e4edcefb47ee33`<br>`PR_HEAD=fced794c5b1754086dcb21fc85e4edcefb47ee33` | PENDING_PUSH | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -32,20 +32,20 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=36e5446dfe51dc2e901161759ab0e0dbb76d924ba624669054675da5371ee004
-CANDIDATE_ZIP_BYTES=1183040
+CANDIDATE_ZIP_SHA256=3f544b8e8ebf5f29260b365521fbd5ff4dad9d7a89d0ae8f882f098624c2e02e
+CANDIDATE_ZIP_BYTES=1204897
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=beb158033ef37e7615d5c0d486e88ed236f007460bba8211844ef7b5c13a31b2
+CANDIDATE_HELPER_SHA256=c21a030ce3d8ddd4c7179fb2f3ee63629e12479626972abde798efb8cf595f5c
 CANDIDATE_HELPER_BYTES=1758720
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PROVENANCE_COMMIT=fced794c5b1754086dcb21fc85e4edcefb47ee33
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
 INDEPENDENT_HASH_CHECK=PASS
 EXTRACT_TEST=PASS
 INSTALL_TEST=PASS
-SANDBOX_LIFECYCLE_TESTS=PASS (335/335 cargo tests)
+SANDBOX_LIFECYCLE_TESTS=PASS (386/386 cargo tests)
 ```
 
 ## 2. Risk & Architecture Map
