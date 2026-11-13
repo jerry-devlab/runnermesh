@@ -655,6 +655,9 @@ pub struct RunnerTargetRegistration {
     pub service_name: Option<String>,
 }
 
+type RunnerAdmissionMap =
+    BTreeMap<(crate::RegistrationScope, u64), Arc<dyn MultiRunnerAdmissionCoordinator>>;
+
 /// Authoritative multi-runner lifecycle backend for installed production runtime.
 ///
 /// Obtains fresh observations from the Windows SCM and runner processes for each enrolled runner key,
@@ -663,9 +666,7 @@ pub struct RunnerTargetRegistration {
 pub struct AuthoritativeMultiRunnerLifecycleBackend<B> {
     helper: PrivilegedScmHelper<B>,
     admission: Option<Arc<dyn MultiRunnerAdmissionCoordinator>>,
-    admission_coordinators: Arc<
-        Mutex<BTreeMap<(crate::RegistrationScope, u64), Arc<dyn MultiRunnerAdmissionCoordinator>>>,
-    >,
+    admission_coordinators: Arc<Mutex<RunnerAdmissionMap>>,
     session: Option<Arc<dyn MultiRunnerSessionCoordinator>>,
     runner_targets: Arc<Mutex<BTreeMap<String, RunnerTargetRegistration>>>,
 }
