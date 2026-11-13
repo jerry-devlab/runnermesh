@@ -22,7 +22,7 @@ This packet provides exact-scope risk and diff maps for external security audito
 | Track | Target | Exact Bound HEAD | Hosted CI Reference | Scope / Purpose |
 |---|---|---|---|---|
 | **Track 1: v0.1 C0 Baseline** | `H2 Cutover & Dogfood` | `G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab` | Run 42452639359 (6/6 green) | Immutable single-workstation release candidate (BOM repair, versioned install, autostart) |
-| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=fced794c5b1754086dcb21fc85e4edcefb47ee33`<br>`PR_65_CANDIDATE_HEAD=fced794c5b1754086dcb21fc85e4edcefb47ee33`<br>`PR_HEAD=fced794c5b1754086dcb21fc85e4edcefb47ee33` | PENDING_PUSH | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
+| **Track 2: v0.2-A LRM** | `HUX-2 / HUX-3 Gate Readiness` | `PACKAGE_BUILD_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad`<br>`PR_65_CANDIDATE_HEAD=c43dfd34208a0db8d641d40dc780a498f3ce56ad`<br>`PR_HEAD=c43dfd34208a0db8d641d40dc780a498f3ce56ad` | PENDING_PUSH | Local multi-runner manager, Win32 SCM synthetic gate, FakeGithub admission matrix, read-only resource probe, sandbox package installer |
 
 Crossing tracks is forbidden: `H2` must only cut over on `G15R_RC`, never on PR #65 candidate tip.
 
@@ -32,13 +32,13 @@ External reviewers can verify the immutable sandbox package binaries built from 
 
 ```text
 CANDIDATE_ZIP=runnermesh-0.1.0-windows-x64.zip
-CANDIDATE_ZIP_SHA256=3f544b8e8ebf5f29260b365521fbd5ff4dad9d7a89d0ae8f882f098624c2e02e
-CANDIDATE_ZIP_BYTES=1204897
+CANDIDATE_ZIP_SHA256=1576ddec23044f49c7b55fe7e8eb9f47c4aebad3e2c9b702d42e2efd2c1cbd00
+CANDIDATE_ZIP_BYTES=1204901
 CANDIDATE_HELPER=runnermesh-package.exe
-CANDIDATE_HELPER_SHA256=c21a030ce3d8ddd4c7179fb2f3ee63629e12479626972abde798efb8cf595f5c
+CANDIDATE_HELPER_SHA256=171d36ccfe5eb41681fecbdb8d251c2cbb83ffcdc677b228e0250ff665b0bcab
 CANDIDATE_HELPER_BYTES=1758720
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=fced794c5b1754086dcb21fc85e4edcefb47ee33
+PROVENANCE_COMMIT=c43dfd34208a0db8d641d40dc780a498f3ce56ad
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
