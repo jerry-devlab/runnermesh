@@ -19,10 +19,10 @@ PROGRAM_COMPOSITE_PCT≈80
 WORKTREE_LABEL=runnermesh-160h
 BRANCH=feat/160h-gt01-field-baseline
 CANDIDATE_PR=65
-CODE_ANCHOR=2703a1e57bd3ced0c350ba8266c11ad08851abdb
-PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
-PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
-PR_CI=43161254344 (PASS_ALL 6/6 jobs)
+CODE_ANCHOR=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+PACKAGE_BUILD_COMMIT=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+PR_HEAD=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+PR_CI=43361527538 (PASS_ALL 6/6 jobs)
 PREDECESSOR_DOCS_PR_HEAD=b78cb49f33cf2df6128fbfe32f6b864a7da21e64
 PREDECESSOR_DOCS_PR_CI=43142693463 (PASS_ALL 6/6 jobs)
 PRODUCTION_MUTATION=false
@@ -41,14 +41,14 @@ CANDIDATE_HELPER=runnermesh-package.exe
 CANDIDATE_HELPER_SHA256=beb158033ef37e7615d5c0d486e88ed236f007460bba8211844ef7b5c13a31b2
 CANDIDATE_HELPER_BYTES=1758720
 PROVENANCE_VERSION=0.1.0
-PROVENANCE_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PROVENANCE_COMMIT=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
 PROVENANCE_CHANNEL=rc
 PROVENANCE_TARGET=x86_64-pc-windows-msvc
 PACKAGE_VERIFY=PASS
 INDEPENDENT_HASH_CHECK=PASS
 EXTRACT_TEST=PASS
 INSTALL_TEST=PASS
-SANDBOX_LIFECYCLE_TESTS=PASS (335/335 cargo tests)
+SANDBOX_LIFECYCLE_TESTS=PASS (381/381 cargo tests)
 ```
 
 ## R1 Observation Evidence
@@ -104,18 +104,26 @@ Status: R2_LRM=BLOCKED · R2_G15R=PENDING · BLOCKER_LATCHED=true
 ### Admitted Independent Process Record (Codex jerry-auditor):
 - PREFLIGHT_COMMAND: tools/dev/auditor_preflight.py --profile jerry-auditor --timeout 60.0
 - PREFLIGHT_STATUS: PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, AUDITOR_READ_ONLY_CAPABILITY_PASS=true, STOP_REASON=NONE)
-- PREFLIGHT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-PROCESS-PREFLIGHT-0c266ec.txt
-- PREFLIGHT_DIAGNOSTIC_JSON=<audit-dir>/2026-11-11/R4-R6-R2/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-0c266ec.json
-- EXACT_REVIEWED_HEAD: 2703a1e57bd3ced0c350ba8266c11ad08851abdb (PR #65, CI Run 43161254344: 6/6 green)
+- PREFLIGHT_DIAGNOSTIC_JSON=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-d0e75e1.json
+- EXACT_REVIEWED_HEAD: d0e75e1470b4a24d8cd4deba61b11e9e18ecca21 (PR #65, CI Run 43361527538: 6/6 green)
 - FORMAL_REVIEW_COMMAND: codex exec --profile jerry-auditor --sandbox read-only --ask-for-approval never
-- FORMAL_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-2703a1e-CODEX.md
-- FORMAL_RAW_EXECUTION_ARCHIVE=<audit-dir>/2026-11-11/R4-R6-R2/R2-CODEX-AUDIT-RAW-2703a1e.json
+- FORMAL_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-d0e75e1-CODEX.md
+- HISTORICAL_ARCHIVES:
+  - 17e3529 Review Aborted Record: <audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-17e3529-ABORTED.md (Root cause: powershell pipe EOF stall on redirected stdin)
+  - 2703a1e Audit Report: <audit-dir>/2026-11-11/R4-R6-R2/R2-INDEPENDENT-AUDIT-REPORT-2703a1e-CODEX.md
 - EVALUATION_SUMMARY:
-  - Surface A remediation (HMAC-SHA256 RFC 4231 & dispatch scope retention with zero writes) verified by diagnostic review as addressed in src/windows_scm_executor.rs.
-  - Production assembly verified inert via WindowsScmBackend::mutation_inert().
-  - Independent acceptance unproven due to environment admission failure (conda/Python unavailable in subshell, TLS UnknownIssuer on child process admission attempt).
+  - Reviewed candidate commit d0e75e1470b4a24d8cd4deba61b11e9e18ecca21 in C:\Dev\src\runnermesh-160h.
+  - Review executed in read-only sandbox mode; no files mutated; untracked files preserved.
+  - Installed runtime SCM mutation sealed with mutation_inert() and LiveScmExecutionGate::CLOSED at src/agent_runtime.rs:194.
+  - Local diff check: PASS; CI Gate: PASS (GitHub run 43361527538).
+  - Material findings identified by independent auditor:
+    1. High: Selector-advertisement failures ignored before start (runner_reconcile.rs:366, agent.rs:904, 933).
+    2. High: SCM observation uses opaque discovery key instead of real service name (agent.rs:691).
+    3. High: Single admission coordinator used across multi-runner backend (agent_runtime.rs:151, agent.rs:512, 704).
+    4. High: -NoProfile became optional in preflight regex (auditor_preflight.py:219).
+    5. Pre-live: Process-local replay protection in SCM executor (windows_scm_executor.rs:227, 2974).
 - DISPOSITION_LRM: BLOCKED (STOP_REASON=AUDIT_ADMISSION_FAILED)
-- INDEPENDENT_ACCEPTANCE_PENDING=true
+- INDEPENDENT_ACCEPTANCE_PASS=false
 - BLOCKER_STATUS: BLOCKER_LATCHED=true
 - DISPOSITION_G15R: PENDING (Track 1 awaiting separate Owner authorization & audit on G15R_RC)
 ```

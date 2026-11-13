@@ -224,6 +224,31 @@ SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-2
 GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker Policy v2. No production mutation, no merge, no release.
 ```
 
+### Formal Review Record (Admitted Independent AI Process — Candidate d0e75e1)
+
+```text
+REVIEWER_CLASS=OWNER_INDEPENDENT_AUDITOR
+REVIEW_DATE=2026-11-13
+TARGET_TRACK=TRACK_2_HUX2_PR65
+STATUS=BLOCKED
+BOUND_COMMIT_SHA=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+EXACT_REVIEWED_HEAD=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+PR_REFERENCE=PR #65 (Candidate: d0e75e1470b4a24d8cd4deba61b11e9e18ecca21, PR HEAD: d0e75e1470b4a24d8cd4deba61b11e9e18ecca21)
+HOSTED_CI_RUN=43361527538 (PASS_ALL 6/6 jobs green)
+SOURCE_SURFACES_REVIEWED=Surface A, Surface B, Surface C, Surface D, Preflight Tooling, IPC Shutdown
+AUDITOR_MECHANISM=INDEPENDENT_OS_PROCESS_CODEX (profile: jerry-auditor, sandbox_mode: read-only, approval_policy: never)
+AUDITOR_PREFLIGHT=PASS (PROFILE_START_PASS=true, CHILD_PROCESS_ADMISSION_PASS=true, STOP_REASON=NONE)
+PREFLIGHT_DIAGNOSTIC_JSON_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-AUDITOR-PREFLIGHT-DIAGNOSTIC-d0e75e1.json
+RAW_AUDIT_REPORT_ARCHIVE=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-d0e75e1-CODEX.md
+HISTORICAL_INTERRUPTED_REVIEW=<audit-dir>/2026-11-12/160H-FINAL-CLOSEOUT-2703a1e/evidence/R2-INDEPENDENT-AUDIT-REPORT-17e3529-ABORTED.md
+FINDINGS_SUMMARY=Formal R2 review executed by admitted independent AI process (Codex jerry-auditor) on exact settled candidate HEAD d0e75e1. Read-only review confirmed zero production mutation and verified installed runtime SCM mutation sealed with mutation_inert() and LiveScmExecutionGate::CLOSED at agent_runtime.rs:194. Auditor identified 5 material source findings to resolve before live authorization: (1) selector-advertisement failures ignored before starting runner (runner_reconcile.rs:366, agent.rs:904, 933); (2) SCM observation passes opaque discovery key instead of real service name to query_exact (agent.rs:691); (3) single admission coordinator used for multi-runner backend (agent_runtime.rs:151, agent.rs:512, 704); (4) preflight regex allowed optional -NoProfile (auditor_preflight.py:219); (5) SCM authorization ledger replay protection is process-local in-memory rather than durable in SCM journal (windows_scm_executor.rs:227, 2974).
+DISPOSITION=BLOCKED
+INDEPENDENT_ACCEPTANCE_PASS=false
+BLOCKER_STATUS=BLOCKER_LATCHED=true
+SIGNATURE_IDENTIFIER=ISO-8601-AUDITOR-SEC-RM160H-R2-CODEX-3
+GOVERNANCE_RULE=BLOCKER_LATCHED=true is recorded under QUALITY_GATES.md Blocker Policy v2. No production mutation, no merge, no release without resolving findings.
+```
+
 ### Track Distinction: Track 1 (G15R) vs Track 2 (LRM)
 
 | Dimension | Track 1: v0.1 C0 Baseline | Track 2: v0.2-A LRM |

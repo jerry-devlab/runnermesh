@@ -6,10 +6,10 @@ GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
 REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
 PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
 G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
-PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
-CODE_ANCHOR=2703a1e57bd3ced0c350ba8266c11ad08851abdb
-PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
-PR_CI=43161254344 (PASS_ALL 6/6 jobs)
+PACKAGE_BUILD_COMMIT=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+CODE_ANCHOR=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+PR_HEAD=d0e75e1470b4a24d8cd4deba61b11e9e18ecca21
+PR_CI=43361527538 (PASS_ALL 6/6 jobs)
 SOURCE_AND_SANDBOX_CLOSEOUT=PASS
 LIVE_DELIVERY=WAITING_FOR_OWNER
 ```
@@ -45,7 +45,7 @@ never counts as PASS.
 |---|---:|---|---:|---|
 | **R0** Packet polish | 4h | `PASS` | **100%** | Complete |
 | **R1** HUX-1 readonly | 4h | `PARTIAL` | **50%** | Local `EMPTY_OK`; **ZenBookDuo=`PENDING_NOT_RUN`** |
-| **R2** Independent security review | 8h | `BLOCKED` | **0%** | Admitted independent process (Codex `jerry-auditor`) preflight PASS; formal review completed on settled HEAD `a31f13d`; `DISPOSITION=BLOCKED` on P03 HMAC-SHA256 & dispatch scope loss; `BLOCKER_LATCHED=true`; Track 1 G15R pending Owner |
+| **R2** Independent security review | 8h | `BLOCKED` | **0%** | Admitted independent process (Codex `jerry-auditor`) review completed on candidate `d0e75e1`; preflight PASS; `DISPOSITION=BLOCKED` (5 findings: selector advertisement check, SCM observation real service name, multi-runner admission coordinator isolation, preflight NoProfile enforcement, durable SCM ledger replay protection); `BLOCKER_LATCHED=true`; Track 1 G15R pending Owner |
 | **R3** H2 v0.1 (G15R only) | 6h+24h | `WAITING` | **0%** | Needs R2(G15R) + Owner token |
 | **R4** HUX-2 live | 6h | `WAITING` | **0%** | Needs disposable Service auth (`goals/RM-HUX-2-READINESS-PACKAGE.md` updated) |
 | **R5** G-ADR006 | 4h | `BRIEF_READY` | **30%** | Brief published (`goals/RM-160H-R5-ADR006-OWNER-BRIEF.md`); awaits Owner decision |
@@ -76,7 +76,7 @@ BLOCKER_LATCHED=true
 
 ## 5. What “done” would require next
 
-1. **R2 Track 2 LRM Review**: Formal independent review by admitted process (Codex `jerry-auditor`) completed with `BLOCKED` (`BLOCKER_LATCHED=true`) on Surface A P03 findings; Track 1 G15R remains `PENDING` awaiting separate Owner authorization for H2.
+1. **R2 Track 2 LRM Review**: Formal independent review by admitted process (Codex `jerry-auditor`) completed on candidate `d0e75e1` with `BLOCKED` (`BLOCKER_LATCHED=true`); 5 material source findings identified; Track 1 G15R remains `PENDING` awaiting separate Owner authorization for H2.
 2. **R1 ZenBookDuo** counts on physical UX8406 — or honest leave `PENDING_NOT_RUN`.
 3. **R5 Owner decision** on ADR 0006 (`ACCEPTED` | `REJECTED` | `DEFER`).
 4. Owner live transactions R3 and/or R4 with separate `RESTORE`.
