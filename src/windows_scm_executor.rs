@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -227,14 +227,35 @@ impl TrustedClock for MockClock {
 static GLOBAL_AUTH_LEDGER: std::sync::OnceLock<SharedAuthorizationLedger> =
     std::sync::OnceLock::new();
 
+fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
 /// Thread-safe shared authorization ledger managing consumed authorizations.
 ///
 /// Prevents both swapped-nonce replays (reusing the same authorization voucher with
 /// a different nonce) and reconstructed-verifier replays (instantiating a fresh
+/// verifier instance). Supports persistent durable storage to prevent replays across
+/// process restarts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DurableLedgerEntry {
+    pub token_hash_hex: String,
+    pub nonce: String,
+    pub consumed_at_unix_ms: u64,
+}
+
 #[derive(Default, Debug)]
 struct SharedAuthorizationLedgerState {
     consumed_tokens: std::collections::BTreeSet<[u8; 32]>,
     consumed_nonces: std::collections::BTreeSet<String>,
+    durable_path: Option<PathBuf>,
 }
 
 /// Global replay protection ledger tracking consumed tokens and nonces across verifiers.
@@ -268,10 +289,50 @@ impl SharedAuthorizationLedger {
         Self::new_internal()
     }
 
+    /// Constructs a shared authorization ledger backed by a durable persistent file.
+    ///
+    /// Reads existing consumed vouchers on startup to prevent cross-process / post-restart replays,
+    /// and atomically writes newly consumed records to disk before accepting them.
+    pub fn with_durable_file(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        let mut consumed_tokens = std::collections::BTreeSet::new();
+        let mut consumed_nonces = std::collections::BTreeSet::new();
+
+        if path.exists() {
+            if crate::installation::is_reparse_point(&path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing reparse ledger file {}", path.display()),
+                ));
+            }
+            let bytes = fs::read(&path)?;
+            if !bytes.is_empty() {
+                let records: Vec<DurableLedgerEntry> = serde_json::from_slice(&bytes)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                for rec in records {
+                    if let Some(arr) = decode_hex_32(&rec.token_hash_hex) {
+                        consumed_tokens.insert(arr);
+                    }
+                    consumed_nonces.insert(rec.nonce);
+                }
+            }
+        }
+
+        Ok(Self {
+            state: Arc::new(Mutex::new(SharedAuthorizationLedgerState {
+                consumed_tokens,
+                consumed_nonces,
+                durable_path: Some(path),
+            })),
+        })
+    }
+
     /// Atomically checks and records single-use consumption in a single lock acquisition.
     ///
     /// Returns `true` if neither the token hash nor the nonce was previously consumed
-    /// and both are now recorded in the ledger.
+    /// and both are now recorded in the ledger (and synced to durable storage if configured).
     /// Returns `false` if either the token hash or the nonce was already consumed, leaving
     /// the ledger state unmodified.
     pub fn try_consume(&self, token_hash: [u8; 32], nonce: &str) -> bool {
@@ -279,6 +340,37 @@ impl SharedAuthorizationLedger {
         if state.consumed_tokens.contains(&token_hash) || state.consumed_nonces.contains(nonce) {
             return false;
         }
+
+        if let Some(ref path) = state.durable_path {
+            let mut entries: Vec<DurableLedgerEntry> = if path.exists() {
+                match fs::read(path) {
+                    Ok(b) if !b.is_empty() => serde_json::from_slice(&b).unwrap_or_default(),
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
+            let hex_hash: String = token_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let consumed_at_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            entries.push(DurableLedgerEntry {
+                token_hash_hex: hex_hash,
+                nonce: nonce.to_string(),
+                consumed_at_unix_ms,
+            });
+
+            let Ok(serialized) = serde_json::to_vec_pretty(&entries) else {
+                return false;
+            };
+            if crate::installation::atomic_write(path, &serialized).is_err() {
+                return false;
+            }
+        }
+
         state.consumed_tokens.insert(token_hash);
         state.consumed_nonces.insert(nonce.to_string());
         true
@@ -575,6 +667,25 @@ impl TokenValidatingOwnerVerifier {
             clock,
             SharedAuthorizationLedger::global().clone(),
         )
+    }
+
+    /// Internal/test constructor with a durable persistent ledger file.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn with_durable_ledger(
+        authority_secret: impl Into<Vec<u8>>,
+        scope: OwnerAuthorizationScope,
+        clock: Arc<dyn TrustedClock>,
+        ledger_path: impl Into<PathBuf>,
+    ) -> io::Result<Self> {
+        let ledger = SharedAuthorizationLedger::with_durable_file(ledger_path)?;
+        Ok(Self::with_clock_and_ledger(
+            &[],
+            scope,
+            Some(authority_secret.into()),
+            clock,
+            ledger,
+        ))
     }
 
     pub(crate) fn with_clock_and_ledger(
@@ -1685,6 +1796,49 @@ impl AdmissionSelectorObserver for FakeGithubAdmissionBackend {
         Self::refuse_scope_drift(&guard)?;
         Self::advance_eventual_visibility(&mut guard);
         Ok(!guard.selector_present)
+    }
+}
+
+impl crate::AdmissionControlBackend for FakeGithubAdmissionBackend {
+    fn observe_admission_selector(
+        &mut self,
+    ) -> Result<crate::RemoteAdmissionObservation, crate::AdmissionBackendError> {
+        let absent = self
+            .observe_selector_absent()
+            .map_err(|_| crate::AdmissionBackendError::ApiUnavailable)?;
+        Ok(crate::RemoteAdmissionObservation {
+            selector: if absent {
+                crate::AdmissionSelectorState::Absent
+            } else {
+                crate::AdmissionSelectorState::Present
+            },
+            runner_busy: false,
+            runner_online: true,
+        })
+    }
+
+    fn advertise_capacity(
+        &mut self,
+    ) -> Result<crate::RemoteAdmissionObservation, crate::AdmissionBackendError> {
+        FakeGithubAdmissionBackend::restore_capacity(self)
+            .map_err(|_| crate::AdmissionBackendError::ApiUnavailable)?;
+        Ok(crate::RemoteAdmissionObservation {
+            selector: crate::AdmissionSelectorState::Present,
+            runner_busy: false,
+            runner_online: true,
+        })
+    }
+
+    fn withdraw_capacity(
+        &mut self,
+    ) -> Result<crate::RemoteAdmissionObservation, crate::AdmissionBackendError> {
+        FakeGithubAdmissionBackend::withdraw_capacity(self)
+            .map_err(|_| crate::AdmissionBackendError::ApiUnavailable)?;
+        Ok(crate::RemoteAdmissionObservation {
+            selector: crate::AdmissionSelectorState::Absent,
+            runner_busy: false,
+            runner_online: true,
+        })
     }
 }
 
@@ -2981,6 +3135,10 @@ pub struct ScmTransactionJournal {
     pub stage: ScmTransactionStage,
     pub restore_plan: ServiceRestorePlan,
     pub updated_at_unix_ms: u64,
+    #[serde(default)]
+    pub consumed_token_hash: Option<String>,
+    #[serde(default)]
+    pub consumed_nonce: Option<String>,
 }
 
 impl ScmTransactionJournal {
@@ -3001,7 +3159,14 @@ impl ScmTransactionJournal {
             restore_plan,
             prestate,
             updated_at_unix_ms,
+            consumed_token_hash: None,
+            consumed_nonce: None,
         }
+    }
+
+    pub fn record_consumed_authorization(&mut self, token_hash_hex: String, nonce: String) {
+        self.consumed_token_hash = Some(token_hash_hex);
+        self.consumed_nonce = Some(nonce);
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -3080,6 +3245,13 @@ pub fn reconcile_interrupted_scm_journal<B: ScmControlBackend, A: AdmissionSelec
     admission: &mut A,
     current_time_unix_ms: u64,
 ) -> ScmTransactionReceipt {
+    if let (Some(token_hex), Some(nonce)) = (&journal.consumed_token_hash, &journal.consumed_nonce)
+    {
+        if let Some(arr) = decode_hex_32(token_hex) {
+            let _ = SharedAuthorizationLedger::global().try_consume(arr, nonce);
+        }
+    }
+
     let current_observation = match executor.observe_verified() {
         Ok(obs) => obs,
         Err(error) => {

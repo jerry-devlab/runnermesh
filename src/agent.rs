@@ -288,9 +288,20 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
     /// Optional target registration so multi-runner observers can map local keys to remote scopes.
     fn register_runner_target(
         &self,
+        local_runner_key: &str,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+    ) {
+        self.register_runner_target_with_service(local_runner_key, scope, runner_id, None);
+    }
+
+    /// Target registration including optional real service name so SCM queries use the real service name.
+    fn register_runner_target_with_service(
+        &self,
         _local_runner_key: &str,
         _scope: crate::RegistrationScope,
         _runner_id: u64,
+        _service_name: Option<&str>,
     ) {
     }
 }
@@ -510,7 +521,10 @@ impl<B: crate::AdmissionControlBackend + Send + Sync> MultiRunnerAdmissionCoordi
         runner_id: u64,
     ) -> Result<Option<bool>, String> {
         if *scope != self.scope || runner_id != self.runner_id {
-            return Ok(None);
+            return Err(format!(
+                "admission.scope-or-runner-id-mismatch: expected ({:?}, {}), got ({scope:?}, {runner_id})",
+                self.scope, self.runner_id
+            ));
         }
         let mut guard = self.backend.lock().map_err(|e| e.to_string())?;
         match guard.observe_admission_selector() {
@@ -558,11 +572,16 @@ impl<B: crate::AdmissionControlBackend + Send + Sync> MultiRunnerAdmissionCoordi
 #[derive(Clone, Default)]
 pub struct InProcessAdmissionCoordinator {
     selectors: Arc<Mutex<BTreeMap<(crate::RegistrationScope, u64), bool>>>,
+    fail_advertise: Arc<Mutex<bool>>,
 }
 
 impl InProcessAdmissionCoordinator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_fail_advertise(&self, fail: bool) {
+        *self.fail_advertise.lock().unwrap() = fail;
     }
 
     pub fn with_selector(
@@ -605,6 +624,9 @@ impl MultiRunnerAdmissionCoordinator for InProcessAdmissionCoordinator {
         scope: &crate::RegistrationScope,
         runner_id: u64,
     ) -> Result<bool, String> {
+        if *self.fail_advertise.lock().unwrap() {
+            return Err("admission.network-failure-simulated".to_owned());
+        }
         self.selectors
             .lock()
             .unwrap()
@@ -625,6 +647,14 @@ impl MultiRunnerAdmissionCoordinator for InProcessAdmissionCoordinator {
     }
 }
 
+/// Registration info for an enrolled runner target.
+#[derive(Clone, Debug)]
+pub struct RunnerTargetRegistration {
+    pub scope: crate::RegistrationScope,
+    pub runner_id: u64,
+    pub service_name: Option<String>,
+}
+
 /// Authoritative multi-runner lifecycle backend for installed production runtime.
 ///
 /// Obtains fresh observations from the Windows SCM and runner processes for each enrolled runner key,
@@ -633,8 +663,11 @@ impl MultiRunnerAdmissionCoordinator for InProcessAdmissionCoordinator {
 pub struct AuthoritativeMultiRunnerLifecycleBackend<B> {
     helper: PrivilegedScmHelper<B>,
     admission: Option<Arc<dyn MultiRunnerAdmissionCoordinator>>,
+    admission_coordinators: Arc<
+        Mutex<BTreeMap<(crate::RegistrationScope, u64), Arc<dyn MultiRunnerAdmissionCoordinator>>>,
+    >,
     session: Option<Arc<dyn MultiRunnerSessionCoordinator>>,
-    runner_targets: Arc<Mutex<BTreeMap<String, (crate::RegistrationScope, u64)>>>,
+    runner_targets: Arc<Mutex<BTreeMap<String, RunnerTargetRegistration>>>,
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifecycleBackend<B> {
@@ -642,6 +675,7 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
         Self {
             helper,
             admission: None,
+            admission_coordinators: Arc::new(Mutex::new(BTreeMap::new())),
             session: None,
             runner_targets: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -653,6 +687,34 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
     ) -> Self {
         self.admission = Some(coordinator);
         self
+    }
+
+    pub fn register_runner_admission_coordinator(
+        &self,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+        coordinator: Arc<dyn MultiRunnerAdmissionCoordinator>,
+    ) {
+        self.admission_coordinators
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((scope, runner_id), coordinator);
+    }
+
+    fn get_admission_coordinator(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> {
+        if let Some(coord) = self
+            .admission_coordinators
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(scope.clone(), runner_id))
+        {
+            return Some(Arc::clone(coord));
+        }
+        self.admission.as_ref().map(Arc::clone)
     }
 
     pub fn with_session_coordinator(
@@ -673,10 +735,27 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         scope: crate::RegistrationScope,
         runner_id: u64,
     ) {
+        self.register_runner_target_with_service(local_runner_key, scope, runner_id, None);
+    }
+
+    fn register_runner_target_with_service(
+        &self,
+        local_runner_key: &str,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+        service_name: Option<&str>,
+    ) {
         self.runner_targets
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(local_runner_key.to_string(), (scope, runner_id));
+            .insert(
+                local_runner_key.to_string(),
+                RunnerTargetRegistration {
+                    scope,
+                    runner_id,
+                    service_name: service_name.map(|s| s.to_string()),
+                },
+            );
     }
 
     fn observe_runners(&self, local_runner_keys: &[String]) -> Vec<PerRunnerObservation> {
@@ -688,7 +767,12 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
             .clone();
 
         for key in local_runner_keys {
-            let snap = self.helper.backend().query_exact(key);
+            let target_reg = targets.get(key);
+            let service_query = target_reg
+                .and_then(|r| r.service_name.as_deref())
+                .unwrap_or(key.as_str());
+
+            let snap = self.helper.backend().query_exact(service_query);
             let (lifecycle, ownership, worker_present) = match snap {
                 Ok(s) => {
                     let busy = matches!(s.observation.state, DiscoveredLifecycle::Busy);
@@ -701,16 +785,19 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
                 Err(_) => (DiscoveredLifecycle::Unknown, false, false),
             };
 
-            let (selector_present, selector_unknown) = match (&self.admission, targets.get(key)) {
-                (Some(coord), Some((scope, runner_id))) => {
-                    match coord.observe_selector(scope, *runner_id) {
-                        Ok(Some(present)) => (Some(present), false),
-                        Ok(None) => (None, false),
-                        Err(_) => (None, true),
+            let (selector_present, selector_unknown) = match target_reg {
+                Some(reg) => {
+                    if let Some(coord) = self.get_admission_coordinator(&reg.scope, reg.runner_id) {
+                        match coord.observe_selector(&reg.scope, reg.runner_id) {
+                            Ok(Some(present)) => (Some(present), false),
+                            Ok(None) => (None, true),
+                            Err(_) => (None, true),
+                        }
+                    } else {
+                        (None, true)
                     }
                 }
-                (Some(_), None) => (None, true),
-                (None, _) => (None, true),
+                None => (None, true),
             };
 
             observations.push(PerRunnerObservation {
@@ -736,10 +823,10 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         scope: &crate::RegistrationScope,
         runner_id: u64,
     ) -> Result<bool, String> {
-        match &self.admission {
-            Some(coord) => coord.withdraw_selector(scope, runner_id),
-            None => Err("admission.unconfigured-fail-closed".to_owned()),
-        }
+        let coord = self
+            .get_admission_coordinator(scope, runner_id)
+            .ok_or_else(|| format!("admission.no-coordinator-for-runner:{scope:?}:{runner_id}"))?;
+        coord.withdraw_selector(scope, runner_id)
     }
 
     fn advertise_selector(
@@ -747,10 +834,10 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         scope: &crate::RegistrationScope,
         runner_id: u64,
     ) -> Result<bool, String> {
-        match &self.admission {
-            Some(coord) => coord.advertise_selector(scope, runner_id),
-            None => Err("admission.unconfigured-fail-closed".to_owned()),
-        }
+        let coord = self
+            .get_admission_coordinator(scope, runner_id)
+            .ok_or_else(|| format!("admission.no-coordinator-for-runner:{scope:?}:{runner_id}"))?;
+        coord.advertise_selector(scope, runner_id)
     }
 
     fn dispatch_session(
@@ -848,10 +935,17 @@ where
     /// admission selector withdrawal, and SCM dispatch.
     pub fn set_multi_runner_backend(&mut self, backend: Arc<dyn MultiRunnerLifecycleBackend>) {
         for record in self.runner_registry.registry().records.iter() {
-            backend.register_runner_target(
+            let service_name = match &record.backend {
+                RegistryBackendBinding::WindowsService { service_name } => {
+                    Some(service_name.as_str())
+                }
+                _ => None,
+            };
+            backend.register_runner_target_with_service(
                 &record.local_runner_key,
                 record.registration_scope.clone(),
                 record.runner_id,
+                service_name,
             );
         }
         self.multi_runner_backend = Some(backend);
@@ -902,16 +996,27 @@ where
                 .find(|o| o.local_runner_key == result.local_runner_key);
 
             // Step 1: If plan requires selector withdrawal or advertisement, coordinate it
+            let advertise_result = if result.plan == PerRunnerPlan::AdvertiseSelector {
+                backend.advertise_selector(&record.registration_scope, record.runner_id)
+            } else {
+                Ok(false)
+            };
+
             if result.plan == PerRunnerPlan::WithdrawSelector {
                 let _ = backend.withdraw_selector(&record.registration_scope, record.runner_id);
-            } else if result.plan == PerRunnerPlan::AdvertiseSelector {
-                let _ = backend.advertise_selector(&record.registration_scope, record.runner_id);
             }
 
-            // Step 2: Strictly verify dispatch guards before issuing Stop
+            // Step 2: Strictly verify dispatch guards before issuing Stop or Start
             let selector_confirmed_absent = obs
                 .map(|o| o.selector_present == Some(false) && !o.selector_observation_unknown)
                 .unwrap_or(false);
+
+            let selector_confirmed_present = if result.plan == PerRunnerPlan::AdvertiseSelector {
+                matches!(advertise_result, Ok(true))
+            } else {
+                obs.map(|o| o.selector_present == Some(true) && !o.selector_observation_unknown)
+                    .unwrap_or(false)
+            };
 
             let worker_idle = result.observed_lifecycle != DiscoveredLifecycle::Busy
                 && !obs.map(|o| o.worker_present).unwrap_or(false);
@@ -933,6 +1038,7 @@ where
                     } else if record.desired_enabled
                         && result.desired == PerRunnerDesired::Full
                         && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+                        && selector_confirmed_present
                     {
                         Some(PrivilegedScmAction::StartService)
                     } else {
@@ -969,6 +1075,7 @@ where
                     } else if record.desired_enabled
                         && result.desired == PerRunnerDesired::Full
                         && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+                        && selector_confirmed_present
                     {
                         Some(crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener)
                     } else {
@@ -1054,6 +1161,10 @@ where
                 && (result.achieved == PerRunnerAchieved::Drained
                     || result.achieved == PerRunnerAchieved::Offline);
 
+            let selector_confirmed_present = obs
+                .map(|o| o.selector_present == Some(true) && !o.selector_observation_unknown)
+                .unwrap_or(false);
+
             let action = if (!record.desired_enabled || result.desired == PerRunnerDesired::Offline)
                 && result.observed_lifecycle != DiscoveredLifecycle::Stopped
                 && selector_confirmed_absent
@@ -1064,6 +1175,7 @@ where
             } else if record.desired_enabled
                 && result.desired == PerRunnerDesired::Full
                 && result.observed_lifecycle == DiscoveredLifecycle::Stopped
+                && selector_confirmed_present
             {
                 Some(PrivilegedScmAction::StartService)
             } else {
@@ -1283,10 +1395,17 @@ where
                         if let Some(record) = self.runner_registry.registry().get(local_runner_key)
                         {
                             if let Some(backend) = &self.multi_runner_backend {
-                                backend.register_runner_target(
+                                let service_name = match &record.backend {
+                                    RegistryBackendBinding::WindowsService { service_name } => {
+                                        Some(service_name.as_str())
+                                    }
+                                    _ => None,
+                                };
+                                backend.register_runner_target_with_service(
                                     &record.local_runner_key,
                                     record.registration_scope.clone(),
                                     record.runner_id,
+                                    service_name,
                                 );
                             }
                         }

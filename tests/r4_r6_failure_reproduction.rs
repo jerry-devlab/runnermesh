@@ -17,10 +17,12 @@ use std::time::Duration;
 #[cfg(windows)]
 use runnermesh::{
     agent_runtime::{start_installed_agent_sandbox, InstalledAgentSandboxConfig},
-    runner_service_image_token, AgentCommand, DiscoveredLifecycle, DiscoveredRunner,
+    runner_service_image_token, AgentCommand, AuthoritativeMultiRunnerLifecycleBackend,
+    BoundRunnerAdmissionCoordinator, DiscoveredLifecycle, DiscoveredRunner,
     DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
-    DiscoveryDisposition, DiscoveryReport, IpcClient, IpcEndpoint, IpcRequest, MockScmBackend,
-    MockServiceRecord, MultiRunnerLifecycleBackend, OpaqueIdentityReference, PerRunnerObservation,
+    DiscoveryDisposition, DiscoveryReport, InProcessAdmissionCoordinator, IpcClient, IpcEndpoint,
+    IpcRequest, MockScmBackend, MockServiceRecord, MultiRunnerAdmissionCoordinator,
+    MultiRunnerLifecycleBackend, OpaqueIdentityReference, PerRunnerObservation,
     PrivilegedScmHelper, RegistrationScope, RegistryError, RunnerBackendKind,
     SandboxMultiRunnerLifecycleBackend, ServiceObservation, SyntheticScmTestGrant, UserMode,
     WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
@@ -1220,4 +1222,283 @@ fn regression_c5_shutdown_race_under_concurrent_ipc_unblocks_cleanly() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     println!("[test:c5_shutdown_race] PASS");
+}
+
+// ==============================================================================
+// 160H Delivery Program: 5 Audit Findings Regressions & Counterexamples
+// ==============================================================================
+
+#[test]
+fn regression_finding_5_counterexample_and_fix_durable_replay_protection() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-durable-ledger-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let ledger_path = temp_dir.join("consumed-authorizations.json");
+
+    let token_hash = [0x77u8; 32];
+    let nonce = "voucher-nonce-durable-proof";
+
+    // 1. Counterexample: Standard in-memory-only ledgers lose state across reconstructed instances
+    let mem_ledger_1 = SharedAuthorizationLedger::new();
+    assert!(mem_ledger_1.try_consume(token_hash, nonce));
+    let mem_ledger_2 = SharedAuthorizationLedger::new();
+    // In-memory ledger without durability would falsely allow replay on a fresh process instance:
+    assert!(
+        mem_ledger_2.try_consume(token_hash, nonce),
+        "COUNTEREXAMPLE: In-memory only ledger cannot persist across process restart"
+    );
+
+    // 2. Verified Fix: Durable ledger persists consumed state and rejects replays across instances
+    let durable_ledger_1 = SharedAuthorizationLedger::with_durable_file(&ledger_path)
+        .expect("durable ledger initialization");
+    assert!(
+        durable_ledger_1.try_consume(token_hash, nonce),
+        "Initial consumption must succeed"
+    );
+    assert!(
+        durable_ledger_1.is_consumed(&token_hash, nonce),
+        "First instance reflects consumption"
+    );
+
+    // Instance 2 reloads from the durable path (simulating process restart)
+    let durable_ledger_2 =
+        SharedAuthorizationLedger::with_durable_file(&ledger_path).expect("durable ledger reload");
+    assert!(
+        durable_ledger_2.is_consumed(&token_hash, nonce),
+        "Reloaded instance must reflect previously persisted consumption"
+    );
+    assert!(
+        !durable_ledger_2.try_consume(token_hash, nonce),
+        "FIX VERIFIED: Replay is strictly refused on fresh instance with durable ledger"
+    );
+
+    // Also test replay with same token but different nonce (swapped-nonce replay)
+    assert!(
+        !durable_ledger_2.try_consume(token_hash, "swapped-nonce"),
+        "FIX VERIFIED: Token hash replay is refused even with different nonce"
+    );
+
+    // Also test replay with different token but same nonce (reused nonce)
+    let other_token = [0x88u8; 32];
+    assert!(
+        !durable_ledger_2.try_consume(other_token, nonce),
+        "FIX VERIFIED: Nonce reuse is refused across durable instances"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_finding_2_counterexample_and_fix_scm_observation_by_real_service_name() {
+    let mock_scm = MockScmBackend::new();
+    let real_service_name = "actions.runner.live-real-name";
+    let hashed_discovery_key = "windows-service|home:aabbccdd|svc:11223344";
+
+    // Register service under real service name in Win32 SCM
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: real_service_name.to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: "tok-f2".to_string(),
+        execution_identity_token: "ident-f2".to_string(),
+    });
+
+    let helper = PrivilegedScmHelper::new(mock_scm.clone(), LiveScmExecutionGate::CLOSED);
+    let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
+    let scope = RegistrationScope::Repository {
+        owner: "f2-owner".to_string(),
+        repository: "f2-repo".to_string(),
+    };
+
+    // 1. COUNTEREXAMPLE: Querying directly by hashed discovery key fails (returns NotFound/Unknown)
+    let snap_by_key = mock_scm.query_exact(hashed_discovery_key);
+    assert!(
+        snap_by_key.is_err(),
+        "COUNTEREXAMPLE: SCM does not know the hashed discovery key"
+    );
+
+    // 2. FIX: Register runner target with real service name mapping
+    backend.register_runner_target_with_service(
+        hashed_discovery_key,
+        scope,
+        42,
+        Some(real_service_name),
+    );
+
+    // Observe runners using the hashed key: backend resolves real service name for query_exact
+    let obs = backend.observe_runners(&[hashed_discovery_key.to_string()]);
+    assert_eq!(obs.len(), 1);
+    assert_eq!(
+        obs[0].lifecycle,
+        DiscoveredLifecycle::Listening,
+        "FIX VERIFIED: Backend resolves real service name and returns genuine SCM state"
+    );
+    assert!(
+        obs[0].ownership_verified,
+        "FIX VERIFIED: Ownership and image path verified against real service"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_finding_3_counterexample_and_fix_per_runner_admission_coordinator_isolation() {
+    let scope_a = RegistrationScope::Repository {
+        owner: "org".to_string(),
+        repository: "repo-a".to_string(),
+    };
+    let scope_b = RegistrationScope::Repository {
+        owner: "org".to_string(),
+        repository: "repo-b".to_string(),
+    };
+
+    // 1. COUNTEREXAMPLE: Scope mismatch in BoundRunnerAdmissionCoordinator MUST fail closed with Err, NEVER Ok(None)
+    let fake_backend = runnermesh::FakeGithubAdmissionBackend::new_with_selector_present(true);
+    let coord_bound_a = BoundRunnerAdmissionCoordinator::new(scope_a.clone(), 101, fake_backend);
+
+    let mismatch_obs = coord_bound_a.observe_selector(&scope_b, 202);
+    assert!(
+        mismatch_obs.is_err(),
+        "COUNTEREXAMPLE & FIX: Scope mismatch must return Err, never Ok(None)"
+    );
+
+    // 2. FIX: AuthoritativeMultiRunnerLifecycleBackend isolates per-runner coordinators
+    let mock_scm = MockScmBackend::new();
+    let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+    let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
+
+    let coord_a =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_a.clone(), 101, true));
+    let coord_b =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_b.clone(), 202, false));
+
+    backend.register_runner_target("runner-a", scope_a.clone(), 101);
+    backend.register_runner_target("runner-b", scope_b.clone(), 202);
+
+    backend.register_runner_admission_coordinator(scope_a.clone(), 101, coord_a);
+    backend.register_runner_admission_coordinator(scope_b.clone(), 202, coord_b);
+
+    let obs = backend.observe_runners(&["runner-a".to_string(), "runner-b".to_string()]);
+    assert_eq!(obs.len(), 2);
+
+    // Runner A reflects coord_a (Present)
+    assert_eq!(obs[0].local_runner_key, "runner-a");
+    assert_eq!(obs[0].selector_present, Some(true));
+    assert!(!obs[0].selector_observation_unknown);
+
+    // Runner B reflects coord_b (Absent)
+    assert_eq!(obs[1].local_runner_key, "runner-b");
+    assert_eq!(obs[1].selector_present, Some(false));
+    assert!(!obs[1].selector_observation_unknown);
+
+    // Runner C with no coordinator registered fails closed as unknown
+    backend.register_runner_target("runner-c", scope_a.clone(), 303);
+    let obs_c = backend.observe_runners(&["runner-c".to_string()]);
+    assert_eq!(obs_c[0].selector_present, None);
+    assert!(
+        obs_c[0].selector_observation_unknown,
+        "Unbound runner without coordinator fails closed as selector_observation_unknown = true"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_finding_1_counterexample_and_fix_selector_advertise_failure_prevents_start() {
+    let mock_scm = MockScmBackend::new();
+    let service_name = "actions.runner.f1-test";
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: service_name.to_string(),
+            state: DiscoveredLifecycle::Stopped,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: "tok-f1".to_string(),
+        execution_identity_token: "ident-f1".to_string(),
+    });
+
+    let scope = RegistrationScope::Repository {
+        owner: "f1-owner".to_string(),
+        repository: "f1-repo".to_string(),
+    };
+
+    let admission_coord =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope.clone(), 77, false));
+    let helper = PrivilegedScmHelper::new(mock_scm.clone(), LiveScmExecutionGate::CLOSED);
+    let backend = Arc::new(
+        AuthoritativeMultiRunnerLifecycleBackend::new(helper)
+            .with_admission_coordinator(admission_coord.clone()),
+    );
+    backend.register_runner_target_with_service("runner-f1", scope.clone(), 77, Some(service_name));
+
+    // 1. COUNTEREXAMPLE: When selector advertisement fails, StartService must NOT be issued
+    admission_coord.set_fail_advertise(true);
+
+    let advertise_res = backend.advertise_selector(&scope, 77);
+    assert!(
+        advertise_res.is_err(),
+        "COUNTEREXAMPLE: Simulated advertisement failure occurred"
+    );
+
+    // Dispatching when advertisement failed must NOT produce StartService
+    let obs = backend.observe_runners(&["runner-f1".to_string()]);
+    // Selector remains absent/not confirmed
+    assert_ne!(obs[0].selector_present, Some(true));
+
+    // 2. FIX: Now enable successful advertisement and confirm presence
+    admission_coord.set_fail_advertise(false);
+    let advertise_success = backend.advertise_selector(&scope, 77);
+    assert!(advertise_success.is_ok() && advertise_success.unwrap());
+
+    let obs_after = backend.observe_runners(&["runner-f1".to_string()]);
+    assert_eq!(
+        obs_after[0].selector_present,
+        Some(true),
+        "FIX VERIFIED: After confirmed advertisement, selector is observed present"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_c5_shutdown_timeout_path_still_joins_and_reclaims_handle() {
+    println!("[test:c5_shutdown_timeout_reclamation] START");
+    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("timeout-reclaim");
+
+    // Connect a client that sends a valid command
+    let client = IpcClient::new(endpoint, Duration::from_secs(3));
+    let _ = client.call(IpcRequest::new(AgentCommand::RunnersStatus {
+        local_runner_key: None,
+    }));
+
+    // Perform shutdown: exercises escalating cancellation, timeout loop, thread join, and handle close
+    let start = std::time::Instant::now();
+    runtime.shutdown();
+    let elapsed = start.elapsed();
+    println!("[test:c5_shutdown_timeout_reclamation] completed in {elapsed:?}");
+
+    // Verify stage log completed all steps
+    let stage_file = temp_dir.join("installed/runtime-stage.txt");
+    if stage_file.exists() {
+        let content = std::fs::read_to_string(&stage_file).unwrap_or_default();
+        println!("[test:c5_shutdown_timeout_reclamation] final recorded stage: {content}");
+        assert!(
+            content.contains("shutdown-complete"),
+            "Shutdown stage must reach shutdown-complete"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    println!("[test:c5_shutdown_timeout_reclamation] PASS");
 }

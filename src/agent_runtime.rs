@@ -346,7 +346,14 @@ impl RunningInstalledAgentSandbox {
                 break;
             }
             if start.elapsed() > timeout {
-                eprintln!("[sandbox:shutdown] WARN: pipe_thread did not terminate within timeout");
+                eprintln!("[sandbox:shutdown] WARN: pipe_thread did not terminate within timeout; escalating cancel before join");
+                #[cfg(windows)]
+                {
+                    if native_handle != 0 {
+                        let _ = cancel_thread_io(native_handle);
+                    }
+                    let _ = crate::ipc::wake_listener(&self.endpoint);
+                }
                 break;
             }
             #[cfg(windows)]
@@ -359,13 +366,30 @@ impl RunningInstalledAgentSandbox {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
+        // Even if timeout occurs, unconditionally join the thread — never skip join or leak threads
         if let Some(handle) = self.pipe_thread.take() {
-            let _ = handle.join();
+            let join_res = handle.join();
+            if let Err(e) = join_res {
+                eprintln!("[sandbox:shutdown] WARN: pipe_thread join failed: {e:?}");
+            }
             println!(
                 "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
                 start.elapsed().as_millis()
             );
             let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
+        }
+
+        // Ensure native thread handle is fully reclaimed and never leaked
+        #[cfg(windows)]
+        {
+            let remaining_handle = self.pipe_thread_native_handle.swap(0, Ordering::AcqRel);
+            if remaining_handle != 0 {
+                unsafe {
+                    windows_sys::Win32::Foundation::CloseHandle(
+                        remaining_handle as windows_sys::Win32::Foundation::HANDLE,
+                    );
+                }
+            }
         }
 
         let poll_start = std::time::Instant::now();

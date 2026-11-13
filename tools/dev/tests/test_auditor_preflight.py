@@ -411,6 +411,13 @@ class AuditorPreflightTests(unittest.TestCase):
         )
         self.assertFalse(command_attests_harmless_child(cmd_flags, PS7_POWERSHELL))
 
+        # Missing -NoProfile is strictly rejected (mandatory -NoProfile enforcement)
+        cmd_missing_no_profile = (
+            f'"{PS7_POWERSHELL}" -Command '
+            f'"Write-Output \'{CHILD_MARKER}\'; exit 0"'
+        )
+        self.assertFalse(command_attests_harmless_child(cmd_missing_no_profile, PS7_POWERSHELL))
+
         # Non-zero exit
         cmd_nonzero = (
             f'"{PS7_POWERSHELL}" -NoProfile -Command '

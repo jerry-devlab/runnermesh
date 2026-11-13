@@ -217,7 +217,7 @@ def validate_profile_contract(profile_file: Path) -> None:
 
 
 HARMLSS_ARGS_PATTERN = re.compile(
-    rf"^(?:-NoProfile\s+)?-Command\s+(?:"
+    rf"^-NoProfile\s+-Command\s+(?:"
     rf'"Write-Output\s+\'{re.escape(CHILD_MARKER)}\'\s*;\s*exit\s+0"|'
     rf"'Write-Output\s+\"{re.escape(CHILD_MARKER)}\"\s*;\s*exit\s+0'"
     rf")$",
