@@ -9,7 +9,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicIsize, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     },
@@ -150,7 +150,7 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     let binding = installation
         .runtime_binding()
         .map_err(|error| error.to_string())?;
-    let (observer, reconciler) = match binding {
+    let (observer, reconciler, admission_coord) = match binding {
         Some(ref binding) => {
             let backend = crate::windows_github_admission_backend(binding.admission.clone())
                 .map_err(|error| error.to_string())?;
@@ -159,16 +159,26 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
                 &binding.admission,
                 binding.process_probe_executables.clone(),
             );
+            let coord = Arc::new(crate::BoundRunnerAdmissionCoordinator::new(
+                binding.admission.scope.clone(),
+                binding.admission.runner_id,
+                backend,
+            ));
             (
                 observer,
                 RuntimeReconciler::Configured(Box::new(AdmissionAgentReconciler::new(
-                    AdmissionController::new(backend),
+                    AdmissionController::new(
+                        crate::windows_github_admission_backend(binding.admission.clone())
+                            .map_err(|error| error.to_string())?,
+                    ),
                 ))),
+                Some(coord as Arc<dyn crate::MultiRunnerAdmissionCoordinator>),
             )
         }
         None => (
             RuntimeObserver::new(None, Vec::new()),
             RuntimeReconciler::Unconfigured(NoRunnerControl),
+            None,
         ),
     };
     let state_root = installation.agent_state_dir();
@@ -179,12 +189,17 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
         return Err("installed Agent state root is a reparse point".to_owned());
     }
-    let multi_runner_backend: Arc<dyn MultiRunnerLifecycleBackend> = Arc::new(
-        AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
+    let mut authoritative_backend = AuthoritativeMultiRunnerLifecycleBackend::new(
+        PrivilegedScmHelper::new(
             WindowsScmBackend::mutation_inert(),
             LiveScmExecutionGate::CLOSED,
-        )),
+        ),
     );
+    if let Some(coord) = admission_coord {
+        authoritative_backend = authoritative_backend.with_admission_coordinator(coord);
+    }
+    let multi_runner_backend: Arc<dyn MultiRunnerLifecycleBackend> =
+        Arc::new(authoritative_backend);
     run_agent(
         installation.agent_config_path(),
         state_root,
@@ -238,12 +253,30 @@ pub struct InstalledAgentSandboxConfig {
     pub enable_periodic_scheduler: bool,
 }
 
+#[cfg(windows)]
+pub(crate) fn cancel_thread_io(thread_handle: isize) -> bool {
+    if thread_handle != 0 {
+        let ret = unsafe {
+            windows_sys::Win32::System::IO::CancelSynchronousIo(
+                thread_handle as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
+        ret != 0
+    } else {
+        false
+    }
+}
+
 /// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
 pub struct RunningInstalledAgentSandbox {
     core: Arc<Mutex<RuntimeCore>>,
     exit: Arc<RuntimeExitState>,
+    endpoint: IpcEndpoint,
+    state_root: PathBuf,
     pipe_thread: Option<thread::JoinHandle<()>>,
     poll_thread: Option<thread::JoinHandle<()>>,
+    #[cfg(windows)]
+    pipe_thread_native_handle: Arc<AtomicIsize>,
 }
 
 impl RunningInstalledAgentSandbox {
@@ -257,15 +290,86 @@ impl RunningInstalledAgentSandbox {
         self.exit.requested.load(Ordering::Acquire)
     }
 
+    /// Returns the IPC endpoint bound by this sandbox.
+    pub fn endpoint(&self) -> &IpcEndpoint {
+        &self.endpoint
+    }
+
+    /// Returns the state directory of this sandbox.
+    pub fn state_root(&self) -> &Path {
+        &self.state_root
+    }
+
+    /// Reads the current recorded runtime stage if present.
+    pub fn stage(&self) -> Option<String> {
+        let stage_file = self.state_root.join("runtime-stage.txt");
+        fs::read_to_string(stage_file).ok().map(|s| s.trim().to_string())
+    }
+
     /// Performs graceful shutdown of the background pipe and polling threads.
+    ///
+    /// Wakes up or cancels any blocking `ConnectNamedPipe` waiting on the pipe thread,
+    /// marks exit requested, and reclaims all thread handles within a bounded duration.
     pub fn shutdown(mut self) {
+        println!("[sandbox:shutdown] stage=shutdown-started");
+        let _ = write_runtime_stage(&self.state_root, "shutdown-started");
         self.exit.requested.store(true, Ordering::Release);
+
+        #[cfg(windows)]
+        let native_handle = self.pipe_thread_native_handle.load(Ordering::Acquire);
+
+        // Phase 1: Cancel any synchronous I/O on pipe thread (ConnectNamedPipe)
+        #[cfg(windows)]
+        if native_handle != 0 {
+            let cancelled = cancel_thread_io(native_handle);
+            println!("[sandbox:shutdown] stage=pipe-io-cancelled cancelled={cancelled}");
+            let _ = write_runtime_stage(&self.state_root, "pipe-io-cancelled");
+        }
+
+        // Phase 2: Wake listener via named pipe connection probe
+        #[cfg(windows)]
+        {
+            let woken = crate::ipc::wake_listener(&self.endpoint);
+            println!("[sandbox:shutdown] stage=pipe-listener-woken ok={}", woken.is_ok());
+            let _ = write_runtime_stage(&self.state_root, "pipe-listener-woken");
+        }
+
+        // Phase 3: Bounded reclamation of pipe thread
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        while let Some(ref handle) = self.pipe_thread {
+            if handle.is_finished() {
+                break;
+            }
+            if start.elapsed() > timeout {
+                eprintln!("[sandbox:shutdown] WARN: pipe_thread did not terminate within timeout");
+                break;
+            }
+            #[cfg(windows)]
+            {
+                if native_handle != 0 {
+                    let _ = cancel_thread_io(native_handle);
+                }
+                let _ = crate::ipc::wake_listener(&self.endpoint);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
         if let Some(handle) = self.pipe_thread.take() {
             let _ = handle.join();
+            println!("[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}", start.elapsed().as_millis());
+            let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
         }
+
+        let poll_start = std::time::Instant::now();
         if let Some(handle) = self.poll_thread.take() {
             let _ = handle.join();
+            println!("[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}", poll_start.elapsed().as_millis());
+            let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
         }
+
+        println!("[sandbox:shutdown] stage=shutdown-complete total_elapsed_ms={}", start.elapsed().as_millis());
+        let _ = write_runtime_stage(&self.state_root, "shutdown-complete");
     }
 }
 
@@ -326,6 +430,7 @@ pub fn start_installed_agent_sandbox(
         core.set_runner_discovery(discovery);
     }
 
+    let endpoint = config.ipc_endpoint.clone();
     let server = IpcServer::bind(config.ipc_endpoint).map_err(|error| error.to_string())?;
     let _ = core
         .observe_decide_reconcile()
@@ -336,6 +441,9 @@ pub fn start_installed_agent_sandbox(
     let readiness = Arc::new(RuntimeReadiness::from_runner_home(None, false));
     let (snapshot_sender, _snapshot_receiver) = mpsc::channel();
 
+    #[cfg(windows)]
+    let pipe_thread_native_handle = Arc::new(AtomicIsize::new(0));
+
     let pipe_thread = spawn_pipe_loop(
         server,
         Arc::clone(&core),
@@ -343,6 +451,8 @@ pub fn start_installed_agent_sandbox(
         readiness,
         snapshot_sender,
         false,
+        #[cfg(windows)]
+        Arc::clone(&pipe_thread_native_handle),
     );
 
     let poll_thread = if config.enable_periodic_scheduler {
@@ -359,8 +469,12 @@ pub fn start_installed_agent_sandbox(
     Ok(RunningInstalledAgentSandbox {
         core,
         exit,
+        endpoint,
+        state_root,
         pipe_thread: Some(pipe_thread),
         poll_thread,
+        #[cfg(windows)]
+        pipe_thread_native_handle,
     })
 }
 
@@ -377,7 +491,7 @@ fn run_agent(
     // core or performing any observation/reconciliation that could mutate the
     // remote admission selector.
     let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
-    let server = IpcServer::bind(endpoint).map_err(|error| error.to_string())?;
+    let server = IpcServer::bind(endpoint.clone()).map_err(|error| error.to_string())?;
     let runner_home = observer.runner_home.as_deref().map(Path::to_path_buf);
     let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
     let readiness = Arc::new(RuntimeReadiness::from_runner_home(
@@ -387,7 +501,8 @@ fn run_agent(
     let mut core =
         assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)?;
     if let Some(binding) = runtime_binding {
-        let _ = core.migrate_v01_binding_if_needed(binding, None);
+        core.migrate_v01_binding_if_needed(binding, None)
+            .map_err(|error| format!("migration of v0.1 binding failed: {error}"))?;
     }
     let initial_snapshot = core
         .observe_decide_reconcile()
@@ -397,6 +512,9 @@ fn run_agent(
     let exit = Arc::new(RuntimeExitState::default());
     write_runtime_stage(&runtime_state_root, "pipe-bound")?;
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    #[cfg(windows)]
+    let pipe_native_handle = Arc::new(AtomicIsize::new(0));
+
     let pipe_thread = spawn_pipe_loop(
         server,
         Arc::clone(&core),
@@ -404,6 +522,8 @@ fn run_agent(
         Arc::clone(&readiness),
         snapshot_sender.clone(),
         development_controls,
+        #[cfg(windows)]
+        Arc::clone(&pipe_native_handle),
     );
     let periodic_thread = spawn_periodic_loop(
         Arc::clone(&core),
@@ -421,6 +541,14 @@ fn run_agent(
         development_controls,
     );
     exit.requested.store(true, Ordering::Release);
+    #[cfg(windows)]
+    {
+        let h = pipe_native_handle.load(Ordering::Acquire);
+        if h != 0 {
+            let _ = cancel_thread_io(h);
+        }
+        let _ = crate::ipc::wake_listener(&endpoint);
+    }
     // Exit is requested through the same typed local IPC route. The pipe loop
     // returns after that request; never force-terminate a thread or runner.
     let _ = pipe_thread.join();
@@ -450,8 +578,45 @@ fn spawn_pipe_loop(
     readiness: Arc<RuntimeReadiness>,
     snapshot_sender: Sender<AgentSnapshot>,
     development_controls: bool,
+    #[cfg(windows)] native_thread_handle: Arc<AtomicIsize>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            let mut real_handle: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+            let dup_ok = unsafe {
+                windows_sys::Win32::Foundation::DuplicateHandle(
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    windows_sys::Win32::System::Threading::GetCurrentThread(),
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    &mut real_handle,
+                    0,
+                    0,
+                    windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if dup_ok != 0 {
+                native_thread_handle.store(real_handle as isize, Ordering::Release);
+            }
+        }
+        #[cfg(windows)]
+        struct NativeHandleCleanup(Arc<AtomicIsize>);
+        #[cfg(windows)]
+        impl Drop for NativeHandleCleanup {
+            fn drop(&mut self) {
+                let h = self.0.swap(0, Ordering::AcqRel);
+                if h != 0 {
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(
+                            h as windows_sys::Win32::Foundation::HANDLE,
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        let _cleanup = NativeHandleCleanup(Arc::clone(&native_thread_handle));
+
         while !exit.requested.load(Ordering::Acquire) {
             let core = Arc::clone(&core);
             let exit = Arc::clone(&exit);

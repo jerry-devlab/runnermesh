@@ -289,6 +289,52 @@ impl IpcServer {
     pub fn endpoint(&self) -> &IpcEndpoint {
         &self.endpoint
     }
+
+    /// Attempts to wake any server thread blocked waiting for a connection on this endpoint.
+    pub fn wake_listener(&self) -> Result<(), IpcTransportError> {
+        wake_listener(&self.endpoint)
+    }
+}
+
+/// Attempts to wake any server thread blocked waiting for a connection on `endpoint`.
+#[cfg(windows)]
+pub fn wake_listener(endpoint: &IpcEndpoint) -> Result<(), IpcTransportError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            OPEN_EXISTING,
+        },
+    };
+    let name = to_wide(&endpoint.pipe_name());
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle != INVALID_HANDLE_VALUE {
+        unsafe {
+            CloseHandle(handle);
+        }
+        Ok(())
+    } else {
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        Err(IpcTransportError::Io(std::io::Error::from_raw_os_error(
+            error as i32,
+        )))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wake_listener(_endpoint: &IpcEndpoint) -> Result<(), IpcTransportError> {
+    let _ = _endpoint;
+    Err(IpcTransportError::UnsupportedPlatform)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]

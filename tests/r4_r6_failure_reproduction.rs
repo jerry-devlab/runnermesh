@@ -23,6 +23,7 @@ use runnermesh::{
     MockServiceRecord, OpaqueIdentityReference, PerRunnerObservation, PrivilegedScmHelper,
     RegistrationScope, RegistryError, RunnerBackendKind, SandboxMultiRunnerLifecycleBackend,
     ServiceObservation, SyntheticScmTestGrant, UserMode, WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+    MultiRunnerLifecycleBackend,
 };
 use runnermesh::{
     LiveScmExecutionGate, OwnerAuthorizationScope, ScmApiError, ScmControlBackend,
@@ -830,4 +831,378 @@ fn regression_r6_falsifiability_proves_disabled_scheduler_produces_zero_actions(
         runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Accepted { .. })
     ));
     runtime.shutdown();
+}
+
+#[test]
+fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "runnermesh-c5-pkg-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let staging = temp_dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let agent_exe = staging.join("runnermesh-agent.exe");
+    let cli_exe = staging.join("runnermesh.exe");
+    let agent_manifest = staging.join("runnermesh-agent.manifest");
+    std::fs::write(&agent_exe, b"stub-agent").unwrap();
+    std::fs::write(&cli_exe, b"stub-cli").unwrap();
+    std::fs::write(&agent_manifest, b"stub-manifest").unwrap();
+
+    let input = runnermesh::PackageInput {
+        provenance: runnermesh::PackageProvenance {
+            version: "0.1.0".to_string(),
+            commit: "17e35296eeaeb27525dda3d373421354173a1393".to_string(),
+            channel: "rc".to_string(),
+            target: runnermesh::WINDOWS_X64_TARGET.to_string(),
+        },
+        cli_binary: cli_exe,
+        agent_binary: agent_exe,
+        agent_manifest,
+    };
+
+    let archives_dir = temp_dir.join("archives");
+    let receipt = runnermesh::PackageVerifier::create(&input, &archives_dir).unwrap();
+    assert_eq!(receipt.manifest.provenance.version, "0.1.0");
+    assert_eq!(
+        receipt.manifest.provenance.commit,
+        "17e35296eeaeb27525dda3d373421354173a1393"
+    );
+    assert!(receipt.archive.is_file());
+
+    // 1. Extract runtime package into payload directory
+    let payload_dir = temp_dir.join("payload");
+    let manifest =
+        runnermesh::PackageVerifier::extract_runtime(&receipt.archive, &payload_dir).unwrap();
+    assert_eq!(manifest.provenance.version, "0.1.0");
+
+    // 2. Perform versioned installation
+    let install_root = temp_dir.join("installed");
+    let installation = runnermesh::Installation::new(install_root.clone());
+    let install_receipt = installation.install("0.1.0", &payload_dir).unwrap();
+    assert_eq!(install_receipt.version, "0.1.0");
+
+    let autostart = runnermesh::SandboxAutostartBackend::new(temp_dir.join("autostart.json"));
+    installation.enable_autostart(&autostart).unwrap();
+
+    // 3. Assemble and run sandboxed installed agent with AuthoritativeMultiRunnerLifecycleBackend
+    let mock_scm = MockScmBackend::new();
+    let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+    let scope = RegistrationScope::Repository {
+        owner: "c5-owner".to_string(),
+        repository: "c5-repo".to_string(),
+    };
+    let admission_coord = Arc::new(
+        runnermesh::InProcessAdmissionCoordinator::new().with_selector(scope.clone(), 901, true),
+    );
+    let authoritative_backend = Arc::new(
+        runnermesh::AuthoritativeMultiRunnerLifecycleBackend::new(helper)
+            .with_admission_coordinator(admission_coord)
+            .with_session_coordinator(Arc::new(runnermesh::StandardSessionCoordinator)),
+    );
+    authoritative_backend.register_runner_target("c5-runner", scope.clone(), 901);
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!(
+        "c5-test-{}",
+        std::process::id()
+    ));
+
+    let home = temp_dir.join("runner-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let identity = OpaqueIdentityReference::new(
+        WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+        "5555555555555555555555555555555555555555555555555555555555555555",
+    )
+    .unwrap();
+
+    let discovery_report = DiscoveryReport {
+        schema_version: runnermesh::RUNNER_DISCOVERY_SCHEMA_VERSION,
+        read_only: true,
+        exhaustive: false,
+        service_enumeration: runnermesh::DiscoveryEnumerationStatus::Ok,
+        session_enumeration: runnermesh::DiscoveryEnumerationStatus::Ok,
+        process_observation: runnermesh::DiscoveryEnumerationStatus::Ok,
+        candidates: vec![DiscoveredRunner {
+            local_discovery_key: "c5-runner".to_string(),
+            disposition: DiscoveryDisposition::ObservedOnly,
+            refusal: None,
+            backend: RunnerBackendKind::WindowsService,
+            identity: DiscoveredRunnerIdentity {
+                registration_scope: Some(scope),
+                runner_id: Some(901),
+                expected_runner_name: Some("c5-runner".to_string()),
+                runner_home: home.clone(),
+                work_root: Some(home.join("_work")),
+                execution_identity_ref: Some(identity),
+            },
+            service: Some(DiscoveredServiceBinding {
+                service_name: "actions.runner.c5".to_string(),
+                display_name: None,
+                image_path: None,
+                state: DiscoveredLifecycle::Listening,
+            }),
+            session: None,
+            capabilities: DiscoveryCapabilities {
+                service_control_contract: true,
+                user_session_control_contract: false,
+                enrollment_eligible: true,
+            },
+            same_scope_collision: false,
+            observed_lifecycle: DiscoveredLifecycle::Listening,
+        }],
+    };
+
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: install_root.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(authoritative_backend.clone()),
+        discovery_report: Some(discovery_report),
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
+    };
+
+    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    // 4. Enroll runner via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersEnroll {
+            local_runner_key: "c5-runner".to_string(),
+            prepare_only: false,
+        }))
+        .expect("IPC RunnersEnroll must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.applied)
+    ));
+
+    // 5. Query status via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersStatus {
+            local_runner_key: None,
+        }))
+        .expect("IPC RunnersStatus must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.records.len() == 1)
+    ));
+
+    // 6. Test disable-all via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisableAll {
+            when_idle: true,
+            prepare_only: false,
+        }))
+        .expect("IPC RunnersDisableAll must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.applied && !report.records[0].desired_enabled)
+    ));
+
+    // 7. Test enable-all via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersEnableAll {
+            prepare_only: false,
+        }))
+        .expect("IPC RunnersEnableAll must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Runners(ref report) if report.applied && report.records[0].desired_enabled)
+    ));
+
+    // 8. Test Doctor via IPC
+    println!("[c5_lifecycle] Phase 8: Doctor report via IPC");
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunDoctor))
+        .expect("IPC RunDoctor must succeed");
+    assert!(matches!(
+        resp.body,
+        runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Doctor(ref doc) if doc.checks.len() >= 2)
+    ));
+
+    // 9. Shutdown runtime cleanly
+    println!("[c5_lifecycle] Phase 9: Graceful runtime shutdown");
+    let shutdown_start = std::time::Instant::now();
+    runtime.shutdown();
+    let shutdown_elapsed = shutdown_start.elapsed();
+    println!("[c5_lifecycle] Phase 9 complete: runtime shut down in {shutdown_elapsed:?}");
+    assert!(shutdown_elapsed < Duration::from_secs(3), "shutdown took too long: {shutdown_elapsed:?}");
+
+    // 10. Clean uninstall
+    println!("[c5_lifecycle] Phase 10: Clean uninstall");
+    let uninstall = installation.uninstall(&autostart).unwrap();
+    assert_eq!(uninstall.removed_versions, 1);
+    assert!(uninstall.foreign_content_preserved);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    println!("[c5_lifecycle] All phases PASSED");
+}
+
+#[cfg(windows)]
+fn setup_test_sandbox_runtime(
+    test_name: &str,
+) -> (
+    std::path::PathBuf,
+    runnermesh::agent_runtime::RunningInstalledAgentSandbox,
+    IpcEndpoint,
+) {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c5-{test_name}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let install_root = temp_dir.join("installed");
+    std::fs::create_dir_all(&install_root).unwrap();
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!(
+        "c5-{test_name}-{}",
+        std::process::id()
+    ));
+
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root,
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: None,
+        discovery_report: None,
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
+    };
+
+    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    (temp_dir, runtime, ipc_endpoint)
+}
+
+#[test]
+fn regression_c5_shutdown_without_client_unblocks_cleanly() {
+    println!("[test:c5_shutdown_without_client] START");
+    let (temp_dir, runtime, _endpoint) = setup_test_sandbox_runtime("no-client");
+
+    // Give pipe thread a moment to enter ConnectNamedPipe
+    std::thread::sleep(Duration::from_millis(50));
+
+    let start = std::time::Instant::now();
+    runtime.shutdown();
+    let elapsed = start.elapsed();
+    println!("[test:c5_shutdown_without_client] shutdown completed in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    println!("[test:c5_shutdown_without_client] PASS");
+}
+
+#[test]
+fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
+    println!("[test:c5_exit_after_drain] START");
+    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("exit-drain");
+    let client = IpcClient::new(endpoint, Duration::from_secs(3));
+
+    let resp = client
+        .call(IpcRequest::new(AgentCommand::ExitAfterDrain))
+        .expect("IPC call should succeed");
+    assert!(matches!(resp.body, runnermesh::IpcResponseBody::Success(_)));
+
+    let start = std::time::Instant::now();
+    runtime.shutdown();
+    let elapsed = start.elapsed();
+    println!("[test:c5_exit_after_drain] shutdown completed in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    println!("[test:c5_exit_after_drain] PASS");
+}
+
+#[test]
+fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
+    println!("[test:c5_connection_failure] START");
+    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("conn-fail");
+
+    // Client connects and abruptly sends partial garbage without completing IPC frame
+    {
+        let pipe_name = endpoint.pipe_name();
+        let wide_name: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle = unsafe {
+            windows_sys::Win32::Storage::FileSystem::CreateFileW(
+                wide_name.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+                windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            let garbage = [0xde, 0xad, 0xbe];
+            let mut written = 0;
+            unsafe {
+                windows_sys::Win32::Storage::FileSystem::WriteFile(
+                    handle,
+                    garbage.as_ptr(),
+                    garbage.len() as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                );
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+        }
+    }
+
+    // Give server thread a moment to handle the error and loop back to ConnectNamedPipe
+    std::thread::sleep(Duration::from_millis(50));
+
+    let start = std::time::Instant::now();
+    runtime.shutdown();
+    let elapsed = start.elapsed();
+    println!("[test:c5_connection_failure] shutdown completed in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    println!("[test:c5_connection_failure] PASS");
+}
+
+#[test]
+fn regression_c5_shutdown_race_under_concurrent_ipc_unblocks_cleanly() {
+    println!("[test:c5_shutdown_race] START");
+    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("race");
+
+    let stop_worker = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_worker_clone = Arc::clone(&stop_worker);
+    let endpoint_clone = endpoint.clone();
+
+    let worker = std::thread::spawn(move || {
+        let client = IpcClient::new(endpoint_clone, Duration::from_millis(200));
+        while !stop_worker_clone.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = client.call(IpcRequest::new(AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            }));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+
+    // Let concurrent requests run briefly
+    std::thread::sleep(Duration::from_millis(30));
+
+    let start = std::time::Instant::now();
+    runtime.shutdown();
+    let elapsed = start.elapsed();
+    println!("[test:c5_shutdown_race] shutdown completed in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "shutdown took too long: {elapsed:?}");
+
+    stop_worker.store(true, std::sync::atomic::Ordering::Release);
+    let _ = worker.join();
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    println!("[test:c5_shutdown_race] PASS");
 }

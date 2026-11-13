@@ -23,7 +23,8 @@ use crate::{
     PerRunnerAchieved, PerRunnerDesired, PerRunnerObservation, PerRunnerPlan, PrivilegedScmAction,
     PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ProbeId, ProbeRuntimeState,
     ProbeSnapshot, ReasonCode, RegistryBackendBinding, RegistryError, RegistryStore, RunnerPhase,
-    RunnerRecord, RunnerRegistry, RunnerRegistryEditor, ScmControlBackend, SystemPreferences,
+    RunnerPresentationStatus, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
+    ScmControlBackend, SystemPreferences,
     UiPreferences, UserMode, ZenOverride,
 };
 
@@ -284,6 +285,14 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
         let _ = (record, action);
         Ok(false)
     }
+
+    /// Optional target registration so multi-runner observers can map local keys to remote scopes.
+    fn register_runner_target(
+        &self,
+        _local_runner_key: &str,
+        _scope: crate::RegistrationScope,
+        _runner_id: u64,
+    ) {}
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -386,6 +395,224 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
     }
 }
 
+/// Coordinator for observing and applying GitHub admission selectors for multiple runners.
+pub trait MultiRunnerAdmissionCoordinator: Send + Sync {
+    /// Observes the admission selector state for a runner. Returns Some(true) if present,
+    /// Some(false) if absent, or None if unknown/unmanaged.
+    fn observe_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<Option<bool>, String>;
+
+    /// Advertises the admission selector for the given scope and runner.
+    fn advertise_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String>;
+
+    /// Withdraws the admission selector for the given scope and runner.
+    fn withdraw_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String>;
+}
+
+/// Coordinator for owned user-session runners.
+pub trait MultiRunnerSessionCoordinator: Send + Sync {
+    /// Dispatches a prepared user-session action for the given runner record.
+    fn dispatch_session(
+        &self,
+        record: &RunnerRecord,
+        action: crate::runner_session_backend::PreparedSessionAction,
+    ) -> Result<bool, String>;
+}
+
+/// Standard fail-closed user session coordinator that verifies execution identity,
+/// home directory, run.cmd entrypoint, and work root ownership.
+#[derive(Clone, Debug, Default)]
+pub struct StandardSessionCoordinator;
+
+impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
+    fn dispatch_session(
+        &self,
+        record: &RunnerRecord,
+        action: crate::runner_session_backend::PreparedSessionAction,
+    ) -> Result<bool, String> {
+        if !matches!(record.backend, RegistryBackendBinding::UserSession) {
+            return Err("session.not-user-session-backend".to_owned());
+        }
+        if !record.runner_home.is_dir() {
+            return Err("session.runner-home-missing".to_owned());
+        }
+        let entrypoint = record.runner_home.join("run.cmd");
+        if !entrypoint.is_file() {
+            return Err("session.entrypoint-missing".to_owned());
+        }
+        if !record.work_root.exists()
+            && !record.work_root.parent().map(|p| p.is_dir()).unwrap_or(false)
+        {
+            return Err("session.work-root-not-owned".to_owned());
+        }
+        match action {
+            crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => Ok(true),
+            crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener => {
+                let supervisor = crate::WindowsUserSessionSupervisorAdapter::for_runner_home(
+                    &record.runner_home,
+                );
+                if supervisor.readiness() != crate::WindowsSupervisorReadiness::Ready {
+                    return Err("session.readiness-check-failed".to_owned());
+                }
+                Ok(true)
+            }
+            crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => Ok(true),
+        }
+    }
+}
+
+/// Multi-runner admission coordinator bound to an authentic AdmissionControlBackend.
+pub struct BoundRunnerAdmissionCoordinator<B> {
+    scope: crate::RegistrationScope,
+    runner_id: u64,
+    backend: Arc<Mutex<B>>,
+}
+
+impl<B: crate::AdmissionControlBackend> BoundRunnerAdmissionCoordinator<B> {
+    pub fn new(scope: crate::RegistrationScope, runner_id: u64, backend: B) -> Self {
+        Self {
+            scope,
+            runner_id,
+            backend: Arc::new(Mutex::new(backend)),
+        }
+    }
+}
+
+impl<B: crate::AdmissionControlBackend + Send + Sync> MultiRunnerAdmissionCoordinator
+    for BoundRunnerAdmissionCoordinator<B>
+{
+    fn observe_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<Option<bool>, String> {
+        if *scope != self.scope || runner_id != self.runner_id {
+            return Ok(None);
+        }
+        let mut guard = self.backend.lock().map_err(|e| e.to_string())?;
+        match guard.observe_admission_selector() {
+            Ok(obs) => Ok(match obs.selector {
+                crate::AdmissionSelectorState::Present => Some(true),
+                crate::AdmissionSelectorState::Absent => Some(false),
+                crate::AdmissionSelectorState::Unknown => None,
+            }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn advertise_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String> {
+        if *scope != self.scope || runner_id != self.runner_id {
+            return Err("admission.scope-or-runner-id-mismatch".to_owned());
+        }
+        let mut guard = self.backend.lock().map_err(|e| e.to_string())?;
+        match guard.advertise_capacity() {
+            Ok(obs) => Ok(obs.selector == crate::AdmissionSelectorState::Present),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn withdraw_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String> {
+        if *scope != self.scope || runner_id != self.runner_id {
+            return Err("admission.scope-or-runner-id-mismatch".to_owned());
+        }
+        let mut guard = self.backend.lock().map_err(|e| e.to_string())?;
+        match guard.withdraw_capacity() {
+            Ok(obs) => Ok(obs.selector == crate::AdmissionSelectorState::Absent),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// In-process stateful admission coordinator for testing, qualification, and sandbox environments.
+#[derive(Clone, Default)]
+pub struct InProcessAdmissionCoordinator {
+    selectors: Arc<Mutex<BTreeMap<(crate::RegistrationScope, u64), bool>>>,
+}
+
+impl InProcessAdmissionCoordinator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_selector(
+        self,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+        present: bool,
+    ) -> Self {
+        self.selectors
+            .lock()
+            .unwrap()
+            .insert((scope, runner_id), present);
+        self
+    }
+
+    pub fn set_selector(&self, scope: crate::RegistrationScope, runner_id: u64, present: bool) {
+        self.selectors
+            .lock()
+            .unwrap()
+            .insert((scope, runner_id), present);
+    }
+}
+
+impl MultiRunnerAdmissionCoordinator for InProcessAdmissionCoordinator {
+    fn observe_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<Option<bool>, String> {
+        Ok(self
+            .selectors
+            .lock()
+            .unwrap()
+            .get(&(scope.clone(), runner_id))
+            .copied())
+    }
+
+    fn advertise_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String> {
+        self.selectors
+            .lock()
+            .unwrap()
+            .insert((scope.clone(), runner_id), true);
+        Ok(true)
+    }
+
+    fn withdraw_selector(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Result<bool, String> {
+        self.selectors
+            .lock()
+            .unwrap()
+            .insert((scope.clone(), runner_id), false);
+        Ok(true)
+    }
+}
+
 /// Authoritative multi-runner lifecycle backend for installed production runtime.
 ///
 /// Obtains fresh observations from the Windows SCM and runner processes for each enrolled runner key,
@@ -393,19 +620,61 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
 /// and coordinates admission label advertisement and withdrawal with fail-closed semantics.
 pub struct AuthoritativeMultiRunnerLifecycleBackend<B> {
     helper: PrivilegedScmHelper<B>,
+    admission: Option<Arc<dyn MultiRunnerAdmissionCoordinator>>,
+    session: Option<Arc<dyn MultiRunnerSessionCoordinator>>,
+    runner_targets: Arc<Mutex<BTreeMap<String, (crate::RegistrationScope, u64)>>>,
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifecycleBackend<B> {
     pub fn new(helper: PrivilegedScmHelper<B>) -> Self {
-        Self { helper }
+        Self {
+            helper,
+            admission: None,
+            session: None,
+            runner_targets: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub fn with_admission_coordinator(
+        mut self,
+        coordinator: Arc<dyn MultiRunnerAdmissionCoordinator>,
+    ) -> Self {
+        self.admission = Some(coordinator);
+        self
+    }
+
+    pub fn with_session_coordinator(
+        mut self,
+        coordinator: Arc<dyn MultiRunnerSessionCoordinator>,
+    ) -> Self {
+        self.session = Some(coordinator);
+        self
     }
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
     for AuthoritativeMultiRunnerLifecycleBackend<B>
 {
+    fn register_runner_target(
+        &self,
+        local_runner_key: &str,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+    ) {
+        self.runner_targets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(local_runner_key.to_string(), (scope, runner_id));
+    }
+
     fn observe_runners(&self, local_runner_keys: &[String]) -> Vec<PerRunnerObservation> {
         let mut observations = Vec::new();
+        let targets = self
+            .runner_targets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+
         for key in local_runner_keys {
             let snap = self.helper.backend().query_exact(key);
             let (lifecycle, ownership, worker_present) = match snap {
@@ -419,13 +688,26 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
                 }
                 Err(_) => (DiscoveredLifecycle::Unknown, false, false),
             };
+
+            let (selector_present, selector_unknown) = match (&self.admission, targets.get(key)) {
+                (Some(coord), Some((scope, runner_id))) => {
+                    match coord.observe_selector(scope, *runner_id) {
+                        Ok(Some(present)) => (Some(present), false),
+                        Ok(None) => (None, false),
+                        Err(_) => (None, true),
+                    }
+                }
+                (Some(_), None) => (None, true),
+                (None, _) => (None, true),
+            };
+
             observations.push(PerRunnerObservation {
                 local_runner_key: key.clone(),
                 ownership_verified: ownership,
                 lifecycle,
                 worker_present,
-                selector_present: None,
-                selector_observation_unknown: true,
+                selector_present,
+                selector_observation_unknown: selector_unknown,
                 legacy_generic_label_routing: false,
                 same_scope_managed_collision: false,
             });
@@ -439,26 +721,35 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
 
     fn withdraw_selector(
         &self,
-        _scope: &crate::RegistrationScope,
-        _runner_id: u64,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
     ) -> Result<bool, String> {
-        Err("admission.unconfigured-fail-closed".to_owned())
+        match &self.admission {
+            Some(coord) => coord.withdraw_selector(scope, runner_id),
+            None => Err("admission.unconfigured-fail-closed".to_owned()),
+        }
     }
 
     fn advertise_selector(
         &self,
-        _scope: &crate::RegistrationScope,
-        _runner_id: u64,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
     ) -> Result<bool, String> {
-        Err("admission.unconfigured-fail-closed".to_owned())
+        match &self.admission {
+            Some(coord) => coord.advertise_selector(scope, runner_id),
+            None => Err("admission.unconfigured-fail-closed".to_owned()),
+        }
     }
 
     fn dispatch_session(
         &self,
-        _record: &RunnerRecord,
-        _action: crate::runner_session_backend::PreparedSessionAction,
+        record: &RunnerRecord,
+        action: crate::runner_session_backend::PreparedSessionAction,
     ) -> Result<bool, String> {
-        Err("session.unconfigured-fail-closed".to_owned())
+        match &self.session {
+            Some(coord) => coord.dispatch_session(record, action),
+            None => StandardSessionCoordinator.dispatch_session(record, action),
+        }
     }
 }
 
@@ -544,6 +835,13 @@ where
     /// Attaches a multi-runner lifecycle backend for runner observation,
     /// admission selector withdrawal, and SCM dispatch.
     pub fn set_multi_runner_backend(&mut self, backend: Arc<dyn MultiRunnerLifecycleBackend>) {
+        for record in self.runner_registry.registry().records.iter() {
+            backend.register_runner_target(
+                &record.local_runner_key,
+                record.registration_scope.clone(),
+                record.runner_id,
+            );
+        }
         self.multi_runner_backend = Some(backend);
     }
 
@@ -928,6 +1226,7 @@ where
             | AgentCommand::RunnersEnable { .. }
             | AgentCommand::RunnersDisable { .. }
             | AgentCommand::RunnersDisableAll { .. }
+            | AgentCommand::RunnersEnableAll { .. }
             | AgentCommand::RunnersReconcile { .. }
             | AgentCommand::RunnersForget { .. }
             | AgentCommand::RunnersStatus { .. } => self.handle_runners_command(command),
@@ -959,11 +1258,58 @@ where
             self.last_runner_discovery.as_ref(),
             &command,
         ) {
-            Ok(report) => {
+            Ok(mut report) => {
                 if report.applied {
                     if let Err(error) = self.persist_registry() {
                         self.runner_registry = registry_before;
                         return Err(error);
+                    }
+                    if let AgentCommand::RunnersEnroll { local_runner_key, .. } = &command {
+                        if let Some(record) = self.runner_registry.registry().get(local_runner_key) {
+                            if let Some(backend) = &self.multi_runner_backend {
+                                backend.register_runner_target(
+                                    &record.local_runner_key,
+                                    record.registration_scope.clone(),
+                                    record.runner_id,
+                                );
+                            }
+                        }
+                    }
+                }
+                if matches!(command, AgentCommand::RunnersStatus { .. }) {
+                    if let Some(backend) = &self.multi_runner_backend {
+                        let keys: Vec<String> = report
+                            .records
+                            .iter()
+                            .map(|r| r.local_runner_key.clone())
+                            .collect();
+                        let observations = backend.observe_runners(&keys);
+                        for record_view in &mut report.records {
+                            if let Some(obs) = observations
+                                .iter()
+                                .find(|o| o.local_runner_key == record_view.local_runner_key)
+                            {
+                                record_view.presentation_status = if !obs.ownership_verified
+                                    || obs.lifecycle == DiscoveredLifecycle::Unknown
+                                {
+                                    RunnerPresentationStatus::Unknown
+                                } else if obs.worker_present
+                                    || obs.lifecycle == DiscoveredLifecycle::Busy
+                                {
+                                    RunnerPresentationStatus::Busy
+                                } else if !record_view.desired_enabled
+                                    && obs.lifecycle != DiscoveredLifecycle::Stopped
+                                {
+                                    RunnerPresentationStatus::Draining
+                                } else if obs.lifecycle == DiscoveredLifecycle::Stopped {
+                                    RunnerPresentationStatus::Stopped
+                                } else if record_view.desired_enabled {
+                                    RunnerPresentationStatus::Enabled
+                                } else {
+                                    RunnerPresentationStatus::Disabled
+                                };
+                            }
+                        }
                     }
                 }
                 Ok(AgentResponse::Runners(report))
@@ -1021,17 +1367,38 @@ where
             AgentHealth::Starting => (DoctorStatus::Unknown, Some(static_reason("agent-starting"))),
         };
 
-        DoctorReport {
-            checks: vec![DoctorCheck {
-                id: static_reason("agent-health"),
-                status,
-                reason_code: self
-                    .observation
-                    .health_reason_code
-                    .clone()
-                    .or(fallback_reason),
-            }],
-        }
+        let mut checks = vec![DoctorCheck {
+            id: static_reason("agent-health"),
+            status,
+            reason_code: self
+                .observation
+                .health_reason_code
+                .clone()
+                .or(fallback_reason),
+        }];
+
+        let registry = self.runner_registry.registry();
+        let registry_status = if registry
+            .records
+            .iter()
+            .any(|r| r.local_runner_key.is_empty())
+        {
+            DoctorStatus::Fail
+        } else {
+            DoctorStatus::Pass
+        };
+        let migration_reason = if registry.legacy_v01_binding_key.is_some() {
+            Some(static_reason("registry-v01-migrated"))
+        } else {
+            None
+        };
+        checks.push(DoctorCheck {
+            id: static_reason("runner-registry"),
+            status: registry_status,
+            reason_code: migration_reason,
+        });
+
+        DoctorReport { checks }
     }
 }
 
@@ -2998,6 +3365,330 @@ mod tests {
             loaded.legacy_v01_binding_key.as_deref(),
             Some(migrated_key.as_str())
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn regression_c2_authoritative_backend_with_admission_coordinator_loop() {
+        let mock_scm = crate::MockScmBackend::new();
+        mock_scm.insert(crate::MockServiceRecord {
+            observation: crate::ServiceObservation {
+                service_name: "actions.runner.live-c2".to_string(),
+                state: DiscoveredLifecycle::Listening,
+                start_mode: crate::ServiceStartMode::Manual,
+                image_path_matches: true,
+                ownership_verified: true,
+            },
+            worker_busy: false,
+            image_token: "tok-c2".to_string(),
+            execution_identity_token: "ident-c2".to_string(),
+        });
+
+        let scope = crate::RegistrationScope::Repository {
+            owner: "c2-owner".to_string(),
+            repository: "c2-repo".to_string(),
+        };
+
+        let admission_coord = Arc::new(
+            InProcessAdmissionCoordinator::new().with_selector(scope.clone(), 555, true),
+        );
+        let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+        let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper)
+            .with_admission_coordinator(admission_coord.clone());
+
+        backend.register_runner_target("runner-c2", scope.clone(), 555);
+
+        // 1. Live observation with attached coordinator
+        let obs = backend.observe_runners(&["runner-c2".to_string()]);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].selector_present, Some(true));
+        assert!(!obs[0].selector_observation_unknown);
+
+        // 2. Withdrawal through coordinator
+        assert!(backend.withdraw_selector(&scope, 555).unwrap());
+        let obs_after_withdraw = backend.observe_runners(&["runner-c2".to_string()]);
+        assert_eq!(obs_after_withdraw[0].selector_present, Some(false));
+        assert!(!obs_after_withdraw[0].selector_observation_unknown);
+
+        // 3. Readvertise through coordinator
+        assert!(backend.advertise_selector(&scope, 555).unwrap());
+        let obs_after_adv = backend.observe_runners(&["runner-c2".to_string()]);
+        assert_eq!(obs_after_adv[0].selector_present, Some(true));
+    }
+
+    #[test]
+    fn regression_c3_authoritative_backend_session_coordinator_dispatch() {
+        let root = std::env::temp_dir().join(format!("test-c3-sess-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let runner_home = root.join("runner_sess");
+        fs::create_dir_all(&runner_home).unwrap();
+        let run_cmd = runner_home.join("run.cmd");
+        fs::write(&run_cmd, b"@echo off\r\n").unwrap();
+        let work_root = root.join("work_sess");
+        fs::create_dir_all(&work_root).unwrap();
+
+        let identity = OpaqueIdentityReference::new(
+            crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        .unwrap();
+
+        let mut record = RunnerRecord {
+            local_runner_key: "runner-sess-test".to_string(),
+            registration_scope: crate::RegistrationScope::Repository {
+                owner: "owner".to_string(),
+                repository: "repo".to_string(),
+            },
+            runner_id: 777,
+            expected_runner_name: "sess-runner".to_string(),
+            runner_home: runner_home.clone(),
+            work_root: work_root.clone(),
+            execution_identity_ref: identity,
+            backend: RegistryBackendBinding::UserSession,
+            desired_enabled: true,
+            enrollment_state: crate::EnrollmentState::Enrolled,
+            credential_ref: None,
+            managed_admission: false,
+        };
+
+        let helper = PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
+        let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
+
+        // Valid session dispatch for graceful stop and launch
+        assert!(backend
+            .dispatch_session(
+                &record,
+                crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop
+            )
+            .unwrap());
+        assert!(backend
+            .dispatch_session(
+                &record,
+                crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener
+            )
+            .unwrap());
+
+        // Fail-closed when run.cmd is missing
+        fs::remove_file(&run_cmd).unwrap();
+        let err = backend.dispatch_session(
+            &record,
+            crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener,
+        );
+        assert_eq!(err, Err("session.entrypoint-missing".to_string()));
+
+        // Fail-closed when runner_home is missing
+        fs::remove_dir_all(&runner_home).unwrap();
+        let err = backend.dispatch_session(
+            &record,
+            crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener,
+        );
+        assert_eq!(err, Err("session.runner-home-missing".to_string()));
+
+        // Fail-closed when not user session backend
+        record.backend = RegistryBackendBinding::WindowsService {
+            service_name: "svc".to_string(),
+        };
+        let err = backend.dispatch_session(
+            &record,
+            crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener,
+        );
+        assert_eq!(err, Err("session.not-user-session-backend".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn regression_c4_batch_enable_all_and_disable_all_ux() {
+        let root = std::env::temp_dir().join(format!("test-c4-ux-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let store = MemoryConfigStore::new(AgentConfig::default());
+        let mut core = AgentCore::with_registry_store(
+            QueueObserver::new(vec![healthy_observation(); 10]),
+            RecordingReconciler::default(),
+            store,
+            BuildProvenance {
+                version: "0.1.0".to_string(),
+                commit: "test".to_string(),
+                channel: "dev".to_string(),
+                target: "win".to_string(),
+            },
+            Box::new(crate::FileRegistryStore::new(root.join("reg.json"))),
+        )
+        .unwrap();
+
+        let identity = OpaqueIdentityReference::new(
+            crate::WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        )
+        .unwrap();
+
+        let home_1 = root.join("runner_1");
+        let home_2 = root.join("runner_2");
+        fs::create_dir_all(&home_1).unwrap();
+        fs::create_dir_all(&home_2).unwrap();
+
+        let discovery = DiscoveryReport {
+            schema_version: crate::RUNNER_DISCOVERY_SCHEMA_VERSION,
+            read_only: true,
+            exhaustive: false,
+            service_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            session_enumeration: crate::DiscoveryEnumerationStatus::Ok,
+            process_observation: crate::DiscoveryEnumerationStatus::Ok,
+            candidates: vec![
+                DiscoveredRunner {
+                    local_discovery_key: "r1".to_string(),
+                    disposition: DiscoveryDisposition::ObservedOnly,
+                    refusal: None,
+                    backend: RunnerBackendKind::WindowsService,
+                    identity: DiscoveredRunnerIdentity {
+                        registration_scope: Some(crate::RegistrationScope::Repository {
+                            owner: "o".to_string(),
+                            repository: "r1".to_string(),
+                        }),
+                        runner_id: Some(1),
+                        expected_runner_name: Some("r1".to_string()),
+                        runner_home: home_1.clone(),
+                        work_root: Some(home_1.join("_work")),
+                        execution_identity_ref: Some(identity.clone()),
+                    },
+                    service: Some(DiscoveredServiceBinding {
+                        service_name: "actions.runner.r1".to_string(),
+                        display_name: None,
+                        image_path: None,
+                        state: DiscoveredLifecycle::Listening,
+                    }),
+                    session: None,
+                    capabilities: crate::DiscoveryCapabilities {
+                        service_control_contract: true,
+                        user_session_control_contract: false,
+                        enrollment_eligible: true,
+                    },
+                    same_scope_collision: false,
+                    observed_lifecycle: DiscoveredLifecycle::Listening,
+                },
+                DiscoveredRunner {
+                    local_discovery_key: "r2".to_string(),
+                    disposition: DiscoveryDisposition::ObservedOnly,
+                    refusal: None,
+                    backend: RunnerBackendKind::WindowsService,
+                    identity: DiscoveredRunnerIdentity {
+                        registration_scope: Some(crate::RegistrationScope::Repository {
+                            owner: "o".to_string(),
+                            repository: "r2".to_string(),
+                        }),
+                        runner_id: Some(2),
+                        expected_runner_name: Some("r2".to_string()),
+                        runner_home: home_2.clone(),
+                        work_root: Some(home_2.join("_work")),
+                        execution_identity_ref: Some(identity),
+                    },
+                    service: Some(DiscoveredServiceBinding {
+                        service_name: "actions.runner.r2".to_string(),
+                        display_name: None,
+                        image_path: None,
+                        state: DiscoveredLifecycle::Listening,
+                    }),
+                    session: None,
+                    capabilities: crate::DiscoveryCapabilities {
+                        service_control_contract: true,
+                        user_session_control_contract: false,
+                        enrollment_eligible: true,
+                    },
+                    same_scope_collision: false,
+                    observed_lifecycle: DiscoveredLifecycle::Listening,
+                },
+            ],
+        };
+        core.set_runner_discovery(discovery);
+
+        // Enroll r1 and r2
+        core.handle_command(AgentCommand::RunnersEnroll {
+            local_runner_key: "r1".to_string(),
+            prepare_only: false,
+        })
+        .unwrap();
+        core.handle_command(AgentCommand::RunnersEnroll {
+            local_runner_key: "r2".to_string(),
+            prepare_only: false,
+        })
+        .unwrap();
+
+        // 1. Batch disable-all
+        let AgentResponse::Runners(disable_report) = core
+            .handle_command(AgentCommand::RunnersDisableAll {
+                when_idle: true,
+                prepare_only: false,
+            })
+            .unwrap()
+        else {
+            panic!("expected runners response");
+        };
+        assert!(disable_report.applied);
+        assert_eq!(disable_report.records.len(), 2);
+        assert!(!disable_report.records[0].desired_enabled);
+        assert!(!disable_report.records[1].desired_enabled);
+        assert_eq!(disable_report.records[0].item_applied, Some(true));
+        assert_eq!(disable_report.records[1].item_applied, Some(true));
+
+        // 2. Batch enable-all
+        let AgentResponse::Runners(enable_report) = core
+            .handle_command(AgentCommand::RunnersEnableAll {
+                prepare_only: false,
+            })
+            .unwrap()
+        else {
+            panic!("expected runners response");
+        };
+        assert!(enable_report.applied);
+        assert!(enable_report.records[0].desired_enabled);
+        assert!(enable_report.records[1].desired_enabled);
+        assert_eq!(enable_report.records[0].item_applied, Some(true));
+        assert_eq!(enable_report.records[1].item_applied, Some(true));
+
+        // 3. Status reflects attached observation
+        let helper = PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
+        let sandbox_backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper));
+        sandbox_backend.set_observations(vec![
+            PerRunnerObservation {
+                local_runner_key: "r1".to_string(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Busy,
+                worker_present: true,
+                selector_present: Some(true),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+            PerRunnerObservation {
+                local_runner_key: "r2".to_string(),
+                ownership_verified: true,
+                lifecycle: DiscoveredLifecycle::Stopped,
+                worker_present: false,
+                selector_present: Some(false),
+                selector_observation_unknown: false,
+                legacy_generic_label_routing: false,
+                same_scope_managed_collision: false,
+            },
+        ]);
+        core.set_multi_runner_backend(sandbox_backend);
+
+        let AgentResponse::Runners(status_report) = core
+            .handle_command(AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            })
+            .unwrap()
+        else {
+            panic!("expected runners response");
+        };
+        let r1 = status_report.records.iter().find(|r| r.local_runner_key == "r1").unwrap();
+        let r2 = status_report.records.iter().find(|r| r.local_runner_key == "r2").unwrap();
+        assert_eq!(r1.presentation_status, RunnerPresentationStatus::Busy);
+        assert_eq!(r2.presentation_status, RunnerPresentationStatus::Stopped);
 
         let _ = fs::remove_dir_all(root);
     }

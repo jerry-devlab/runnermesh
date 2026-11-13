@@ -410,6 +410,55 @@ pub fn handle_runners_command(
             }
             Ok(report)
         }
+        crate::AgentCommand::RunnersEnableAll { prepare_only } => {
+            let keys: Vec<String> = editor
+                .registry()
+                .active_records()
+                .map(|r| r.local_runner_key.clone())
+                .collect();
+            let mut report = RunnerCommandReport::from_registry(
+                editor.registry(),
+                false,
+                *prepare_only,
+                !*prepare_only && !keys.is_empty(),
+                if *prepare_only {
+                    Some(static_reason("runners-enable-all-prepared"))
+                } else {
+                    Some(static_reason("runners-enable-all-applied"))
+                },
+                Vec::new(),
+                0,
+            );
+            if !*prepare_only {
+                for key in &keys {
+                    if let Err(_e) = editor.set_desired_enabled(key, true) {
+                        report = report.with_item_outcome(
+                            key,
+                            false,
+                            Some(static_reason("runners-item-failed")),
+                        );
+                    } else {
+                        report = report.with_item_outcome(key, true, None);
+                    }
+                }
+                let updated = editor.registry();
+                for r in &mut report.records {
+                    if let Some(record) = updated.get(&r.local_runner_key) {
+                        r.desired_enabled = record.desired_enabled;
+                        r.presentation_status = presentation_status_for(record);
+                    }
+                }
+            } else {
+                for key in &keys {
+                    report = report.with_item_outcome(
+                        key,
+                        true,
+                        Some(static_reason("runners-enable-prepared")),
+                    );
+                }
+            }
+            Ok(report)
+        }
         crate::AgentCommand::RunnersReconcile {
             local_runner_key,
             prepare_only,

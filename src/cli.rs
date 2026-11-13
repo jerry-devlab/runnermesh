@@ -123,6 +123,12 @@ fn parse_runners_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
             local_runner_key: (*key).to_owned(),
             prepare_only,
         },
+        ["runners", "enable-all"] => AgentCommand::RunnersEnableAll {
+            prepare_only,
+        },
+        ["runners", "enable"] if all => AgentCommand::RunnersEnableAll {
+            prepare_only,
+        },
         ["runners", "enable", key] => AgentCommand::RunnersEnable {
             local_runner_key: (*key).to_owned(),
             prepare_only,

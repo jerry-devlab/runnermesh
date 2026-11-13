@@ -60,9 +60,10 @@ pub use admission::{
 };
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
-    AuthoritativeMultiRunnerLifecycleBackend, ConfigStore, ConfigStoreError, FileConfigStore,
-    MemoryConfigStore, MultiRunnerLifecycleBackend, SandboxMultiRunnerLifecycleBackend,
-    CONFIG_SCHEMA_VERSION,
+    AuthoritativeMultiRunnerLifecycleBackend, BoundRunnerAdmissionCoordinator, ConfigStore,
+    ConfigStoreError, FileConfigStore, InProcessAdmissionCoordinator, MemoryConfigStore,
+    MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend, MultiRunnerSessionCoordinator,
+    SandboxMultiRunnerLifecycleBackend, StandardSessionCoordinator, CONFIG_SCHEMA_VERSION,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]
@@ -107,8 +108,8 @@ pub use installation::{
     InstallationState, SandboxAutostartBackend, UninstallReceipt, VersionManifest,
 };
 pub use ipc::{
-    IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResponseBody,
-    IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
+    wake_listener, IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
+    IpcResponseBody, IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
 };
 pub use lrm_integration::{
     run_lrm_synthetic_matrix, LrmOwnerPrepReceipt, LrmPrepDisposition, LrmSyntheticMatrixReport,

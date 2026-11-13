@@ -20,6 +20,8 @@ pub enum TrayMenuId {
     Mode(UserMode),
     ProbeToggle(ProbeId),
     RunnersRefresh,
+    RunnersEnableAll,
+    RunnersDisableAll,
     RunnerToggle(String),
     RunnerStatus(String),
     StatusDetails,
@@ -49,6 +51,8 @@ impl TrayMenuId {
             Self::Mode(mode) => format!("control.mode.{mode}"),
             Self::ProbeToggle(probe_id) => format!("control.probe.{probe_id}"),
             Self::RunnersRefresh => "control.runners.refresh".to_owned(),
+            Self::RunnersEnableAll => "control.runners.enable-all".to_owned(),
+            Self::RunnersDisableAll => "control.runners.disable-all".to_owned(),
             Self::RunnerToggle(key) => format!("control.runners.toggle.{key}"),
             Self::RunnerStatus(key) => format!("control.runners.status.{key}"),
             Self::StatusDetails => "action.status-details".to_owned(),
@@ -342,6 +346,13 @@ fn command_for(
         TrayMenuId::RunnersRefresh => Some(AgentCommand::RunnersStatus {
             local_runner_key: None,
         }),
+        TrayMenuId::RunnersEnableAll => Some(AgentCommand::RunnersEnableAll {
+            prepare_only: false,
+        }),
+        TrayMenuId::RunnersDisableAll => Some(AgentCommand::RunnersDisableAll {
+            when_idle: true,
+            prepare_only: false,
+        }),
         TrayMenuId::RunnerToggle(key) => {
             let enabled = runners
                 .and_then(|report| {
@@ -626,12 +637,26 @@ fn runners_entries(
     runners: Option<&RunnerCommandReport>,
     language: LanguagePreference,
 ) -> Vec<TrayMenuEntry> {
-    let mut entries = vec![item(
-        TrayMenuId::RunnersRefresh,
-        text(language, Text::RunnersRefresh).to_owned(),
-        None,
-        true,
-    )];
+    let mut entries = vec![
+        item(
+            TrayMenuId::RunnersRefresh,
+            text(language, Text::RunnersRefresh).to_owned(),
+            None,
+            true,
+        ),
+        item(
+            TrayMenuId::RunnersEnableAll,
+            text(language, Text::RunnersEnableAll).to_owned(),
+            None,
+            true,
+        ),
+        item(
+            TrayMenuId::RunnersDisableAll,
+            text(language, Text::RunnersDisableAll).to_owned(),
+            None,
+            true,
+        ),
+    ];
     let Some(report) = runners else {
         entries.push(item(
             TrayMenuId::RunnerStatus("_empty".to_owned()),
@@ -823,6 +848,8 @@ enum Text {
     Runner,
     Runners,
     RunnersRefresh,
+    RunnersEnableAll,
+    RunnersDisableAll,
     RunnersEmpty,
     RunnersPartialFailure,
     RunnerStatus,
@@ -859,6 +886,8 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (false, Text::Runner) => "Runner",
         (false, Text::Runners) => "Runners",
         (false, Text::RunnersRefresh) => "Refresh runners",
+        (false, Text::RunnersEnableAll) => "Enable all runners",
+        (false, Text::RunnersDisableAll) => "Disable all runners",
         (false, Text::RunnersEmpty) => "No enrolled runners yet",
         (false, Text::RunnersPartialFailure) => "Partial failure — inspect item results",
         (false, Text::RunnerStatus) => "Observed",
@@ -890,6 +919,8 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (true, Text::Runner) => "运行器",
         (true, Text::Runners) => "运行器列表",
         (true, Text::RunnersRefresh) => "刷新运行器",
+        (true, Text::RunnersEnableAll) => "启用全部运行器",
+        (true, Text::RunnersDisableAll) => "禁用全部运行器",
         (true, Text::RunnersEmpty) => "尚未登记运行器",
         (true, Text::RunnersPartialFailure) => "部分失败 — 请查看单项结果",
         (true, Text::RunnerStatus) => "观察状态",
