@@ -476,12 +476,28 @@ pub trait MultiRunnerSessionCoordinator: Send + Sync {
         record: &RunnerRecord,
         action: crate::runner_session_backend::PreparedSessionAction,
     ) -> Result<bool, String>;
+
+    fn observe_session(&self, record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+        self.observe_session_for_key(&record.local_runner_key)
+    }
+
+    fn observe_session_for_key(&self, _key: &str) -> Option<DiscoveredLifecycle> {
+        None
+    }
 }
 
 /// Injectable process transport for owned user session runners.
 pub trait UserSessionProcessTransport: Send + Sync {
     fn launch_listener(&self, record: &RunnerRecord) -> Result<bool, String>;
     fn request_graceful_stop(&self, record: &RunnerRecord) -> Result<bool, String>;
+
+    fn observe_session(&self, record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+        self.observe_session_for_key(&record.local_runner_key)
+    }
+
+    fn observe_session_for_key(&self, _key: &str) -> Option<DiscoveredLifecycle> {
+        None
+    }
 }
 
 /// Production default process transport for user session runners (sealed closed).
@@ -503,11 +519,17 @@ impl UserSessionProcessTransport for InertUserSessionProcessTransport {
 pub struct SimulatedUserSessionProcessTransport {
     pub launched: Arc<Mutex<Vec<String>>>,
     pub stopped: Arc<Mutex<Vec<String>>>,
+    pub active: Arc<Mutex<BTreeMap<String, DiscoveredLifecycle>>>,
 }
 
 impl SimulatedUserSessionProcessTransport {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_active_session(self, key: &str, state: DiscoveredLifecycle) -> Self {
+        self.active.lock().unwrap().insert(key.to_string(), state);
+        self
     }
 }
 
@@ -517,6 +539,10 @@ impl UserSessionProcessTransport for SimulatedUserSessionProcessTransport {
             .lock()
             .unwrap()
             .push(record.local_runner_key.clone());
+        self.active.lock().unwrap().insert(
+            record.local_runner_key.clone(),
+            DiscoveredLifecycle::Listening,
+        );
         Ok(true)
     }
 
@@ -525,7 +551,15 @@ impl UserSessionProcessTransport for SimulatedUserSessionProcessTransport {
             .lock()
             .unwrap()
             .push(record.local_runner_key.clone());
+        self.active.lock().unwrap().insert(
+            record.local_runner_key.clone(),
+            DiscoveredLifecycle::Stopped,
+        );
         Ok(true)
+    }
+
+    fn observe_session_for_key(&self, key: &str) -> Option<DiscoveredLifecycle> {
+        self.active.lock().unwrap().get(key).copied()
     }
 }
 
@@ -599,8 +633,18 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
         }
 
         // Fresh process observation
-        let (listener_active, worker_active, obs_ok) =
-            crate::windows_runner_discovery::observe_runner_processes_for_home(&record.runner_home);
+        let (listener_active, worker_active, obs_ok) = if let Some(transport_obs) =
+            self.transport.observe_session(record)
+        {
+            match transport_obs {
+                DiscoveredLifecycle::Listening => (true, false, true),
+                DiscoveredLifecycle::Busy => (true, true, true),
+                DiscoveredLifecycle::Stopped => (false, false, true),
+                DiscoveredLifecycle::Unknown => (false, false, false),
+            }
+        } else {
+            crate::windows_runner_discovery::observe_runner_processes_for_home(&record.runner_home)
+        };
 
         if !obs_ok {
             return Err("session.process-evidence-incomplete".to_owned());
@@ -644,6 +688,10 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
                 Ok(true)
             }
         }
+    }
+
+    fn observe_session_for_key(&self, key: &str) -> Option<DiscoveredLifecycle> {
+        self.transport.observe_session_for_key(key)
     }
 }
 
@@ -953,7 +1001,14 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
             let runner_home = target_reg.as_ref().and_then(|r| r.runner_home.as_deref());
 
             let (lifecycle, ownership, worker_present) = if is_user_session {
-                if let Some(home) = runner_home {
+                if let Some(transport_obs) = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.observe_session_for_key(key))
+                {
+                    let busy = matches!(transport_obs, DiscoveredLifecycle::Busy);
+                    (transport_obs, true, busy)
+                } else if let Some(home) = runner_home {
                     let (listener_active, worker_active, obs_ok) =
                         crate::windows_runner_discovery::observe_runner_processes_for_home(home);
                     if worker_active {
@@ -1718,30 +1773,42 @@ where
                             }
                         }
 
-                        // Attach live read-only resource samples
+                        // Attach live read-only resource samples with point-in-time process memory facts
                         let mut samples_by_key = Vec::new();
                         for record in self.runner_registry.registry().records.iter() {
-                            let (listener_active, worker_active, _) =
-                                crate::windows_runner_discovery::observe_runner_processes_for_home(
+                            let procs =
+                                crate::windows_runner_discovery::observe_runner_processes_with_pids(
                                     &record.runner_home,
                                 );
                             let mut samples = Vec::new();
-                            if listener_active {
+                            if procs.listener_present {
+                                let working_set = procs
+                                    .listener_pid
+                                    .and_then(crate::runner_resource::query_process_working_set);
                                 samples.push(crate::runner_resource::RunnerMemorySample {
                                     role: crate::runner_resource::RunnerResourceRole::Listener,
-                                    working_set_bytes: None,
+                                    working_set_bytes: working_set,
                                     sampled_at_unix_ms: now_unix_ms,
-                                    confidence:
-                                        crate::runner_resource::ResourceSampleConfidence::Estimate,
+                                    confidence: if working_set.is_some() {
+                                        crate::runner_resource::ResourceSampleConfidence::Estimate
+                                    } else {
+                                        crate::runner_resource::ResourceSampleConfidence::Unknown
+                                    },
                                 });
                             }
-                            if worker_active {
+                            if procs.worker_present {
+                                let working_set = procs
+                                    .worker_pid
+                                    .and_then(crate::runner_resource::query_process_working_set);
                                 samples.push(crate::runner_resource::RunnerMemorySample {
                                     role: crate::runner_resource::RunnerResourceRole::Worker,
-                                    working_set_bytes: None,
+                                    working_set_bytes: working_set,
                                     sampled_at_unix_ms: now_unix_ms,
-                                    confidence:
-                                        crate::runner_resource::ResourceSampleConfidence::Estimate,
+                                    confidence: if working_set.is_some() {
+                                        crate::runner_resource::ResourceSampleConfidence::Estimate
+                                    } else {
+                                        crate::runner_resource::ResourceSampleConfidence::Unknown
+                                    },
                                 });
                             }
                             if !samples.is_empty() {

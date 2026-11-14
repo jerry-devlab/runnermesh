@@ -193,7 +193,8 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
         AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
             WindowsScmBackend::mutation_inert(),
             LiveScmExecutionGate::CLOSED,
-        ));
+        ))
+        .with_session_coordinator(Arc::new(crate::StandardSessionCoordinator::inert()));
     if let Some(coord) = admission_coord {
         authoritative_backend = authoritative_backend.with_admission_coordinator(coord);
     }
@@ -371,17 +372,41 @@ impl RunningInstalledAgentSandbox {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        // Even if timeout occurs, unconditionally join the thread — never skip join or leak threads
+        // Bounded join: safely join the thread within deadline, recording deadline breach if blocked
+        let mut joined_ok = false;
         if let Some(handle) = self.pipe_thread.take() {
-            let join_res = handle.join();
-            if let Err(e) = join_res {
-                eprintln!("[sandbox:shutdown] WARN: pipe_thread join failed: {e:?}");
+            if handle.is_finished() {
+                let _ = handle.join();
+                joined_ok = true;
+            } else {
+                let grace_start = std::time::Instant::now();
+                while !handle.is_finished()
+                    && grace_start.elapsed() < std::time::Duration::from_millis(500)
+                {
+                    #[cfg(windows)]
+                    {
+                        if native_handle != 0 {
+                            let _ = cancel_thread_io(native_handle);
+                        }
+                        let _ = crate::ipc::wake_listener(&self.endpoint);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    joined_ok = true;
+                } else {
+                    eprintln!("[sandbox:shutdown] ERROR: pipe_thread failed to exit within bounded deadline; recording deadline breach");
+                    let _ = write_runtime_stage(&self.state_root, "shutdown-deadline-exceeded");
+                }
             }
-            println!(
-                "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
-                start.elapsed().as_millis()
-            );
-            let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
+            if joined_ok {
+                println!(
+                    "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
+                    start.elapsed().as_millis()
+                );
+                let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
+            }
         }
 
         // Ensure native thread handle is fully reclaimed and never leaked

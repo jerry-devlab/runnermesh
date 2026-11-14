@@ -2201,3 +2201,611 @@ fn regression_finding3_scm_quoted_image_path_with_arguments_parsed_consistently(
         "opaque_image_token must match between unquoted-with-args and clean executable path"
     );
 }
+
+#[test]
+fn c1_race_child_worker() {
+    let Ok(role) = std::env::var("RUNNERMESH_C1_RACE_ROLE") else {
+        return;
+    };
+    let ledger_path = std::env::var("RUNNERMESH_C1_RACE_LEDGER").unwrap();
+    let barrier_dir = std::path::PathBuf::from(std::env::var("RUNNERMESH_C1_RACE_DIR").unwrap());
+    let voucher_hex = std::env::var("RUNNERMESH_C1_RACE_VOUCHER").unwrap();
+    let nonce = std::env::var("RUNNERMESH_C1_RACE_NONCE").unwrap();
+
+    let mut voucher_hash = [0u8; 32];
+    for (i, byte) in (0..32)
+        .map(|i| u8::from_str_radix(&voucher_hex[i * 2..i * 2 + 2], 16).unwrap())
+        .enumerate()
+    {
+        voucher_hash[i] = byte;
+    }
+
+    let ledger = runnermesh::SharedAuthorizationLedger::with_durable_file(&ledger_path)
+        .expect("child failed to open durable ledger");
+
+    // Signal ready
+    let ready_file = barrier_dir.join(format!("ready_{role}.txt"));
+    std::fs::write(&ready_file, b"ready").unwrap();
+
+    // Spin on barrier start file
+    let start_file = barrier_dir.join("start.txt");
+    let spin_start = std::time::Instant::now();
+    while !start_file.exists() {
+        if spin_start.elapsed() > std::time::Duration::from_secs(15) {
+            panic!("child {role} timed out waiting for barrier start");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    // Call try_consume concurrently
+    let consumed = ledger.try_consume(voucher_hash, &nonce);
+    let result_file = barrier_dir.join(format!("result_{role}.txt"));
+    std::fs::write(&result_file, if consumed { b"SUCCESS" } else { b"REFUSED" }).unwrap();
+}
+
+#[test]
+fn regression_c1_two_independent_os_processes_barrier_race() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c1-race-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let barrier_dir = temp_dir.join("barrier");
+    std::fs::create_dir_all(&barrier_dir).unwrap();
+    let ledger_path = temp_dir.join("shared-ledger.json");
+    let current_exe = std::env::current_exe().unwrap();
+
+    let voucher_a_hex = "11".repeat(32);
+    let nonce_a = "nonce-race-a";
+
+    // 1. Spawn two independent OS child processes racing for the same voucher
+    let mut child_1 = std::process::Command::new(&current_exe)
+        .arg("--")
+        .arg("c1_race_child_worker")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("RUNNERMESH_C1_RACE_ROLE", "child_1")
+        .env("RUNNERMESH_C1_RACE_LEDGER", ledger_path.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_DIR", barrier_dir.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_VOUCHER", &voucher_a_hex)
+        .env("RUNNERMESH_C1_RACE_NONCE", nonce_a)
+        .spawn()
+        .expect("failed to spawn child_1");
+
+    let mut child_2 = std::process::Command::new(&current_exe)
+        .arg("--")
+        .arg("c1_race_child_worker")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("RUNNERMESH_C1_RACE_ROLE", "child_2")
+        .env("RUNNERMESH_C1_RACE_LEDGER", ledger_path.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_DIR", barrier_dir.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_VOUCHER", &voucher_a_hex)
+        .env("RUNNERMESH_C1_RACE_NONCE", nonce_a)
+        .spawn()
+        .expect("failed to spawn child_2");
+
+    // Wait until both children write their ready markers
+    let ready_1 = barrier_dir.join("ready_child_1.txt");
+    let ready_2 = barrier_dir.join("ready_child_2.txt");
+    let wait_start = std::time::Instant::now();
+    while !(ready_1.exists() && ready_2.exists()) {
+        if wait_start.elapsed() > std::time::Duration::from_secs(10) {
+            let _ = child_1.kill();
+            let _ = child_2.kill();
+            panic!("timed out waiting for children to initialize and reach barrier");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // Release barrier simultaneously
+    std::fs::write(barrier_dir.join("start.txt"), b"go").unwrap();
+
+    // Reclaim both child processes
+    let exit_1 = child_1.wait().expect("child_1 wait failed");
+    let exit_2 = child_2.wait().expect("child_2 wait failed");
+    assert!(exit_1.success(), "child_1 must exit successfully");
+    assert!(exit_2.success(), "child_2 must exit successfully");
+
+    // Read results
+    let res_1 = std::fs::read_to_string(barrier_dir.join("result_child_1.txt")).unwrap();
+    let res_2 = std::fs::read_to_string(barrier_dir.join("result_child_2.txt")).unwrap();
+
+    let mut successes = 0;
+    let mut refusals = 0;
+    for r in [&res_1, &res_2] {
+        if r.trim() == "SUCCESS" {
+            successes += 1;
+        } else if r.trim() == "REFUSED" {
+            refusals += 1;
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "Strictly one child process must be granted consumption"
+    );
+    assert_eq!(
+        refusals, 1,
+        "Strictly one child process must be refused consumption"
+    );
+
+    // Verify on-disk ledger file has exactly 1 entry
+    let ledger_bytes = std::fs::read(&ledger_path).unwrap();
+    let entries: Vec<runnermesh::DurableLedgerEntry> =
+        serde_json::from_slice(&ledger_bytes).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].nonce, nonce_a);
+
+    // 2. Race two distinct vouchers concurrently: both must succeed without lost update
+    std::fs::remove_file(barrier_dir.join("start.txt")).unwrap();
+    let ready_3 = barrier_dir.join("ready_child_3.txt");
+    let ready_4 = barrier_dir.join("ready_child_4.txt");
+
+    let voucher_b_hex = "22".repeat(32);
+    let voucher_c_hex = "33".repeat(32);
+
+    let mut child_3 = std::process::Command::new(&current_exe)
+        .arg("--")
+        .arg("c1_race_child_worker")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("RUNNERMESH_C1_RACE_ROLE", "child_3")
+        .env("RUNNERMESH_C1_RACE_LEDGER", ledger_path.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_DIR", barrier_dir.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_VOUCHER", &voucher_b_hex)
+        .env("RUNNERMESH_C1_RACE_NONCE", "nonce-b")
+        .spawn()
+        .expect("failed to spawn child_3");
+
+    let mut child_4 = std::process::Command::new(&current_exe)
+        .arg("--")
+        .arg("c1_race_child_worker")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("RUNNERMESH_C1_RACE_ROLE", "child_4")
+        .env("RUNNERMESH_C1_RACE_LEDGER", ledger_path.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_DIR", barrier_dir.to_str().unwrap())
+        .env("RUNNERMESH_C1_RACE_VOUCHER", &voucher_c_hex)
+        .env("RUNNERMESH_C1_RACE_NONCE", "nonce-c")
+        .spawn()
+        .expect("failed to spawn child_4");
+
+    let wait_start2 = std::time::Instant::now();
+    while !(ready_3.exists() && ready_4.exists()) {
+        if wait_start2.elapsed() > std::time::Duration::from_secs(10) {
+            let _ = child_3.kill();
+            let _ = child_4.kill();
+            panic!("timed out waiting for children 3 & 4 to reach barrier");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    std::fs::write(barrier_dir.join("start.txt"), b"go").unwrap();
+
+    let exit_3 = child_3.wait().expect("child_3 wait failed");
+    let exit_4 = child_4.wait().expect("child_4 wait failed");
+    assert!(exit_3.success());
+    assert!(exit_4.success());
+
+    let res_3 = std::fs::read_to_string(barrier_dir.join("result_child_3.txt")).unwrap();
+    let res_4 = std::fs::read_to_string(barrier_dir.join("result_child_4.txt")).unwrap();
+    assert_eq!(res_3.trim(), "SUCCESS");
+    assert_eq!(res_4.trim(), "SUCCESS");
+
+    let ledger_bytes_after = std::fs::read(&ledger_path).unwrap();
+    let entries_after: Vec<runnermesh::DurableLedgerEntry> =
+        serde_json::from_slice(&ledger_bytes_after).unwrap();
+    assert_eq!(
+        entries_after.len(),
+        3,
+        "All three consumed vouchers must be durably present without lost update"
+    );
+
+    // 3. Two pre-opened ledger instances: A consumes, B attempts sequential replay and is refused
+    let ledger_a = runnermesh::SharedAuthorizationLedger::with_durable_file(&ledger_path).unwrap();
+    let ledger_b = runnermesh::SharedAuthorizationLedger::with_durable_file(&ledger_path).unwrap();
+
+    let voucher_d = [0x44u8; 32];
+    assert!(ledger_a.try_consume(voucher_d, "nonce-d"));
+    assert!(
+        !ledger_b.try_consume(voucher_d, "nonce-d"),
+        "Pre-opened ledger B must refuse replay after A consumed on disk"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c2c3-multi-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let home_1 = temp_dir.join("runner-1");
+    std::fs::create_dir_all(&home_1).unwrap();
+    let work_1 = temp_dir.join("work-1");
+    std::fs::create_dir_all(&work_1).unwrap();
+
+    let home_2 = temp_dir.join("runner-2");
+    std::fs::create_dir_all(&home_2).unwrap();
+    let work_2 = temp_dir.join("work-2");
+    std::fs::create_dir_all(&work_2).unwrap();
+
+    let home_3 = temp_dir.join("runner-3");
+    std::fs::create_dir_all(&home_3).unwrap();
+    let entry_3 = home_3.join("run.cmd");
+    std::fs::write(&entry_3, b"@echo off\r\n").unwrap();
+    let work_3 = temp_dir.join("work-3");
+    std::fs::create_dir_all(&work_3).unwrap();
+
+    let identity = OpaqueIdentityReference::new("test", "id").unwrap();
+
+    let mut reg = runnermesh::RunnerRegistry::default();
+    let r1 = runnermesh::RunnerRecord {
+        local_runner_key: "runner-1".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "org".to_string(),
+            repository: "repo1".to_string(),
+        },
+        runner_id: 101,
+        expected_runner_name: "r1".to_string(),
+        runner_home: home_1.clone(),
+        work_root: work_1.clone(),
+        execution_identity_ref: identity.clone(),
+        backend: runnermesh::RegistryBackendBinding::WindowsService {
+            service_name: "actions.runner.svc1".to_string(),
+        },
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: true,
+    };
+    let r2 = runnermesh::RunnerRecord {
+        local_runner_key: "runner-2".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "org".to_string(),
+            repository: "repo2".to_string(),
+        },
+        runner_id: 102,
+        expected_runner_name: "r2".to_string(),
+        runner_home: home_2.clone(),
+        work_root: work_2.clone(),
+        execution_identity_ref: identity.clone(),
+        backend: runnermesh::RegistryBackendBinding::WindowsService {
+            service_name: "actions.runner.svc2".to_string(),
+        },
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: true,
+    };
+    let r3 = runnermesh::RunnerRecord {
+        local_runner_key: "runner-3".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "org".to_string(),
+            repository: "repo3".to_string(),
+        },
+        runner_id: 103,
+        expected_runner_name: "r3".to_string(),
+        runner_home: home_3.clone(),
+        work_root: work_3.clone(),
+        execution_identity_ref: identity.clone(),
+        backend: runnermesh::RegistryBackendBinding::UserSession,
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: true,
+    };
+
+    reg.records.push(r1);
+    reg.records.push(r2);
+    reg.records.push(r3);
+
+    let install_root = temp_dir.join("installed");
+    std::fs::create_dir_all(&install_root).unwrap();
+    let registry_file = install_root.join("runners-registry.json");
+    std::fs::write(&registry_file, serde_json::to_string_pretty(&reg).unwrap()).unwrap();
+
+    let mock_scm = MockScmBackend::new();
+    let img_1 = runner_service_image_token(&home_1);
+    let img_2 = runner_service_image_token(&home_2);
+
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.svc1".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: img_1,
+        execution_identity_token: "id".to_string(),
+    });
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.svc2".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: img_2,
+        execution_identity_token: "id".to_string(),
+    });
+
+    let helper = PrivilegedScmHelper::new(mock_scm.clone(), LiveScmExecutionGate::CLOSED);
+    let session_transport = Arc::new(
+        runnermesh::SimulatedUserSessionProcessTransport::new()
+            .with_active_session("runner-3", DiscoveredLifecycle::Listening),
+    );
+    let session_coord = Arc::new(runnermesh::StandardSessionCoordinator::new(
+        session_transport.clone(),
+    ));
+
+    let authoritative_backend = Arc::new(
+        AuthoritativeMultiRunnerLifecycleBackend::new(helper)
+            .with_session_coordinator(session_coord),
+    );
+
+    let scope_1 = RegistrationScope::Repository {
+        owner: "org".to_string(),
+        repository: "repo1".to_string(),
+    };
+    let scope_2 = RegistrationScope::Repository {
+        owner: "org".to_string(),
+        repository: "repo2".to_string(),
+    };
+    let scope_3 = RegistrationScope::Repository {
+        owner: "org".to_string(),
+        repository: "repo3".to_string(),
+    };
+
+    authoritative_backend.register_runner_target_with_service(
+        "runner-1",
+        scope_1.clone(),
+        101,
+        Some("actions.runner.svc1"),
+    );
+    authoritative_backend.register_runner_target_with_service(
+        "runner-2",
+        scope_2.clone(),
+        102,
+        Some("actions.runner.svc2"),
+    );
+    authoritative_backend.register_runner_target_detailed(
+        "runner-3",
+        scope_3.clone(),
+        103,
+        None,
+        Some(&home_3),
+        true,
+    );
+
+    let coord_1 =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_1.clone(), 101, true));
+    let coord_2 =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_2.clone(), 102, true));
+    let coord_3 =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_3.clone(), 103, true));
+
+    authoritative_backend.register_runner_admission_coordinator(scope_1, 101, coord_1);
+    authoritative_backend.register_runner_admission_coordinator(scope_2, 102, coord_2);
+    authoritative_backend.register_runner_admission_coordinator(scope_3, 103, coord_3);
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("c2c3-test-{}", std::process::id()));
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: install_root.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(authoritative_backend),
+        discovery_report: None,
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
+    };
+
+    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    let resp1 = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-1".to_string(),
+            prepare_only: false,
+            when_idle: false,
+        }))
+        .expect("IPC disable runner-1");
+    assert!(matches!(
+        resp1.body,
+        runnermesh::IpcResponseBody::Success(_)
+    ));
+
+    let resp3 = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-3".to_string(),
+            prepare_only: false,
+            when_idle: false,
+        }))
+        .expect("IPC disable runner-3");
+    assert!(matches!(
+        resp3.body,
+        runnermesh::IpcResponseBody::Success(_)
+    ));
+
+    std::thread::sleep(Duration::from_millis(100));
+
+    assert_eq!(
+        *session_transport.stopped.lock().unwrap(),
+        vec!["runner-3".to_string()]
+    );
+    assert!(
+        mock_scm.service_actions("actions.runner.svc2").is_empty(),
+        "Runner 2 must receive zero control actions"
+    );
+
+    let resp3_en = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersEnable {
+            local_runner_key: "runner-3".to_string(),
+            prepare_only: false,
+        }))
+        .expect("IPC enable runner-3");
+    assert!(matches!(
+        resp3_en.body,
+        runnermesh::IpcResponseBody::Success(_)
+    ));
+
+    std::thread::sleep(Duration::from_millis(80));
+
+    assert_eq!(
+        *session_transport.launched.lock().unwrap(),
+        vec!["runner-3".to_string()]
+    );
+
+    runtime.shutdown();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
+    let relative_archive = std::path::PathBuf::from(
+        r"..\..\runnermesh-160h-audit\2026-11-12\160H-FINAL-CLOSEOUT-2703a1e\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
+    );
+    let relative_helper = std::path::PathBuf::from(
+        r"..\..\runnermesh-160h-audit\2026-11-12\160H-FINAL-CLOSEOUT-2703a1e\artifacts\lrm-rc\runnermesh-package.exe",
+    );
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "rm-c5b-sandbox-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_root).unwrap();
+
+    let (rc_archive, _created_guard) = if relative_archive.is_file() {
+        assert!(relative_helper.is_file(), "RC package helper must exist");
+        let target_archive = temp_root.join("runnermesh-0.2.0-rc.1-windows-x64.zip");
+        std::fs::copy(&relative_archive, &target_archive).unwrap();
+        (target_archive, None)
+    } else {
+        // CI fallback: create authentic RC package in task-owned temp directory
+        let ci_staging = temp_root.join("ci-staging");
+        std::fs::create_dir_all(&ci_staging).unwrap();
+        let agent_exe = ci_staging.join("runnermesh-agent.exe");
+        let cli_exe = ci_staging.join("runnermesh.exe");
+        let agent_manifest = ci_staging.join("runnermesh-agent.manifest");
+        std::fs::write(&agent_exe, b"ci-rc-agent-stub").unwrap();
+        std::fs::write(&cli_exe, b"ci-rc-cli-stub").unwrap();
+        std::fs::write(&agent_manifest, b"ci-rc-manifest-stub").unwrap();
+
+        let input = runnermesh::PackageInput {
+            provenance: runnermesh::PackageProvenance {
+                version: "0.2.0-rc.1".to_string(),
+                commit: "850269aa12c6bf44c10d1f17678716eafca329f7".to_string(),
+                channel: "rc".to_string(),
+                target: runnermesh::WINDOWS_X64_TARGET.to_string(),
+            },
+            cli_binary: cli_exe,
+            agent_binary: agent_exe,
+            agent_manifest,
+        };
+        let archives_dir = temp_root.join("archives");
+        let receipt = runnermesh::PackageVerifier::create(&input, &archives_dir).unwrap();
+        (receipt.archive, Some(ci_staging))
+    };
+
+    let (manifest, hash) = runnermesh::PackageVerifier::verify_with_hash(&rc_archive).unwrap();
+    assert!(!hash.is_empty(), "RC package hash must be non-empty");
+    assert_eq!(manifest.provenance.version, "0.2.0-rc.1");
+    assert_eq!(manifest.provenance.channel, "rc");
+    assert_eq!(manifest.provenance.commit.len(), 40);
+
+    let staging_1 = temp_root.join("staging-1");
+    let install_root = temp_root.join("installed");
+
+    let installation = runnermesh::Installation::new(&install_root);
+    let extracted = runnermesh::PackageVerifier::extract_runtime_expected(
+        &rc_archive,
+        &staging_1,
+        &manifest.provenance,
+        &hash,
+    )
+    .unwrap();
+
+    let accepted_members = runnermesh::VersionManifest {
+        files: extracted.files,
+    };
+    let receipt = installation
+        .install_with_manifest("0.2.0-rc.1", &staging_1, &accepted_members)
+        .unwrap();
+    assert!(receipt.activated);
+    assert_eq!(receipt.version, "0.2.0-rc.1");
+    assert_eq!(
+        installation.active_agent_path().unwrap(),
+        install_root
+            .join("versions")
+            .join("0.2.0-rc.1")
+            .join("runnermesh-agent.exe")
+    );
+
+    let staging_2 = temp_root.join("staging-2");
+    std::fs::create_dir_all(&staging_2).unwrap();
+    for name in [
+        "runnermesh.exe",
+        "runnermesh-agent.exe",
+        "runnermesh-agent.manifest",
+    ] {
+        std::fs::copy(staging_1.join(name), staging_2.join(name)).unwrap();
+    }
+    let receipt_2 = installation
+        .install_with_manifest("0.2.0-rc.2", &staging_2, &accepted_members)
+        .unwrap();
+    assert!(
+        !receipt_2.activated,
+        "Second version slot installation must not automatically activate"
+    );
+    assert_eq!(receipt_2.version, "0.2.0-rc.2");
+    installation.select_active("0.2.0-rc.2").unwrap();
+    assert_eq!(
+        installation.active_agent_path().unwrap(),
+        install_root
+            .join("versions")
+            .join("0.2.0-rc.2")
+            .join("runnermesh-agent.exe")
+    );
+
+    installation.select_active("0.2.0-rc.1").unwrap();
+    assert_eq!(
+        installation.active_agent_path().unwrap(),
+        install_root
+            .join("versions")
+            .join("0.2.0-rc.1")
+            .join("runnermesh-agent.exe")
+    );
+
+    let user_log = install_root.join("logs").join("preserved.log");
+    std::fs::create_dir_all(install_root.join("logs")).unwrap();
+    std::fs::write(&user_log, b"preserve me").unwrap();
+
+    let startup = runnermesh::WindowsUserStartupBackend::for_current_user().unwrap();
+    let uninst = installation.uninstall(&startup).unwrap();
+    assert!(uninst.removed_versions >= 2);
+    assert!(uninst.foreign_content_preserved);
+    assert!(
+        user_log.exists(),
+        "Foreign user log must be preserved on uninstall"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}

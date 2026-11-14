@@ -202,7 +202,6 @@ impl RunnerAggregateSnapshot {
     }
 }
 
-/// Aggregates detailed resource samples honoring freshness and attribution boundaries.
 pub fn aggregate_runner_resources(
     samples: &[RunnerResourceSample],
     now_unix_ms: u64,
@@ -345,6 +344,68 @@ pub fn format_resource_estimate(aggregate: &RunnerResourceAggregate, chinese: bo
             aggregate.sampled_at_unix_ms, aggregate.confidence
         )
     }
+}
+
+/// Queries point-in-time process memory working set bytes without elevation or process mutation.
+#[cfg(windows)]
+pub fn query_process_working_set(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    type GetProcessMemoryInfoFn =
+        unsafe extern "system" fn(HANDLE, *mut ProcessMemoryCounters, u32) -> i32;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let kernel32 = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
+            c"kernel32.dll".as_ptr().cast(),
+        );
+        let proc = if !kernel32.is_null() {
+            windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                kernel32,
+                c"K32GetProcessMemoryInfo".as_ptr().cast(),
+            )
+        } else {
+            None
+        };
+        let res = if let Some(proc) = proc {
+            let func: GetProcessMemoryInfoFn = std::mem::transmute(proc);
+            let mut counters: ProcessMemoryCounters = std::mem::zeroed();
+            counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+            if func(handle, &mut counters, counters.cb) != 0 {
+                Some(counters.working_set_size as u64)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        CloseHandle(handle);
+        res
+    }
+}
+
+/// Point-in-time process memory working set query on non-Windows platforms.
+#[cfg(not(windows))]
+pub fn query_process_working_set(_pid: u32) -> Option<u64> {
+    None
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -490,5 +551,23 @@ mod tests {
         assert_eq!(mem_agg.listener_working_set_bytes, Some(50 * 1024 * 1024));
         assert_eq!(mem_agg.worker_working_set_bytes, Some(150 * 1024 * 1024));
         assert_eq!(mem_agg.confidence, ResourceSampleConfidence::Estimate);
+    }
+
+    #[test]
+    fn query_working_set_for_current_and_invalid_pid() {
+        #[cfg(windows)]
+        {
+            let current_pid = std::process::id();
+            let ws = query_process_working_set(current_pid);
+            assert!(
+                ws.is_some_and(|bytes| bytes > 0),
+                "Working set of current process must be non-zero"
+            );
+            assert!(query_process_working_set(0).is_none());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(query_process_working_set(std::process::id()).is_none());
+        }
     }
 }

@@ -268,10 +268,19 @@ fn observe_session_home(
     })
 }
 
-pub fn observe_runner_processes_from_images(
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DiscoveredRunnerProcesses {
+    pub listener_present: bool,
+    pub worker_present: bool,
+    pub evidence_complete: bool,
+    pub listener_pid: Option<u32>,
+    pub worker_pid: Option<u32>,
+}
+
+pub fn observe_runner_processes_with_pids_from_images(
     runner_home: &Path,
     images: &[crate::process_snapshot::ProcessImage],
-) -> (bool, bool, bool) {
+) -> DiscoveredRunnerProcesses {
     let home = normalize_path_key(runner_home);
     let expected_listener =
         normalize_path_key(&runner_home.join("bin").join("Runner.Listener.exe"));
@@ -279,6 +288,8 @@ pub fn observe_runner_processes_from_images(
     let mut listener = false;
     let mut worker = false;
     let mut evidence_complete = true;
+    let mut listener_pid = None;
+    let mut worker_pid = None;
 
     for image in images {
         let name = image.executable_name.to_ascii_lowercase();
@@ -296,6 +307,7 @@ pub fn observe_runner_processes_from_images(
             evidence_complete = false;
             if is_worker {
                 worker = true;
+                worker_pid = Some(image.process_id);
             }
             continue;
         };
@@ -311,6 +323,7 @@ pub fn observe_runner_processes_from_images(
                 evidence_complete = false;
                 if is_worker {
                     worker = true;
+                    worker_pid = Some(image.process_id);
                 }
             }
             continue;
@@ -320,29 +333,62 @@ pub fn observe_runner_processes_from_images(
             && (path_key == expected_listener || path_key.ends_with("\\bin\\runner.listener.exe"))
         {
             listener = true;
+            listener_pid = Some(image.process_id);
         } else if is_worker
             && (path_key == expected_worker || path_key.ends_with("\\bin\\runner.worker.exe"))
         {
             worker = true;
+            worker_pid = Some(image.process_id);
         }
     }
 
-    (listener, worker, evidence_complete)
+    DiscoveredRunnerProcesses {
+        listener_present: listener,
+        worker_present: worker,
+        evidence_complete,
+        listener_pid,
+        worker_pid,
+    }
 }
 
-pub fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+pub fn observe_runner_processes_from_images(
+    runner_home: &Path,
+    images: &[crate::process_snapshot::ProcessImage],
+) -> (bool, bool, bool) {
+    let p = observe_runner_processes_with_pids_from_images(runner_home, images);
+    (p.listener_present, p.worker_present, p.evidence_complete)
+}
+
+pub fn observe_runner_processes_with_pids(runner_home: &Path) -> DiscoveredRunnerProcesses {
     #[cfg(windows)]
     {
         match crate::process_snapshot::executable_images() {
-            Ok(images) => observe_runner_processes_from_images(runner_home, &images),
-            Err(_) => (false, false, false),
+            Ok(images) => observe_runner_processes_with_pids_from_images(runner_home, &images),
+            Err(_) => DiscoveredRunnerProcesses {
+                listener_present: false,
+                worker_present: false,
+                evidence_complete: false,
+                listener_pid: None,
+                worker_pid: None,
+            },
         }
     }
     #[cfg(not(windows))]
     {
         let _ = runner_home;
-        (false, false, true)
+        DiscoveredRunnerProcesses {
+            listener_present: false,
+            worker_present: false,
+            evidence_complete: true,
+            listener_pid: None,
+            worker_pid: None,
+        }
     }
+}
+
+pub fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+    let p = observe_runner_processes_with_pids(runner_home);
+    (p.listener_present, p.worker_present, p.evidence_complete)
 }
 
 fn normalize_path_key(path: &Path) -> String {

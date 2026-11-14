@@ -172,9 +172,9 @@ pub use runner_registry::{
 };
 pub use runner_resource::{
     aggregate_runner_memory, aggregate_runner_resources, format_resource_estimate,
-    ProcessAttributionDisposition, ResourceSampleConfidence, RunnerAggregateSnapshot,
-    RunnerCpuSample, RunnerMemorySample, RunnerResourceAggregate, RunnerResourceRole,
-    RunnerResourceSample,
+    query_process_working_set, ProcessAttributionDisposition, ResourceSampleConfidence,
+    RunnerAggregateSnapshot, RunnerCpuSample, RunnerMemorySample, RunnerResourceAggregate,
+    RunnerResourceRole, RunnerResourceSample,
 };
 pub use runner_service_backend::{
     PreparedServiceAction, ServiceBackendRefusal, ServiceObservation, ServicePrepareOutcome,
@@ -232,8 +232,9 @@ pub use windows_github::{
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
     observe_runner_processes_for_home, observe_runner_processes_from_images,
+    observe_runner_processes_with_pids, observe_runner_processes_with_pids_from_images,
     runner_home_from_image, service_image_path_token, ConfiguredSessionDiscoverySource,
-    PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
+    DiscoveredRunnerProcesses, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
     opaque_image_token, reconcile_interrupted_scm_journal, runner_service_binary_path,
