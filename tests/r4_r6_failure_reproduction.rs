@@ -1521,6 +1521,7 @@ fn regression_c5_shutdown_timeout_path_still_joins_and_reclaims_handle() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c1_cross_process_replay_protection_two_preopened_instances() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-c1-replay-{}",
@@ -1555,6 +1556,7 @@ fn regression_c1_cross_process_replay_protection_two_preopened_instances() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c1_durable_ledger_corrupt_json_fails_closed() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-c1-corrupt-{}",
@@ -1591,6 +1593,7 @@ fn regression_c1_durable_ledger_corrupt_json_fails_closed() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c1_registry_load_duplicate_rejection() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-c1-registry-{}",
@@ -1648,6 +1651,7 @@ fn regression_c1_registry_load_duplicate_rejection() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c2_worker_busy_observation_prevents_stop() {
     let mock_scm = MockScmBackend::new();
     let image_token = "test-image".to_string();
@@ -1698,6 +1702,7 @@ fn regression_c2_worker_busy_observation_prevents_stop() {
 }
 
 #[test]
+#[cfg(windows)]
 fn regression_c3_user_session_process_observation_and_transport() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-c3-session-{}",
