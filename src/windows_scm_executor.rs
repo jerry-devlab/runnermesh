@@ -318,6 +318,7 @@ impl ProcessFileLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(lock_path)?;
         use std::os::unix::io::AsRawFd;
         let fd = file.as_raw_fd();
