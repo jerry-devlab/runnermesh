@@ -2992,9 +2992,7 @@ fn regression_finding1_session_gate_cannot_be_opened_without_authority_and_bindi
 
 #[test]
 fn regression_finding2_incomplete_process_evidence_yields_unknown_and_refuses() {
-    use runnermesh::{
-        DiscoveredLifecycle, GatedUserSessionProcessTransport, UserSessionProcessTransport,
-    };
+    use runnermesh::{GatedUserSessionProcessTransport, UserSessionProcessTransport};
 
     // When process discovery evidence is incomplete or home doesn't exist, Gated transport
     // must report Unknown, never masquerading as Stopped!
@@ -3006,7 +3004,9 @@ fn regression_finding2_incomplete_process_evidence_yields_unknown_and_refuses() 
     let transport = GatedUserSessionProcessTransport::closed();
     let obs = transport.observe_session(&record);
     #[cfg(windows)]
-    assert_eq!(obs, Some(DiscoveredLifecycle::Unknown));
+    assert_eq!(obs, Some(runnermesh::DiscoveredLifecycle::Unknown));
+    #[cfg(not(windows))]
+    assert_eq!(obs, None);
 }
 
 #[test]
