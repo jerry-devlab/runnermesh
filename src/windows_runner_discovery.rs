@@ -326,7 +326,6 @@ pub fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, boo
     }
 }
 
-#[cfg(any(windows, test))]
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -336,7 +335,6 @@ fn normalize_path_key(path: &Path) -> String {
 
 /// True when `path_key` is `home` or a descendant separated by `\`.
 /// Rejects sibling prefix collisions (`home\a` vs `home\abc`).
-#[cfg(any(windows, test))]
 fn path_is_under_home_key(path_key: &str, home_key: &str) -> bool {
     if path_key == home_key {
         return true;

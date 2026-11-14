@@ -15,7 +15,6 @@ pub(crate) enum ProcessSnapshotError {
 
 /// One image observed in a point-in-time local process snapshot. Missing path
 /// evidence never grants exact-runner authority.
-#[cfg(any(windows, test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessImage {
     pub process_id: u32,

@@ -129,7 +129,6 @@ pub use probe::{
     SteamGameProbe, UserActivityProbe, UserActivitySource, WindowsProcessSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource,
 };
-#[cfg(any(windows, test))]
 pub use process_snapshot::ProcessImage;
 pub use qualification::{
     assess_h1_workflow_source, assess_h1_workflow_template, h1_workflow_template,
