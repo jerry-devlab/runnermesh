@@ -2641,7 +2641,13 @@ fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick()
         runnermesh::IpcResponseBody::Success(_)
     ));
 
-    std::thread::sleep(Duration::from_millis(100));
+    let deadline_stop = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline_stop {
+        if !session_transport.stopped.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
 
     assert_eq!(
         *session_transport.stopped.lock().unwrap(),
@@ -2663,7 +2669,13 @@ fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick()
         runnermesh::IpcResponseBody::Success(_)
     ));
 
-    std::thread::sleep(Duration::from_millis(80));
+    let deadline_launch = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline_launch {
+        if !session_transport.launched.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
 
     assert_eq!(
         *session_transport.launched.lock().unwrap(),
