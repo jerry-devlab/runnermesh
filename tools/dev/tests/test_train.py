@@ -1,6 +1,7 @@
 import argparse
 import io
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,19 +9,23 @@ from typing import Mapping, Sequence
 from unittest import mock
 
 from tools.dev.train import (
+    APPROVED_CANDIDATE_UNTRACKED_DIR,
     CI_GATE_NAME,
     EXPECTED_REPOSITORY,
     CommandResult,
     GithubClient,
     Repository,
+    SubprocessRunner,
     TimingStore,
     ToolError,
     build_merge_command,
     calculate_timing_fields,
+    check_candidate_worktree,
     command_candidate,
     command_merge,
     command_wait_main,
     command_wait_pr,
+    fingerprint_directory,
     _main_run_health,
     normalize_repository_identity,
     next_merge_allowed,
@@ -859,6 +864,90 @@ class TimingAndAvailabilityTests(unittest.TestCase):
             cwd=Path.cwd(),
             timeout=7.5,
         )
+
+    def test_check_candidate_worktree_clean_passes(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = ""
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertTrue(is_clean)
+        self.assertIsNone(err)
+        self.assertEqual(fp, {})
+
+    def test_check_candidate_worktree_approved_untracked_dir_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            approved = root / "goals" / "RM-160H-DELIVERY-PROGRAM-001"
+            approved.mkdir(parents=True)
+            (approved / "test.txt").write_bytes(b"content")
+
+            repo = mock.Mock()
+            repo.root = root
+            repo.status_porcelain.return_value = "?? goals/RM-160H-DELIVERY-PROGRAM-001/\n"
+
+            is_clean, err, fp = check_candidate_worktree(repo)
+            self.assertTrue(is_clean, msg=err)
+            self.assertIsNone(err)
+            self.assertIn("goals/RM-160H-DELIVERY-PROGRAM-001/test.txt", fp)
+
+    def test_check_candidate_worktree_prefix_similar_untracked_refused(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = "?? goals/RM-160H-DELIVERY-PROGRAM-001-fake/\n"
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertFalse(is_clean)
+        self.assertIn("unapproved untracked", err or "")
+
+    def test_check_candidate_worktree_other_untracked_refused(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = "?? random_file.txt\n"
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertFalse(is_clean)
+        self.assertIn("unapproved untracked", err or "")
+
+    def test_check_candidate_worktree_tracked_dirty_refused(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = " M src/agent.rs\n"
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertFalse(is_clean)
+        self.assertIn("tracked changes present", err or "")
+
+    def test_fingerprint_directory_deterministic_and_sensitive_to_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dir_path = root / "test_dir"
+            dir_path.mkdir()
+            file1 = dir_path / "a.txt"
+            file1.write_bytes(b"hello")
+
+            fp1 = fingerprint_directory(root, "test_dir")
+            self.assertIn("test_dir/a.txt", fp1)
+
+            fp2 = fingerprint_directory(root, "test_dir")
+            self.assertEqual(fp1, fp2)
+
+            file1.write_bytes(b"hello world")
+            fp3 = fingerprint_directory(root, "test_dir")
+            self.assertNotEqual(fp1, fp3)
+
+    def test_subprocess_runner_stdin_eof(self) -> None:
+        runner = SubprocessRunner()
+        result = runner.run(
+            (sys.executable, "-c", "import sys; data = sys.stdin.read(); sys.stdout.write(f'read {len(data)}')"),
+            cwd=Path.cwd(),
+            timeout=5.0,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "read 0")
+
+    def test_subprocess_runner_stdin_input(self) -> None:
+        runner = SubprocessRunner()
+        result = runner.run(
+            (sys.executable, "-c", "import sys; data = sys.stdin.read(); sys.stdout.write(f'received {data}')"),
+            cwd=Path.cwd(),
+            timeout=5.0,
+            stdin_input="payload123",
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "received payload123")
 
 
 if __name__ == "__main__":
