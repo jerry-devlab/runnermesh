@@ -2617,6 +2617,13 @@ fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick()
     let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
 
+    // Set baseline mode to Idle via IPC so Agent Core permits capacity
+    let _ = ipc_client
+        .call(IpcRequest::new(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        }))
+        .expect("IPC SetMode to Idle");
+
     let resp1 = ipc_client
         .call(IpcRequest::new(AgentCommand::RunnersDisable {
             local_runner_key: "runner-1".to_string(),
