@@ -32,10 +32,10 @@ use crate::{
     HostSnapshot, HostSource, Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind,
     LinkSnapshot, LinkState, LiveScmExecutionGate, LocalAgentTransport,
     MultiRunnerLifecycleBackend, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
-    PrivilegedScmHelper, ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph,
-    TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
-    WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
-    WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
+    PrivilegedScmHelper, ProcessListProbe, ReasonCode, RegistryStore, RunnerPhase, ThemePreference,
+    TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
+    UserActivityProbe, WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource,
+    WindowsRunnerSource, WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
     WindowsUserSessionSupervisorAdapter,
 };
 
@@ -194,7 +194,49 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
             WindowsScmBackend::mutation_inert(),
             LiveScmExecutionGate::CLOSED,
         ))
-        .with_session_coordinator(Arc::new(crate::StandardSessionCoordinator::inert()));
+        .with_session_coordinator(Arc::new(crate::StandardSessionCoordinator::new(
+            Arc::new(crate::GatedUserSessionProcessTransport::closed()),
+        )));
+
+    let config_path = installation.agent_config_path();
+    let registry_path = config_path
+        .parent()
+        .map(|parent| parent.join("runners-registry.json"))
+        .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
+
+    if registry_path.is_file() {
+        if let Ok(Some(registry)) = crate::FileRegistryStore::new(&registry_path).load() {
+            for record in registry.records {
+                let service_name = match record.backend {
+                    crate::RegistryBackendBinding::WindowsService { ref service_name } => {
+                        Some(service_name.clone())
+                    }
+                    _ => None,
+                };
+                authoritative_backend.register_runner_target_with_service(
+                    &record.local_runner_key,
+                    record.registration_scope.clone(),
+                    record.runner_id,
+                    service_name.as_deref(),
+                );
+                if record.managed_admission {
+                    if let Some(ref binding) = binding {
+                        if binding.admission.scope == record.registration_scope
+                            && binding.admission.runner_id == record.runner_id
+                        {
+                            if let Some(ref coord) = admission_coord {
+                                authoritative_backend.register_runner_admission_coordinator(
+                                    record.registration_scope.clone(),
+                                    record.runner_id,
+                                    Arc::clone(coord),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(coord) = admission_coord {
         authoritative_backend = authoritative_backend.with_admission_coordinator(coord);
     }
@@ -267,6 +309,32 @@ pub(crate) fn cancel_thread_io(thread_handle: isize) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ShutdownError {
+    Incomplete {
+        pipe_timed_out: bool,
+        poll_timed_out: bool,
+        elapsed_ms: u128,
+    },
+}
+
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incomplete {
+                pipe_timed_out,
+                poll_timed_out,
+                elapsed_ms,
+            } => write!(
+                f,
+                "shutdown-incomplete: pipe_timed_out={pipe_timed_out}, poll_timed_out={poll_timed_out}, elapsed_ms={elapsed_ms}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ShutdownError {}
+
 /// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
 pub struct RunningInstalledAgentSandbox {
     core: Arc<Mutex<RuntimeCore>>,
@@ -295,6 +363,19 @@ impl RunningInstalledAgentSandbox {
         &self.endpoint
     }
 
+    /// Fault injection helper for qualification: attaches an uncompleted thread to simulate
+    /// a worker or background loop that is still finishing work when shutdown is invoked.
+    pub fn attach_slow_worker_for_test(
+        &mut self,
+        duration: std::time::Duration,
+    ) -> std::sync::mpsc::Sender<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.poll_thread = Some(thread::spawn(move || {
+            let _ = rx.recv_timeout(duration);
+        }));
+        tx
+    }
+
     /// Returns the state directory of this sandbox.
     pub fn state_root(&self) -> &Path {
         &self.state_root
@@ -308,16 +389,29 @@ impl RunningInstalledAgentSandbox {
             .map(|s| s.trim().to_string())
     }
 
+    /// Inspects whether all background threads have been safely joined.
+    pub fn is_completely_shutdown(&self) -> bool {
+        self.pipe_thread.is_none() && self.poll_thread.is_none()
+    }
+
     /// Performs graceful shutdown of the background pipe and polling threads.
     ///
     /// Wakes up or cancels any blocking `ConnectNamedPipe` waiting on the pipe thread,
     /// marks exit requested, and reclaims all thread handles within a bounded duration.
-    pub fn shutdown(self) {
-        self.shutdown_with_timeout(std::time::Duration::from_secs(5));
+    pub fn shutdown(mut self) -> Result<(), ShutdownError> {
+        self.shutdown_with_timeout(std::time::Duration::from_secs(5))
     }
 
     /// Performs graceful shutdown with a caller-specified upper bound duration.
-    pub fn shutdown_with_timeout(mut self, timeout: std::time::Duration) {
+    ///
+    /// If all threads terminate within `timeout`, returns `Ok(())` and writes `shutdown-complete`.
+    /// If any thread fails to exit within `timeout`, the handle is preserved, `shutdown-incomplete`
+    /// is written, and `Err(ShutdownError::Incomplete)` is returned, allowing the caller to retain
+    /// recoverable control authority without dropping or leaking threads.
+    pub fn shutdown_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<(), ShutdownError> {
         println!("[sandbox:shutdown] stage=shutdown-started");
         let _ = write_runtime_stage(&self.state_root, "shutdown-started");
         self.exit.requested.store(true, Ordering::Release);
@@ -344,112 +438,69 @@ impl RunningInstalledAgentSandbox {
             let _ = write_runtime_stage(&self.state_root, "pipe-listener-woken");
         }
 
-        // Phase 3: Bounded reclamation of pipe thread
         let start = std::time::Instant::now();
-        while let Some(ref handle) = self.pipe_thread {
-            if handle.is_finished() {
-                break;
-            }
-            if start.elapsed() > timeout {
-                eprintln!("[sandbox:shutdown] WARN: pipe_thread did not terminate within timeout; escalating cancel before join");
-                let _ = write_runtime_stage(&self.state_root, "shutdown-timeout-escalated");
+
+        // Phase 3: Bounded reclamation of pipe thread
+        let mut pipe_joined = true;
+        if let Some(ref handle) = self.pipe_thread {
+            while !handle.is_finished() && start.elapsed() < timeout {
                 #[cfg(windows)]
                 {
-                    if native_handle != 0 {
-                        let _ = cancel_thread_io(native_handle);
+                    let nh = self.pipe_thread_native_handle.load(Ordering::Acquire);
+                    if nh != 0 {
+                        let _ = cancel_thread_io(nh);
                     }
                     let _ = crate::ipc::wake_listener(&self.endpoint);
                 }
-                break;
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            #[cfg(windows)]
-            {
-                if native_handle != 0 {
-                    let _ = cancel_thread_io(native_handle);
-                }
-                let _ = crate::ipc::wake_listener(&self.endpoint);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
 
-        // Bounded join: safely join the thread within deadline, recording deadline breach if blocked
-        let mut joined_ok = false;
-        if let Some(handle) = self.pipe_thread.take() {
             if handle.is_finished() {
+                let handle = self.pipe_thread.take().unwrap();
                 let _ = handle.join();
-                joined_ok = true;
-            } else {
-                let grace_start = std::time::Instant::now();
-                while !handle.is_finished()
-                    && grace_start.elapsed() < std::time::Duration::from_millis(500)
-                {
-                    #[cfg(windows)]
-                    {
-                        if native_handle != 0 {
-                            let _ = cancel_thread_io(native_handle);
-                        }
-                        let _ = crate::ipc::wake_listener(&self.endpoint);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    joined_ok = true;
-                } else {
-                    eprintln!("[sandbox:shutdown] ERROR: pipe_thread failed to exit within bounded deadline; recording deadline breach");
-                    let _ = write_runtime_stage(&self.state_root, "shutdown-deadline-exceeded");
-                }
-            }
-            if joined_ok {
                 println!(
                     "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
                     start.elapsed().as_millis()
                 );
                 let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
-            }
-        }
-
-        // Ensure native thread handle is fully reclaimed and never leaked
-        #[cfg(windows)]
-        {
-            let remaining_handle = self.pipe_thread_native_handle.swap(0, Ordering::AcqRel);
-            if remaining_handle != 0 {
-                unsafe {
-                    windows_sys::Win32::Foundation::CloseHandle(
-                        remaining_handle as windows_sys::Win32::Foundation::HANDLE,
-                    );
-                }
-            }
-        }
-
-        let poll_start = std::time::Instant::now();
-        if let Some(handle) = self.poll_thread.take() {
-            let mut poll_joined_ok = false;
-            if handle.is_finished() {
-                let _ = handle.join();
-                poll_joined_ok = true;
             } else {
-                let poll_grace_start = std::time::Instant::now();
-                while !handle.is_finished()
-                    && poll_grace_start.elapsed() < std::time::Duration::from_millis(500)
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    poll_joined_ok = true;
-                } else {
-                    eprintln!("[sandbox:shutdown] ERROR: poll_thread failed to exit within bounded deadline; recording deadline breach");
-                    let _ = write_runtime_stage(&self.state_root, "poll-thread-deadline-exceeded");
-                }
+                eprintln!("[sandbox:shutdown] ERROR: pipe_thread failed to exit within timeout; preserving handle for recovery");
+                let _ = write_runtime_stage(&self.state_root, "pipe-thread-deadline-exceeded");
+                pipe_joined = false;
             }
-            if poll_joined_ok {
+        }
+
+        // Phase 4: Bounded reclamation of poll thread
+        let mut poll_joined = true;
+        if let Some(ref handle) = self.poll_thread {
+            let poll_start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < timeout {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            if handle.is_finished() {
+                let handle = self.poll_thread.take().unwrap();
+                let _ = handle.join();
                 println!(
                     "[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}",
                     poll_start.elapsed().as_millis()
                 );
                 let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
+            } else {
+                eprintln!("[sandbox:shutdown] ERROR: poll_thread failed to exit within timeout; preserving handle for recovery");
+                let _ = write_runtime_stage(&self.state_root, "poll-thread-deadline-exceeded");
+                poll_joined = false;
             }
+        }
+
+        if !pipe_joined || !poll_joined {
+            eprintln!("[sandbox:shutdown] stage=shutdown-incomplete");
+            let _ = write_runtime_stage(&self.state_root, "shutdown-incomplete");
+            return Err(ShutdownError::Incomplete {
+                pipe_timed_out: !pipe_joined,
+                poll_timed_out: !poll_joined,
+                elapsed_ms: start.elapsed().as_millis(),
+            });
         }
 
         println!(
@@ -457,6 +508,7 @@ impl RunningInstalledAgentSandbox {
             start.elapsed().as_millis()
         );
         let _ = write_runtime_stage(&self.state_root, "shutdown-complete");
+        Ok(())
     }
 }
 

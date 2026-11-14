@@ -537,7 +537,7 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
         resp.body,
         runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Accepted { .. })
     ));
-    runtime.shutdown();
+    let _ = runtime.shutdown();
 
     // 5. Restart durability: Reassemble from persistent disk storage
     let obs_restart = runnermesh::agent_runtime::RuntimeObserver::new(None, Vec::new());
@@ -832,7 +832,7 @@ fn regression_r6_falsifiability_proves_disabled_scheduler_produces_zero_actions(
         resp.body,
         runnermesh::IpcResponseBody::Success(ref boxed) if matches!(**boxed, runnermesh::AgentResponse::Accepted { .. })
     ));
-    runtime.shutdown();
+    let _ = runtime.shutdown();
 }
 
 #[test]
@@ -1029,7 +1029,7 @@ fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
     // 9. Shutdown runtime cleanly
     println!("[c5_lifecycle] Phase 9: Graceful runtime shutdown");
     let shutdown_start = std::time::Instant::now();
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let shutdown_elapsed = shutdown_start.elapsed();
     println!("[c5_lifecycle] Phase 9 complete: runtime shut down in {shutdown_elapsed:?}");
     assert!(
@@ -1094,7 +1094,7 @@ fn regression_c5_shutdown_without_client_unblocks_cleanly() {
     std::thread::sleep(Duration::from_millis(50));
 
     let start = std::time::Instant::now();
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_shutdown_without_client] shutdown completed in {elapsed:?}");
     assert!(
@@ -1119,7 +1119,7 @@ fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
     assert!(matches!(resp.body, runnermesh::IpcResponseBody::Success(_)));
 
     let start = std::time::Instant::now();
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_exit_after_drain] shutdown completed in {elapsed:?}");
     assert!(
@@ -1173,7 +1173,7 @@ fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
     std::thread::sleep(Duration::from_millis(50));
 
     let start = std::time::Instant::now();
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_connection_failure] shutdown completed in {elapsed:?}");
     assert!(
@@ -1209,7 +1209,7 @@ fn regression_c5_shutdown_race_under_concurrent_ipc_unblocks_cleanly() {
     std::thread::sleep(Duration::from_millis(30));
 
     let start = std::time::Instant::now();
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let elapsed = start.elapsed();
     println!("[test:c5_shutdown_race] shutdown completed in {elapsed:?}");
     assert!(
@@ -1474,7 +1474,7 @@ fn regression_finding_1_counterexample_and_fix_selector_advertise_failure_preven
 #[cfg(windows)]
 fn regression_c5_shutdown_timeout_path_still_joins_and_reclaims_handle() {
     println!("[test:c5_shutdown_timeout_reclamation] START");
-    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("timeout-reclaim");
+    let (temp_dir, mut runtime, endpoint) = setup_test_sandbox_runtime("timeout-reclaim");
 
     // Connect a half-open raw named pipe client without sending anything
     let pipe_name = endpoint.pipe_name();
@@ -1492,29 +1492,55 @@ fn regression_c5_shutdown_timeout_path_still_joins_and_reclaims_handle() {
         )
     };
 
-    // The server thread is now connected, blocked waiting in ReadFile.
-    // Call shutdown with a 20ms timeout so that it exceeds the timeout and escalates.
-    let start = std::time::Instant::now();
-    runtime.shutdown_with_timeout(Duration::from_millis(20));
-    let elapsed = start.elapsed();
-    println!("[test:c5_shutdown_timeout_reclamation] completed in {elapsed:?}");
+    // 1. Fault injection: Attach slow worker and call shutdown with a short 20ms timeout
+    let unblock_tx = runtime.attach_slow_worker_for_test(Duration::from_secs(10));
+    let timeout_res = runtime.shutdown_with_timeout(Duration::from_millis(20));
+    assert!(
+        timeout_res.is_err(),
+        "Shutdown with expired timeout while worker is active must return incomplete error"
+    );
+    assert!(
+        !runtime.is_completely_shutdown(),
+        "Runtime must preserve un-joined thread handles on timeout"
+    );
 
+    // Verify stage log records incomplete, and NEVER shutdown-complete
+    let content = runtime.stage().unwrap_or_default();
+    println!("[test:c5_shutdown_timeout_reclamation] recorded stage after timeout: {content}");
+    assert!(
+        content.contains("shutdown-incomplete") || content.contains("deadline-exceeded"),
+        "Must record incomplete/deadline breach"
+    );
+    assert!(
+        !content.contains("shutdown-complete"),
+        "Must NEVER write shutdown-complete on incomplete shutdown"
+    );
+
+    // 2. Unblock: signal slow worker and close pipe handle
+    let _ = unblock_tx.send(());
     if handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(handle);
         }
     }
 
-    // Verify stage log completed all steps
-    let stage_file = temp_dir.join("installed/runtime-stage.txt");
-    if stage_file.exists() {
-        let content = std::fs::read_to_string(&stage_file).unwrap_or_default();
-        println!("[test:c5_shutdown_timeout_reclamation] final recorded stage: {content}");
-        assert!(
-            content.contains("shutdown-complete"),
-            "Shutdown stage must reach shutdown-complete"
-        );
-    }
+    // 3. Recovery: call shutdown again with sufficient timeout
+    let recovery_res = runtime.shutdown_with_timeout(Duration::from_secs(5));
+    assert!(
+        recovery_res.is_ok(),
+        "Recovery shutdown must succeed after unblocking"
+    );
+    assert!(
+        runtime.is_completely_shutdown(),
+        "All thread handles must be fully joined and reclaimed"
+    );
+
+    let final_content = runtime.stage().unwrap_or_default();
+    println!("[test:c5_shutdown_timeout_reclamation] final recorded stage: {final_content}");
+    assert!(
+        final_content.contains("shutdown-complete"),
+        "Final stage must record shutdown-complete only after all threads finish"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     println!("[test:c5_shutdown_timeout_reclamation] PASS");
@@ -1908,7 +1934,7 @@ fn regression_c4_runners_status_reflects_failures_and_resources() {
         runnermesh::ProcessAttributionDisposition::DirectVerified
     );
 
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
@@ -2712,19 +2738,32 @@ fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick()
         vec!["runner-3".to_string()]
     );
 
-    runtime.shutdown();
+    let _ = runtime.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 #[cfg(windows)]
 fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
-    let relative_archive = std::path::PathBuf::from(
-        r"..\..\runnermesh-160h-audit\2026-11-12\160H-FINAL-CLOSEOUT-2703a1e\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
-    );
-    let relative_helper = std::path::PathBuf::from(
-        r"..\..\runnermesh-160h-audit\2026-11-12\160H-FINAL-CLOSEOUT-2703a1e\artifacts\lrm-rc\runnermesh-package.exe",
-    );
+    let candidate_paths = [
+        std::env::var("RUNNERMESH_RC_PACKAGE_PATH")
+            .map(std::path::PathBuf::from)
+            .ok(),
+        Some(std::path::PathBuf::from(
+            r"..\..\runnermesh-160h-audit\2026-11-12\160H-FINAL-CLOSEOUT-2703a1e\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
+        )),
+        Some(std::path::PathBuf::from(
+            r"target\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
+        )),
+    ];
+
+    let rc_archive_source = candidate_paths
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+        .expect(
+            "Authentic RC package must exist! Missing package must not be replaced with stubs.",
+        );
 
     let temp_root = std::env::temp_dir().join(format!(
         "rm-c5b-sandbox-{}",
@@ -2735,37 +2774,16 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
     ));
     std::fs::create_dir_all(&temp_root).unwrap();
 
-    let (rc_archive, _created_guard) = if relative_archive.is_file() {
-        assert!(relative_helper.is_file(), "RC package helper must exist");
-        let target_archive = temp_root.join("runnermesh-0.2.0-rc.1-windows-x64.zip");
-        std::fs::copy(&relative_archive, &target_archive).unwrap();
-        (target_archive, None)
-    } else {
-        // CI fallback: create authentic RC package in task-owned temp directory
-        let ci_staging = temp_root.join("ci-staging");
-        std::fs::create_dir_all(&ci_staging).unwrap();
-        let agent_exe = ci_staging.join("runnermesh-agent.exe");
-        let cli_exe = ci_staging.join("runnermesh.exe");
-        let agent_manifest = ci_staging.join("runnermesh-agent.manifest");
-        std::fs::write(&agent_exe, b"ci-rc-agent-stub").unwrap();
-        std::fs::write(&cli_exe, b"ci-rc-cli-stub").unwrap();
-        std::fs::write(&agent_manifest, b"ci-rc-manifest-stub").unwrap();
+    let raw_bytes = std::fs::read(&rc_archive_source).expect("read authentic archive bytes");
+    let archive_len = raw_bytes.len();
+    assert!(
+        archive_len > 1_000_000,
+        "Authentic archive bytes must be authentic binary size (>1MB), not stub"
+    );
 
-        let input = runnermesh::PackageInput {
-            provenance: runnermesh::PackageProvenance {
-                version: "0.2.0-rc.1".to_string(),
-                commit: "850269aa12c6bf44c10d1f17678716eafca329f7".to_string(),
-                channel: "rc".to_string(),
-                target: runnermesh::WINDOWS_X64_TARGET.to_string(),
-            },
-            cli_binary: cli_exe,
-            agent_binary: agent_exe,
-            agent_manifest,
-        };
-        let archives_dir = temp_root.join("archives");
-        let receipt = runnermesh::PackageVerifier::create(&input, &archives_dir).unwrap();
-        (receipt.archive, Some(ci_staging))
-    };
+    let target_archive = temp_root.join("runnermesh-0.2.0-rc.1-windows-x64.zip");
+    std::fs::copy(&rc_archive_source, &target_archive).unwrap();
+    let rc_archive = target_archive;
 
     let (manifest, hash) = runnermesh::PackageVerifier::verify_with_hash(&rc_archive).unwrap();
     assert!(!hash.is_empty(), "RC package hash must be non-empty");
@@ -2801,6 +2819,27 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
             .join("runnermesh-agent.exe")
     );
 
+    // Real byte execution proof: execute the extracted authentic PE binary
+    let active_cli = install_root
+        .join("versions")
+        .join("0.2.0-rc.1")
+        .join("runnermesh.exe");
+    assert!(active_cli.is_file(), "Extracted CLI binary must exist");
+    let run_res = std::process::Command::new(&active_cli)
+        .arg("version")
+        .output()
+        .expect("Authentic extracted PE binary must execute successfully");
+    assert!(
+        run_res.status.success(),
+        "Authentic extracted PE binary must return exit code 0"
+    );
+    let ver_str = String::from_utf8_lossy(&run_res.stdout);
+    println!("[regression_c5b] Authentic extracted binary execution output: {ver_str}");
+    assert!(
+        ver_str.contains("runnermesh"),
+        "Execution output must contain runnermesh: {ver_str}"
+    );
+
     let staging_2 = temp_root.join("staging-2");
     std::fs::create_dir_all(&staging_2).unwrap();
     for name in [
@@ -2818,6 +2857,8 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
         "Second version slot installation must not automatically activate"
     );
     assert_eq!(receipt_2.version, "0.2.0-rc.2");
+
+    // Upgrade: select active 0.2.0-rc.2
     installation.select_active("0.2.0-rc.2").unwrap();
     assert_eq!(
         installation.active_agent_path().unwrap(),
@@ -2827,6 +2868,18 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
             .join("runnermesh-agent.exe")
     );
 
+    // Real byte execution proof on upgraded slot
+    let upgraded_cli = install_root
+        .join("versions")
+        .join("0.2.0-rc.2")
+        .join("runnermesh.exe");
+    let run_upgraded = std::process::Command::new(&upgraded_cli)
+        .arg("version")
+        .output()
+        .expect("Upgraded binary must execute successfully");
+    assert!(run_upgraded.status.success());
+
+    // Rollback: select active 0.2.0-rc.1
     installation.select_active("0.2.0-rc.1").unwrap();
     assert_eq!(
         installation.active_agent_path().unwrap(),
@@ -2835,6 +2888,17 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
             .join("0.2.0-rc.1")
             .join("runnermesh-agent.exe")
     );
+
+    // Real byte execution proof on rolled-back slot
+    let rolled_back_cli = install_root
+        .join("versions")
+        .join("0.2.0-rc.1")
+        .join("runnermesh.exe");
+    let run_rolled_back = std::process::Command::new(&rolled_back_cli)
+        .arg("version")
+        .output()
+        .expect("Rolled back binary must execute successfully");
+    assert!(run_rolled_back.status.success());
 
     let user_log = install_root.join("logs").join("preserved.log");
     std::fs::create_dir_all(install_root.join("logs")).unwrap();

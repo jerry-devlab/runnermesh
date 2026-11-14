@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -511,6 +511,125 @@ impl UserSessionProcessTransport for InertUserSessionProcessTransport {
 
     fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
         Err("session.transport-closed-production-inert".to_owned())
+    }
+}
+
+/// Execution gate for user session process operations.
+///
+/// Sealed closed by default in production; only explicit Owner authorization
+/// opens the gate for bounded session process management.
+#[derive(Clone, Debug)]
+pub struct LiveSessionExecutionGate {
+    is_open: Option<Arc<AtomicBool>>,
+}
+
+impl Default for LiveSessionExecutionGate {
+    fn default() -> Self {
+        Self::CLOSED
+    }
+}
+
+impl LiveSessionExecutionGate {
+    pub const CLOSED: Self = Self { is_open: None };
+
+    pub fn open() -> Self {
+        Self {
+            is_open: Some(Arc::new(AtomicBool::new(true))),
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.is_open
+            .as_ref()
+            .map(|b| b.load(Ordering::Acquire))
+            .unwrap_or(false)
+    }
+
+    pub fn close(&self) {
+        if let Some(ref b) = self.is_open {
+            b.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Gated authentic user-session process transport.
+///
+/// Sealed closed by default (`LiveSessionExecutionGate::CLOSED`).
+/// When closed, all process mutation requests return an explicit error without
+/// spawning processes or modifying workstation state.
+#[derive(Clone, Debug, Default)]
+pub struct GatedUserSessionProcessTransport {
+    gate: LiveSessionExecutionGate,
+}
+
+impl GatedUserSessionProcessTransport {
+    pub fn closed() -> Self {
+        Self {
+            gate: LiveSessionExecutionGate::CLOSED,
+        }
+    }
+
+    pub fn with_gate(gate: LiveSessionExecutionGate) -> Self {
+        Self { gate }
+    }
+
+    pub fn gate(&self) -> &LiveSessionExecutionGate {
+        &self.gate
+    }
+}
+
+impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
+    fn launch_listener(&self, record: &RunnerRecord) -> Result<bool, String> {
+        if !self.gate.is_open() {
+            return Err("session.transport-gated-closed".to_owned());
+        }
+        let entrypoint = record.runner_home.join("run.cmd");
+        if !entrypoint.is_file() {
+            return Err("session.entrypoint-missing".to_owned());
+        }
+        #[cfg(windows)]
+        {
+            let mut cmd = std::process::Command::new("cmd.exe");
+            cmd.arg("/c")
+                .arg(&entrypoint)
+                .current_dir(&record.runner_home);
+            cmd.spawn()
+                .map(|_| true)
+                .map_err(|e| format!("session.spawn-failed: {e}"))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = record;
+            Err("session.unsupported-platform".to_owned())
+        }
+    }
+
+    fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
+        if !self.gate.is_open() {
+            return Err("session.transport-gated-closed".to_owned());
+        }
+        Ok(true)
+    }
+
+    fn observe_session(&self, record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+        #[cfg(windows)]
+        {
+            let discovered = crate::windows_runner_discovery::observe_runner_processes_with_pids(
+                &record.runner_home,
+            );
+            if discovered.worker_pid.is_some() {
+                Some(DiscoveredLifecycle::Busy)
+            } else if discovered.listener_pid.is_some() {
+                Some(DiscoveredLifecycle::Listening)
+            } else {
+                Some(DiscoveredLifecycle::Stopped)
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = record;
+            None
+        }
     }
 }
 

@@ -61,9 +61,10 @@ pub use admission::{
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
     AuthoritativeMultiRunnerLifecycleBackend, BoundRunnerAdmissionCoordinator, ConfigStore,
-    ConfigStoreError, FileConfigStore, InProcessAdmissionCoordinator,
-    InertUserSessionProcessTransport, MemoryConfigStore, MultiRunnerAdmissionCoordinator,
-    MultiRunnerLifecycleBackend, MultiRunnerSessionCoordinator, SandboxMultiRunnerLifecycleBackend,
+    ConfigStoreError, FileConfigStore, GatedUserSessionProcessTransport,
+    InProcessAdmissionCoordinator, InertUserSessionProcessTransport, LiveSessionExecutionGate,
+    MemoryConfigStore, MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend,
+    MultiRunnerSessionCoordinator, SandboxMultiRunnerLifecycleBackend,
     SimulatedUserSessionProcessTransport, StandardSessionCoordinator, UserSessionProcessTransport,
     CONFIG_SCHEMA_VERSION,
 };

@@ -400,15 +400,23 @@ impl SharedAuthorizationLedger {
                 ));
             }
             let bytes = fs::read(&path)?;
-            if !bytes.is_empty() {
-                let records: Vec<DurableLedgerEntry> = serde_json::from_slice(&bytes)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-                for rec in records {
-                    if let Some(arr) = decode_hex_32(&rec.token_hash_hex) {
-                        consumed_tokens.insert(arr);
-                    }
-                    consumed_nonces.insert(rec.nonce);
+            if bytes.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("refusing zero-byte / empty ledger file {}", path.display()),
+                ));
+            }
+            let records: Vec<DurableLedgerEntry> = serde_json::from_slice(&bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt ledger JSON: {e}"),
+                )
+            })?;
+            for rec in records {
+                if let Some(arr) = decode_hex_32(&rec.token_hash_hex) {
+                    consumed_tokens.insert(arr);
                 }
+                consumed_nonces.insert(rec.nonce);
             }
         }
 
@@ -453,7 +461,10 @@ impl SharedAuthorizationLedger {
                             }
                         }
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // Existing ledger file with 0 bytes is truncated / corrupt: fail closed!
+                        return false;
+                    }
                     Err(_) => return false,
                 }
             }
@@ -5904,5 +5915,74 @@ mod tests {
         assert_eq!(token_bare, token_quoted);
         assert_eq!(token_bare, token_with_args);
         assert_eq!(token_bare, token_unquoted_args);
+    }
+
+    #[test]
+    fn regression_c1_durable_ledger_zero_byte_and_truncated_files_fail_closed() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rm-ledger-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let zero_byte_path = temp_dir.join("zero_byte_ledger.json");
+        std::fs::write(&zero_byte_path, b"").unwrap();
+
+        // 1. Loading existing 0-byte file must fail closed
+        let load_res = SharedAuthorizationLedger::with_durable_file(&zero_byte_path);
+        assert!(
+            load_res.is_err(),
+            "Loading zero-byte ledger file must fail closed"
+        );
+
+        // 2. Truncated ledger JSON must fail closed
+        let truncated_path = temp_dir.join("truncated_ledger.json");
+        std::fs::write(&truncated_path, b"[{\"token_hash_hex\": \"bad").unwrap();
+        let trunc_res = SharedAuthorizationLedger::with_durable_file(&truncated_path);
+        assert!(
+            trunc_res.is_err(),
+            "Loading truncated ledger file must fail closed"
+        );
+
+        // 3. Post-restart replay rejection across separate ledger instances
+        let valid_path = temp_dir.join("valid_ledger.json");
+        let ledger1 = SharedAuthorizationLedger::with_durable_file(&valid_path).unwrap();
+        let token = [7u8; 32];
+        let nonce = "nonce-repro-restart-1";
+
+        // First consume succeeds
+        assert!(
+            ledger1.try_consume(token, nonce),
+            "First consume must succeed"
+        );
+
+        // Drop ledger1 simulating crash / restart
+        drop(ledger1);
+
+        // Open fresh ledger2 from same durable path
+        let ledger2 = SharedAuthorizationLedger::with_durable_file(&valid_path).unwrap();
+
+        // Exact replay must be refused
+        assert!(
+            !ledger2.try_consume(token, nonce),
+            "Replay of consumed voucher after restart must be refused"
+        );
+
+        // Same token with different nonce must be refused
+        assert!(
+            !ledger2.try_consume(token, "nonce-repro-restart-different"),
+            "Replay with same token but different nonce must be refused"
+        );
+
+        // Different token with same nonce must be refused
+        let other_token = [9u8; 32];
+        assert!(
+            !ledger2.try_consume(other_token, nonce),
+            "Replay with different token but same nonce must be refused"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
