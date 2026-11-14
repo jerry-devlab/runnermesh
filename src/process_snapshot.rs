@@ -1,7 +1,6 @@
 //! Read-only executable-name and exact-image enumeration for local process
 //! observation. Neither path ever launches a child process or invokes a shell.
 
-#[cfg(any(windows, test))]
 use std::path::PathBuf;
 
 /// Deliberately small failure surface for consumers that must not expose OS
