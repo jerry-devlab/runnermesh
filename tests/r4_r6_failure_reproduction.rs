@@ -1885,6 +1885,29 @@ fn regression_c4_runners_status_reflects_failures_and_resources() {
         "Resource aggregate must be attached"
     );
 
+    // Verify C4 full resource sample structure and propagation with PID, TTL, and attribution
+    let sample = runnermesh::RunnerResourceSample {
+        local_runner_key: "runner-c4".to_string(),
+        role: runnermesh::RunnerResourceRole::Listener,
+        pid: Some(1234),
+        working_set_bytes: Some(1024 * 1024),
+        cpu: None,
+        sampled_at_unix_ms: 1000,
+        ttl_ms: runnermesh::RunnerResourceSample::DEFAULT_TTL_MS,
+        attribution: runnermesh::ProcessAttributionDisposition::DirectVerified,
+        confidence: runnermesh::ResourceSampleConfidence::Estimate,
+    };
+    let enriched = report
+        .clone()
+        .with_full_resource_samples(&[("runner-c4".to_string(), vec![sample])], 1000);
+    assert_eq!(enriched.records[0].resource_samples.len(), 1);
+    assert_eq!(enriched.records[0].resource_samples[0].pid, Some(1234));
+    assert_eq!(enriched.records[0].resource_samples[0].ttl_ms, 5000);
+    assert_eq!(
+        enriched.records[0].resource_samples[0].attribution,
+        runnermesh::ProcessAttributionDisposition::DirectVerified
+    );
+
     runtime.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

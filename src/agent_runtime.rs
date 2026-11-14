@@ -424,12 +424,32 @@ impl RunningInstalledAgentSandbox {
 
         let poll_start = std::time::Instant::now();
         if let Some(handle) = self.poll_thread.take() {
-            let _ = handle.join();
-            println!(
-                "[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}",
-                poll_start.elapsed().as_millis()
-            );
-            let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
+            let mut poll_joined_ok = false;
+            if handle.is_finished() {
+                let _ = handle.join();
+                poll_joined_ok = true;
+            } else {
+                let poll_grace_start = std::time::Instant::now();
+                while !handle.is_finished()
+                    && poll_grace_start.elapsed() < std::time::Duration::from_millis(500)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    poll_joined_ok = true;
+                } else {
+                    eprintln!("[sandbox:shutdown] ERROR: poll_thread failed to exit within bounded deadline; recording deadline breach");
+                    let _ = write_runtime_stage(&self.state_root, "poll-thread-deadline-exceeded");
+                }
+            }
+            if poll_joined_ok {
+                println!(
+                    "[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}",
+                    poll_start.elapsed().as_millis()
+                );
+                let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
+            }
         }
 
         println!(

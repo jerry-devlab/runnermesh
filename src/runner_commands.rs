@@ -41,6 +41,8 @@ pub struct RunnerRecordView {
     #[serde(default)]
     pub memory_samples: Vec<RunnerMemorySample>,
     #[serde(default)]
+    pub resource_samples: Vec<crate::runner_resource::RunnerResourceSample>,
+    #[serde(default)]
     pub item_applied: Option<bool>,
     #[serde(default)]
     pub item_reason_code: Option<ReasonCode>,
@@ -67,6 +69,7 @@ impl From<&RunnerRecord> for RunnerRecordView {
             },
             presentation_status: presentation_status_for(record),
             memory_samples: Vec::new(),
+            resource_samples: Vec::new(),
             item_applied: None,
             item_reason_code: None,
         }
@@ -162,6 +165,35 @@ impl RunnerCommandReport {
             }
         }
         self.resource_aggregate = Some(aggregate_runner_memory(&flat, sampled_at_unix_ms));
+        self
+    }
+
+    /// Attaches comprehensive resource samples (with PID, CPU, TTL, and attribution) for presentation.
+    pub fn with_full_resource_samples(
+        mut self,
+        samples_by_key: &[(String, Vec<crate::runner_resource::RunnerResourceSample>)],
+        sampled_at_unix_ms: u64,
+    ) -> Self {
+        let mut flat_res = Vec::new();
+        let mut flat_mem = Vec::new();
+        for record in &mut self.records {
+            if let Some((_, samples)) = samples_by_key
+                .iter()
+                .find(|(key, _)| key == &record.local_runner_key)
+            {
+                record.resource_samples = samples.clone();
+                let memory_samples: Vec<RunnerMemorySample> = samples
+                    .iter()
+                    .map(|s| s.to_memory_sample(sampled_at_unix_ms))
+                    .collect();
+                record.memory_samples = memory_samples.clone();
+                flat_res.extend(samples.iter().cloned());
+                flat_mem.extend(memory_samples);
+            }
+        }
+        let agg_snapshot =
+            crate::runner_resource::aggregate_runner_resources(&flat_res, sampled_at_unix_ms);
+        self.resource_aggregate = Some(agg_snapshot.to_memory_aggregate());
         self
     }
 

@@ -1773,8 +1773,11 @@ where
                             }
                         }
 
-                        // Attach live read-only resource samples with point-in-time process memory facts
-                        let mut samples_by_key = Vec::new();
+                        // Attach live read-only resource samples with point-in-time process memory facts, exact PIDs, and TTL
+                        let mut full_samples_by_key: Vec<(
+                            String,
+                            Vec<crate::runner_resource::RunnerResourceSample>,
+                        )> = Vec::new();
                         for record in self.runner_registry.registry().records.iter() {
                             let procs =
                                 crate::windows_runner_discovery::observe_runner_processes_with_pids(
@@ -1785,10 +1788,20 @@ where
                                 let working_set = procs
                                     .listener_pid
                                     .and_then(crate::runner_resource::query_process_working_set);
-                                samples.push(crate::runner_resource::RunnerMemorySample {
+                                samples.push(crate::runner_resource::RunnerResourceSample {
+                                    local_runner_key: record.local_runner_key.clone(),
                                     role: crate::runner_resource::RunnerResourceRole::Listener,
+                                    pid: procs.listener_pid,
                                     working_set_bytes: working_set,
+                                    cpu: None,
                                     sampled_at_unix_ms: now_unix_ms,
+                                    ttl_ms:
+                                        crate::runner_resource::RunnerResourceSample::DEFAULT_TTL_MS,
+                                    attribution: if working_set.is_some() {
+                                        crate::runner_resource::ProcessAttributionDisposition::DirectVerified
+                                    } else {
+                                        crate::runner_resource::ProcessAttributionDisposition::Uncertain
+                                    },
                                     confidence: if working_set.is_some() {
                                         crate::runner_resource::ResourceSampleConfidence::Estimate
                                     } else {
@@ -1800,10 +1813,20 @@ where
                                 let working_set = procs
                                     .worker_pid
                                     .and_then(crate::runner_resource::query_process_working_set);
-                                samples.push(crate::runner_resource::RunnerMemorySample {
+                                samples.push(crate::runner_resource::RunnerResourceSample {
+                                    local_runner_key: record.local_runner_key.clone(),
                                     role: crate::runner_resource::RunnerResourceRole::Worker,
+                                    pid: procs.worker_pid,
                                     working_set_bytes: working_set,
+                                    cpu: None,
                                     sampled_at_unix_ms: now_unix_ms,
+                                    ttl_ms:
+                                        crate::runner_resource::RunnerResourceSample::DEFAULT_TTL_MS,
+                                    attribution: if working_set.is_some() {
+                                        crate::runner_resource::ProcessAttributionDisposition::DirectVerified
+                                    } else {
+                                        crate::runner_resource::ProcessAttributionDisposition::Uncertain
+                                    },
                                     confidence: if working_set.is_some() {
                                         crate::runner_resource::ResourceSampleConfidence::Estimate
                                     } else {
@@ -1812,10 +1835,12 @@ where
                                 });
                             }
                             if !samples.is_empty() {
-                                samples_by_key.push((record.local_runner_key.clone(), samples));
+                                full_samples_by_key
+                                    .push((record.local_runner_key.clone(), samples));
                             }
                         }
-                        report = report.with_resource_samples(&samples_by_key, now_unix_ms);
+                        report =
+                            report.with_full_resource_samples(&full_samples_by_key, now_unix_ms);
                     }
                 }
                 Ok(AgentResponse::Runners(report))
