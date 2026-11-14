@@ -1888,3 +1888,93 @@ fn regression_c4_runners_status_reflects_failures_and_resources() {
     runtime.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+#[cfg(windows)]
+fn regression_f01_inaccessible_worker_process_evidence_fails_closed() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-f01-worker-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let runner_home = temp_dir.join("f01-home");
+    std::fs::create_dir_all(&runner_home).unwrap();
+
+    // 1. Synthetic ProcessImage with executable_name = "Runner.Worker.exe" but executable_path = None
+    // (Simulating access-denied or process termination during QueryFullProcessImageNameW)
+    let images = vec![runnermesh::ProcessImage {
+        process_id: 12345,
+        executable_name: "Runner.Worker.exe".to_string(),
+        executable_path: None,
+        user_matches_current: None,
+    }];
+
+    // 2. observe_runner_processes_from_images must NOT silently drop it!
+    // It must report worker_present = true and evidence_complete = false
+    let (listener, worker, evidence_complete) =
+        runnermesh::observe_runner_processes_from_images(&runner_home, &images);
+
+    assert!(
+        worker,
+        "Inaccessible Runner.Worker.exe must fail closed as worker present"
+    );
+    assert!(
+        !evidence_complete,
+        "Missing process path evidence must mark evidence as incomplete"
+    );
+    assert!(!listener);
+
+    // 3. SCM StopService refusal under StateUnknown
+    let image_token = "f01-img".to_string();
+    let ident_token = "f01-id".to_string();
+
+    let mock_scm = MockScmBackend::new();
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.f01-test".to_string(),
+            state: DiscoveredLifecycle::Unknown,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: image_token.clone(),
+        execution_identity_token: ident_token.clone(),
+    });
+
+    let gate = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        "actions.runner.f01-test",
+        &image_token,
+        false,
+        true,
+        false,
+    ))
+    .unwrap();
+    let helper = PrivilegedScmHelper::new(mock_scm, gate);
+
+    let stop_req = runnermesh::PrivilegedScmRequest {
+        action: runnermesh::PrivilegedScmAction::StopService,
+        service_name: "actions.runner.f01-test".to_string(),
+        expected_image_token: image_token,
+        expected_execution_identity_token: ident_token,
+        target_host_token: String::new(),
+        candidate_commit: String::new(),
+        transaction_id: "tx-f01".to_string(),
+    };
+
+    let report = helper.dispatch(&stop_req);
+    assert!(
+        !report.applied,
+        "StopService must be refused when service lifecycle state is Unknown"
+    );
+    assert_eq!(
+        report.refusal_reason,
+        Some(ScmApiError::StateUnknown.as_str().to_string()),
+        "Refusal reason must be StateUnknown"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

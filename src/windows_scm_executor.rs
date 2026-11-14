@@ -2791,7 +2791,9 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
                 crate::windows_runner_discovery::observe_runner_processes_for_home(home);
             if worker_present {
                 state = DiscoveredLifecycle::Busy;
-            } else if obs_ok && !listener_present && status.dwProcessId == 0 {
+            } else if !obs_ok {
+                state = DiscoveredLifecycle::Unknown;
+            } else if !listener_present && status.dwProcessId == 0 {
                 state = DiscoveredLifecycle::Stopped;
             }
         }

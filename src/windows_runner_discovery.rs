@@ -255,46 +255,67 @@ fn observe_session_home(
     })
 }
 
-pub(crate) fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+pub fn observe_runner_processes_from_images(
+    runner_home: &Path,
+    images: &[crate::process_snapshot::ProcessImage],
+) -> (bool, bool, bool) {
+    let home = normalize_path_key(runner_home);
+    let expected_listener =
+        normalize_path_key(&runner_home.join("bin").join("Runner.Listener.exe"));
+    let expected_worker = normalize_path_key(&runner_home.join("bin").join("Runner.Worker.exe"));
+    let mut listener = false;
+    let mut worker = false;
+    let mut evidence_complete = true;
+
+    for image in images {
+        let name = image.executable_name.to_ascii_lowercase();
+        let is_worker = name == "runner.worker.exe";
+        let is_listener = name == "runner.listener.exe";
+        if !is_worker && !is_listener {
+            continue;
+        }
+
+        let Some(path) = image.executable_path.as_ref() else {
+            // Process inspection is incomplete (e.g. access denied querying path).
+            // Any inaccessible runner worker must fail closed: mark worker as active
+            // and mark process evidence as incomplete so callers do not treat
+            // worker presence as safely absent.
+            evidence_complete = false;
+            if is_worker {
+                worker = true;
+            }
+            continue;
+        };
+
+        let path_key = normalize_path_key(path);
+        // Path-boundary under home (never raw prefix: ...\a vs ...\abc).
+        if !path_is_under_home_key(&path_key, &home) {
+            continue;
+        }
+        // Require current-user ownership evidence when available.
+        if image.user_matches_current == Some(false) {
+            continue;
+        }
+
+        if is_listener
+            && (path_key == expected_listener || path_key.ends_with("\\bin\\runner.listener.exe"))
+        {
+            listener = true;
+        } else if is_worker
+            && (path_key == expected_worker || path_key.ends_with("\\bin\\runner.worker.exe"))
+        {
+            worker = true;
+        }
+    }
+
+    (listener, worker, evidence_complete)
+}
+
+pub fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
     #[cfg(windows)]
     {
         match crate::process_snapshot::executable_images() {
-            Ok(images) => {
-                let home = normalize_path_key(runner_home);
-                let expected_listener =
-                    normalize_path_key(&runner_home.join("bin").join("Runner.Listener.exe"));
-                let expected_worker =
-                    normalize_path_key(&runner_home.join("bin").join("Runner.Worker.exe"));
-                let mut listener = false;
-                let mut worker = false;
-                for image in images {
-                    let Some(path) = image.executable_path.as_ref() else {
-                        continue;
-                    };
-                    let path_key = normalize_path_key(path);
-                    // Path-boundary under home (never raw prefix: ...\a vs ...\abc).
-                    if !path_is_under_home_key(&path_key, &home) {
-                        continue;
-                    }
-                    // Require current-user ownership evidence when available.
-                    if image.user_matches_current == Some(false) {
-                        continue;
-                    }
-                    let name = image.executable_name.to_ascii_lowercase();
-                    if name == "runner.listener.exe"
-                        && (path_key == expected_listener
-                            || path_key.ends_with("\\bin\\runner.listener.exe"))
-                    {
-                        listener = true;
-                    } else if name == "runner.worker.exe"
-                        && (path_key == expected_worker
-                            || path_key.ends_with("\\bin\\runner.worker.exe"))
-                    {
-                        worker = true;
-                    }
-                }
-                (listener, worker, true)
-            }
+            Ok(images) => observe_runner_processes_from_images(runner_home, &images),
             Err(_) => (false, false, false),
         }
     }

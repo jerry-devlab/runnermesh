@@ -17,7 +17,7 @@ pub(crate) enum ProcessSnapshotError {
 /// evidence never grants exact-runner authority.
 #[cfg(any(windows, test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessImage {
+pub struct ProcessImage {
     pub process_id: u32,
     pub executable_name: String,
     pub executable_path: Option<PathBuf>,

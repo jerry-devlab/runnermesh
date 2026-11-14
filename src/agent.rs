@@ -593,8 +593,12 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
         }
 
         // Fresh process observation
-        let (listener_active, worker_active, _alive) =
+        let (listener_active, worker_active, obs_ok) =
             crate::windows_runner_discovery::observe_runner_processes_for_home(&record.runner_home);
+
+        if !obs_ok {
+            return Err("session.process-evidence-incomplete".to_owned());
+        }
 
         match action {
             crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => {
@@ -944,10 +948,12 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
 
             let (lifecycle, ownership, worker_present) = if is_user_session {
                 if let Some(home) = runner_home {
-                    let (listener_active, worker_active, _alive) =
+                    let (listener_active, worker_active, obs_ok) =
                         crate::windows_runner_discovery::observe_runner_processes_for_home(home);
                     if worker_active {
                         (DiscoveredLifecycle::Busy, true, true)
+                    } else if !obs_ok {
+                        (DiscoveredLifecycle::Unknown, false, false)
                     } else if listener_active {
                         (DiscoveredLifecycle::Listening, true, false)
                     } else {

@@ -129,6 +129,8 @@ pub use probe::{
     SteamGameProbe, UserActivityProbe, UserActivitySource, WindowsProcessSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource,
 };
+#[cfg(any(windows, test))]
+pub use process_snapshot::ProcessImage;
 pub use qualification::{
     assess_h1_workflow_source, assess_h1_workflow_template, h1_workflow_template,
     verify_h1_readiness, BaselineAdmissionState, EvidenceProvenance, EvidenceState,
@@ -229,6 +231,7 @@ pub use windows_github::{
 };
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
+    observe_runner_processes_for_home, observe_runner_processes_from_images,
     service_image_path_token, ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary,
     WindowsServiceDiscoverySource,
 };
