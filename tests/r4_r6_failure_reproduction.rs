@@ -907,7 +907,7 @@ fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
     let authoritative_backend = Arc::new(
         runnermesh::AuthoritativeMultiRunnerLifecycleBackend::new(helper)
             .with_admission_coordinator(admission_coord)
-            .with_session_coordinator(Arc::new(runnermesh::StandardSessionCoordinator)),
+            .with_session_coordinator(Arc::new(runnermesh::StandardSessionCoordinator::inert())),
     );
     authoritative_backend.register_runner_target("c5-runner", scope.clone(), 901);
 
@@ -1476,17 +1476,34 @@ fn regression_c5_shutdown_timeout_path_still_joins_and_reclaims_handle() {
     println!("[test:c5_shutdown_timeout_reclamation] START");
     let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("timeout-reclaim");
 
-    // Connect a client that sends a valid command
-    let client = IpcClient::new(endpoint, Duration::from_secs(3));
-    let _ = client.call(IpcRequest::new(AgentCommand::RunnersStatus {
-        local_runner_key: None,
-    }));
+    // Connect a half-open raw named pipe client without sending anything
+    let pipe_name = endpoint.pipe_name();
+    let wide_name: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        windows_sys::Win32::Storage::FileSystem::CreateFileW(
+            wide_name.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+            windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
 
-    // Perform shutdown: exercises escalating cancellation, timeout loop, thread join, and handle close
+    // The server thread is now connected, blocked waiting in ReadFile.
+    // Call shutdown with a 20ms timeout so that it exceeds the timeout and escalates.
     let start = std::time::Instant::now();
-    runtime.shutdown();
+    runtime.shutdown_with_timeout(Duration::from_millis(20));
     let elapsed = start.elapsed();
     println!("[test:c5_shutdown_timeout_reclamation] completed in {elapsed:?}");
+
+    if handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+    }
 
     // Verify stage log completed all steps
     let stage_file = temp_dir.join("installed/runtime-stage.txt");
@@ -1501,4 +1518,368 @@ fn regression_c5_shutdown_timeout_path_still_joins_and_reclaims_handle() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     println!("[test:c5_shutdown_timeout_reclamation] PASS");
+}
+
+#[test]
+fn regression_c1_cross_process_replay_protection_two_preopened_instances() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c1-replay-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let ledger_path = temp_dir.join("authorizations.json");
+
+    let token_hash = [0x5Bu8; 32];
+    let nonce = "c1-preopened-nonce";
+
+    // Both instances pre-opened on the same ledger path before any consumption
+    let ledger_a = SharedAuthorizationLedger::with_durable_file(&ledger_path).unwrap();
+    let ledger_b = SharedAuthorizationLedger::with_durable_file(&ledger_path).unwrap();
+
+    // A consumes successfully
+    let res_a = ledger_a.try_consume(token_hash, nonce);
+    assert!(res_a, "First consumption on ledger A must succeed");
+
+    // B was already opened before A consumed. It must observe the durable consumption and fail closed!
+    let res_b = ledger_b.try_consume(token_hash, nonce);
+    assert!(
+        !res_b,
+        "Sequential consumption on pre-opened ledger B must be refused"
+    );
+    assert!(ledger_b.is_consumed(&token_hash, nonce));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn regression_c1_durable_ledger_corrupt_json_fails_closed() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c1-corrupt-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let ledger_path = temp_dir.join("authorizations.json");
+
+    // Write malformed/corrupted JSON to the ledger file
+    std::fs::write(
+        &ledger_path,
+        b"{\"schema_version\": 1, \"consumed\": [CORRUPT-SYNTAX",
+    )
+    .unwrap();
+
+    // When file has corrupt JSON, loading with_durable_file fails closed:
+    let ledger_res = SharedAuthorizationLedger::with_durable_file(&ledger_path);
+    assert!(
+        ledger_res.is_err(),
+        "Corrupt ledger on disk must fail closed"
+    );
+
+    // The corrupt file must NOT have been wiped or overwritten to empty valid JSON!
+    let content = std::fs::read_to_string(&ledger_path).unwrap();
+    assert!(
+        content.contains("CORRUPT-SYNTAX"),
+        "Corrupt ledger content must not be cleared to empty"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn regression_c1_registry_load_duplicate_rejection() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c1-registry-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let registry_file = temp_dir.join("runners-registry.json");
+
+    // Construct registry with duplicate runner_home between runner-1 and runner-2
+    let mut reg = runnermesh::RunnerRegistry::default();
+    let r1 = runnermesh::RunnerRecord {
+        local_runner_key: "runner-1".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "org".to_string(),
+            repository: "repo1".to_string(),
+        },
+        runner_id: 101,
+        expected_runner_name: "r1".to_string(),
+        runner_home: std::path::PathBuf::from(r"C:\runners\shared-home"),
+        work_root: std::path::PathBuf::from(r"C:\runners\work-1"),
+        execution_identity_ref: OpaqueIdentityReference::new("test", "id").unwrap(),
+        backend: runnermesh::RegistryBackendBinding::WindowsService {
+            service_name: "actions.runner.1".to_string(),
+        },
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: false,
+    };
+    let mut r2 = r1.clone();
+    r2.local_runner_key = "runner-2".to_string();
+    r2.runner_id = 102;
+    r2.expected_runner_name = "r2".to_string();
+    r2.work_root = std::path::PathBuf::from(r"C:\runners\work-2");
+    r2.backend = runnermesh::RegistryBackendBinding::WindowsService {
+        service_name: "actions.runner.2".to_string(),
+    };
+    reg.records.push(r1);
+    reg.records.push(r2);
+    let json = serde_json::to_string_pretty(&reg).unwrap();
+    std::fs::write(&registry_file, json).unwrap();
+
+    let store = runnermesh::FileRegistryStore::new(registry_file);
+    use runnermesh::RegistryStore;
+    let loaded = store.load();
+    assert!(
+        matches!(loaded, Err(RegistryError::DuplicateHome)),
+        "Loading registry with duplicate home must fail closed with DuplicateHome"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn regression_c2_worker_busy_observation_prevents_stop() {
+    let mock_scm = MockScmBackend::new();
+    let image_token = "test-image".to_string();
+    let ident_token = "test-ident".to_string();
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.busy-runner".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: true,
+        image_token: image_token.clone(),
+        execution_identity_token: ident_token.clone(),
+    });
+
+    let gate = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        "actions.runner.busy-runner",
+        &image_token,
+        false,
+        true,
+        false,
+    ))
+    .unwrap();
+    let helper = PrivilegedScmHelper::new(mock_scm, gate);
+
+    let stop_req = runnermesh::PrivilegedScmRequest {
+        action: runnermesh::PrivilegedScmAction::StopService,
+        service_name: "actions.runner.busy-runner".to_string(),
+        expected_image_token: image_token,
+        expected_execution_identity_token: ident_token,
+        target_host_token: String::new(),
+        candidate_commit: String::new(),
+        transaction_id: "tx-c2".to_string(),
+    };
+
+    let report = helper.dispatch(&stop_req);
+    assert!(
+        !report.applied,
+        "StopService must be refused when Worker is active"
+    );
+    assert_eq!(
+        report.refusal_reason,
+        Some(ScmApiError::BusyWorker.as_str().to_string())
+    );
+    assert_eq!(report.achieved_state, DiscoveredLifecycle::Busy);
+}
+
+#[test]
+fn regression_c3_user_session_process_observation_and_transport() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c3-session-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let runner_home = temp_dir.join("session-home");
+    std::fs::create_dir_all(&runner_home).unwrap();
+    let entrypoint = runner_home.join("run.cmd");
+    std::fs::write(&entrypoint, b"@echo off\r\n").unwrap();
+    let work_root = temp_dir.join("session-work");
+    std::fs::create_dir_all(&work_root).unwrap();
+
+    let record = runnermesh::RunnerRecord {
+        local_runner_key: "user-session-1".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "o".to_string(),
+            repository: "r".to_string(),
+        },
+        runner_id: 301,
+        expected_runner_name: "usr-1".to_string(),
+        runner_home: runner_home.clone(),
+        work_root: work_root.clone(),
+        execution_identity_ref: OpaqueIdentityReference::new("test", "id").unwrap(),
+        backend: runnermesh::RegistryBackendBinding::UserSession,
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: false,
+    };
+
+    let transport = Arc::new(runnermesh::SimulatedUserSessionProcessTransport::new());
+    let coordinator = runnermesh::StandardSessionCoordinator::new(transport.clone());
+    use runnermesh::MultiRunnerSessionCoordinator;
+
+    let res_launch = coordinator.dispatch_session(
+        &record,
+        runnermesh::PreparedSessionAction::LaunchOwnedListener,
+    );
+    assert!(
+        res_launch.is_ok(),
+        "Launch on owned session must succeed via transport"
+    );
+    assert_eq!(
+        *transport.launched.lock().unwrap(),
+        vec!["user-session-1".to_string()]
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_c4_runners_status_reflects_failures_and_resources() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-c4-status-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let runner_home = temp_dir.join("c4-home");
+    std::fs::create_dir_all(&runner_home).unwrap();
+    let work_root = temp_dir.join("c4-work");
+    std::fs::create_dir_all(&work_root).unwrap();
+
+    let registry_file = temp_dir.join("runners-registry.json");
+    let mut reg = runnermesh::RunnerRegistry::default();
+    let record = runnermesh::RunnerRecord {
+        local_runner_key: "runner-c4".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "o".to_string(),
+            repository: "r".to_string(),
+        },
+        runner_id: 401,
+        expected_runner_name: "c4-name".to_string(),
+        runner_home: runner_home.clone(),
+        work_root: work_root.clone(),
+        execution_identity_ref: OpaqueIdentityReference::new("test", "id").unwrap(),
+        backend: runnermesh::RegistryBackendBinding::WindowsService {
+            service_name: "actions.runner.c4".to_string(),
+        },
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: false,
+    };
+    reg.records.push(record);
+    std::fs::write(&registry_file, serde_json::to_string_pretty(&reg).unwrap()).unwrap();
+
+    let install_root = temp_dir.join("installed");
+    std::fs::create_dir_all(&install_root).unwrap();
+    std::fs::copy(&registry_file, install_root.join("runners-registry.json")).unwrap();
+
+    let mock_scm = MockScmBackend::new();
+    let image_token = runner_service_image_token(&runner_home);
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.c4".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token,
+        execution_identity_token: "id".to_string(),
+    });
+
+    let helper = PrivilegedScmHelper::new(mock_scm, LiveScmExecutionGate::CLOSED);
+    let authoritative_backend = Arc::new(AuthoritativeMultiRunnerLifecycleBackend::new(helper));
+    let scope = RegistrationScope::Repository {
+        owner: "o".to_string(),
+        repository: "r".to_string(),
+    };
+    authoritative_backend.register_runner_target_with_service(
+        "runner-c4",
+        scope.clone(),
+        401,
+        Some("actions.runner.c4"),
+    );
+    let admission_coord =
+        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope.clone(), 401, false));
+    authoritative_backend.register_runner_admission_coordinator(scope, 401, admission_coord);
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("c4-test-{}", std::process::id()));
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: install_root.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(authoritative_backend),
+        discovery_report: None,
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
+    };
+
+    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    // Disable the runner via IPC to plan StopService
+    let _ = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-c4".to_string(),
+            prepare_only: false,
+            when_idle: false,
+        }))
+        .expect("IPC RunnersDisable must succeed");
+
+    // Wait 60ms for periodic tick to trigger reconcile_and_dispatch_multi_runners under GateClosed
+    std::thread::sleep(Duration::from_millis(60));
+
+    // Query RunnersStatus via IPC
+    let resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersStatus {
+            local_runner_key: None,
+        }))
+        .expect("IPC RunnersStatus must succeed");
+
+    let runnermesh::IpcResponseBody::Success(boxed) = resp.body else {
+        panic!("Expected Success IPC response");
+    };
+    let runnermesh::AgentResponse::Runners(report) = *boxed else {
+        panic!("Expected Runners response");
+    };
+
+    // Verify C4 requirements:
+    assert_eq!(report.records.len(), 1);
+    assert_eq!(report.records[0].local_runner_key, "runner-c4");
+    assert!(
+        report.partial_failure,
+        "Report must reflect partial failure from GateClosed SCM dispatch"
+    );
+    assert_eq!(report.records[0].item_applied, Some(false));
+    assert!(report.records[0].item_reason_code.is_some());
+    assert!(
+        report.resource_aggregate.is_some(),
+        "Resource aggregate must be attached"
+    );
+
+    runtime.shutdown();
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

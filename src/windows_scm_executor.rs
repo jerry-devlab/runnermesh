@@ -238,6 +238,97 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
+#[cfg(windows)]
+pub struct ProcessFileLock {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ProcessFileLock {
+    pub fn acquire(lock_path: &Path) -> io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        if let Some(parent) = lock_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut wide: Vec<u16> = lock_path.as_os_str().encode_wide().collect();
+        wide.push(0);
+        unsafe {
+            let handle = windows_sys::Win32::Storage::FileSystem::CreateFileW(
+                wide.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE,
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                windows_sys::Win32::Storage::FileSystem::OPEN_ALWAYS,
+                windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+            let ok = windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                handle,
+                windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            );
+            if ok == 0 {
+                let err = io::Error::last_os_error();
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                return Err(err);
+            }
+            Ok(Self { handle })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessFileLock {
+    fn drop(&mut self) {
+        unsafe {
+            let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
+            windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
+                self.handle,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            );
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub struct ProcessFileLock {
+    _file: fs::File,
+}
+
+#[cfg(not(windows))]
+impl ProcessFileLock {
+    pub fn acquire(lock_path: &Path) -> io::Result<Self> {
+        if let Some(parent) = lock_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(lock_path)?;
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { _file: file })
+    }
+}
+
 /// Thread-safe shared authorization ledger managing consumed authorizations.
 ///
 /// Prevents both swapped-nonce replays (reusing the same authorization voucher with
@@ -337,21 +428,54 @@ impl SharedAuthorizationLedger {
     /// the ledger state unmodified.
     pub fn try_consume(&self, token_hash: [u8; 32], nonce: &str) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.consumed_tokens.contains(&token_hash) || state.consumed_nonces.contains(nonce) {
-            return false;
-        }
 
         if let Some(ref path) = state.durable_path {
-            let mut entries: Vec<DurableLedgerEntry> = if path.exists() {
-                match fs::read(path) {
-                    Ok(b) if !b.is_empty() => serde_json::from_slice(&b).unwrap_or_default(),
-                    _ => Vec::new(),
-                }
-            } else {
-                Vec::new()
+            let lock_path = path.with_extension("lock");
+            let _lock = match ProcessFileLock::acquire(&lock_path) {
+                Ok(l) => l,
+                Err(_) => return false,
             };
 
+            // 1. Re-read on-disk entries inside the cross-process lock
+            let mut entries: Vec<DurableLedgerEntry> = Vec::new();
+            if path.exists() {
+                if crate::installation::is_reparse_point(path).unwrap_or(true) {
+                    return false;
+                }
+                match fs::read(path) {
+                    Ok(b) if !b.is_empty() => {
+                        match serde_json::from_slice::<Vec<DurableLedgerEntry>>(&b) {
+                            Ok(recs) => entries = recs,
+                            Err(_) => {
+                                // Corrupt JSON must fail closed — NEVER reset bad ledger to empty!
+                                return false;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+
+            // 2. Check on-disk entries before in-memory state
             let hex_hash: String = token_hash.iter().map(|b| format!("{b:02x}")).collect();
+            for entry in &entries {
+                if entry.token_hash_hex.eq_ignore_ascii_case(&hex_hash) || entry.nonce == nonce {
+                    if let Some(arr) = decode_hex_32(&entry.token_hash_hex) {
+                        state.consumed_tokens.insert(arr);
+                    }
+                    state.consumed_nonces.insert(entry.nonce.clone());
+                    return false;
+                }
+            }
+
+            // 3. Check in-memory state
+            if state.consumed_tokens.contains(&token_hash) || state.consumed_nonces.contains(nonce)
+            {
+                return false;
+            }
+
+            // 4. Record and atomically write
             let consumed_at_unix_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -369,16 +493,51 @@ impl SharedAuthorizationLedger {
             if crate::installation::atomic_write(path, &serialized).is_err() {
                 return false;
             }
-        }
 
-        state.consumed_tokens.insert(token_hash);
-        state.consumed_nonces.insert(nonce.to_string());
-        true
+            state.consumed_tokens.insert(token_hash);
+            state.consumed_nonces.insert(nonce.to_string());
+            true
+        } else {
+            if state.consumed_tokens.contains(&token_hash) || state.consumed_nonces.contains(nonce)
+            {
+                return false;
+            }
+            state.consumed_tokens.insert(token_hash);
+            state.consumed_nonces.insert(nonce.to_string());
+            true
+        }
     }
 
     pub fn is_consumed(&self, token_hash: &[u8; 32], nonce: &str) -> bool {
-        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.consumed_tokens.contains(token_hash) || state.consumed_nonces.contains(nonce)
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.consumed_tokens.contains(token_hash) || state.consumed_nonces.contains(nonce) {
+            return true;
+        }
+        if let Some(ref path) = state.durable_path {
+            if path.exists() {
+                let lock_path = path.with_extension("lock");
+                if let Ok(_lock) = ProcessFileLock::acquire(&lock_path) {
+                    if let Ok(b) = fs::read(path) {
+                        if let Ok(entries) = serde_json::from_slice::<Vec<DurableLedgerEntry>>(&b) {
+                            let hex_hash: String =
+                                token_hash.iter().map(|b| format!("{b:02x}")).collect();
+                            for entry in entries {
+                                if let Some(arr) = decode_hex_32(&entry.token_hash_hex) {
+                                    state.consumed_tokens.insert(arr);
+                                }
+                                state.consumed_nonces.insert(entry.nonce.clone());
+                                if entry.token_hash_hex.eq_ignore_ascii_case(&hex_hash)
+                                    || entry.nonce == nonce
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn record_consumption(&self, token_hash: [u8; 32], nonce: String) -> bool {
@@ -1501,8 +1660,12 @@ impl ScmControlBackend for MockScmBackend {
             .get(&key)
             .cloned()
             .ok_or(ScmApiError::NotFound)?;
+        let mut observation = record.observation;
+        if record.worker_busy {
+            observation.state = DiscoveredLifecycle::Busy;
+        }
         Ok(ScmExactSnapshot {
-            observation: record.observation,
+            observation,
             image_token: record.image_token,
             execution_identity_token: record.execution_identity_token,
         })
@@ -2578,7 +2741,7 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
             return Err(ScmApiError::Unavailable);
         }
         let status = status.assume_init();
-        let state = map_dw_state(status.dwCurrentState);
+        let mut state = map_dw_state(status.dwCurrentState);
 
         needed = 0;
         QueryServiceConfigW(service, ptr::null_mut(), 0, &mut needed);
@@ -2610,6 +2773,27 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
         let image_token = opaque_image_token(image.trim_matches('"'));
         let execution_identity_token = opaque_image_token(&start_name);
         let start_mode = map_start_type(config.dwStartType);
+
+        let clean_image = image.trim_matches('"');
+        let runner_home = Path::new(clean_image).parent().and_then(|p| {
+            if p.file_name()
+                .map(|n| n.to_string_lossy().eq_ignore_ascii_case("bin"))
+                .unwrap_or(false)
+            {
+                p.parent()
+            } else {
+                Some(p)
+            }
+        });
+        if let Some(home) = runner_home {
+            let (listener_present, worker_present, obs_ok) =
+                crate::windows_runner_discovery::observe_runner_processes_for_home(home);
+            if worker_present {
+                state = DiscoveredLifecycle::Busy;
+            } else if obs_ok && !listener_present && status.dwProcessId == 0 {
+                state = DiscoveredLifecycle::Stopped;
+            }
+        }
 
         let _ = ERROR_SERVICE_DOES_NOT_EXIST;
         Ok(ScmExactSnapshot {
@@ -3027,17 +3211,23 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             };
         }
 
-        // 3. Worker Busy check for StopService
+        // 3. Worker Busy / Unknown check for StopService (fail-closed on active or ambiguous worker)
         if matches!(request.action, PrivilegedScmAction::StopService)
-            && matches!(snapshot.observation.state, DiscoveredLifecycle::Busy)
+            && (matches!(snapshot.observation.state, DiscoveredLifecycle::Busy)
+                || matches!(snapshot.observation.state, DiscoveredLifecycle::Unknown))
         {
+            let reason = if matches!(snapshot.observation.state, DiscoveredLifecycle::Busy) {
+                ScmApiError::BusyWorker
+            } else {
+                ScmApiError::StateUnknown
+            };
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
                 transaction_id: request.transaction_id.clone(),
                 applied: false,
                 achieved_state: snapshot.observation.state,
                 achieved_start_mode: snapshot.observation.start_mode,
-                refusal_reason: Some(ScmApiError::BusyWorker.as_str().to_owned()),
+                refusal_reason: Some(reason.as_str().to_owned()),
             };
         }
 

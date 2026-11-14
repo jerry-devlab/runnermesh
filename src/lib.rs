@@ -61,9 +61,11 @@ pub use admission::{
 pub use agent::{
     AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
     AuthoritativeMultiRunnerLifecycleBackend, BoundRunnerAdmissionCoordinator, ConfigStore,
-    ConfigStoreError, FileConfigStore, InProcessAdmissionCoordinator, MemoryConfigStore,
-    MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend, MultiRunnerSessionCoordinator,
-    SandboxMultiRunnerLifecycleBackend, StandardSessionCoordinator, CONFIG_SCHEMA_VERSION,
+    ConfigStoreError, FileConfigStore, InProcessAdmissionCoordinator,
+    InertUserSessionProcessTransport, MemoryConfigStore, MultiRunnerAdmissionCoordinator,
+    MultiRunnerLifecycleBackend, MultiRunnerSessionCoordinator, SandboxMultiRunnerLifecycleBackend,
+    SimulatedUserSessionProcessTransport, StandardSessionCoordinator, UserSessionProcessTransport,
+    CONFIG_SCHEMA_VERSION,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]

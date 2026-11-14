@@ -182,6 +182,7 @@ pub enum RegistryError {
     DuplicateHome,
     DuplicateWorkRoot,
     DuplicateServerIdentity,
+    DuplicateServiceBinding,
     SameScopeManagedAdmissionCollision,
     NotEnrollmentEligible,
     NotFound,
@@ -204,6 +205,7 @@ impl fmt::Display for RegistryError {
             Self::DuplicateServerIdentity => {
                 formatter.write_str("duplicate server runner identity")
             }
+            Self::DuplicateServiceBinding => formatter.write_str("duplicate service binding"),
             Self::SameScopeManagedAdmissionCollision => {
                 formatter.write_str("same-scope managed admission collision")
             }
@@ -586,6 +588,38 @@ fn validate_registry(registry: &RunnerRegistry) -> Result<(), RegistryError> {
     }
     if !registry.is_valid() {
         return Err(RegistryError::InvalidRecord("registry failed validation"));
+    }
+
+    let active: Vec<&RunnerRecord> = registry.active_records().collect();
+    for (i, r1) in active.iter().enumerate() {
+        let home1 = normalize_path_key(&r1.runner_home);
+        let work1 = normalize_path_key(&r1.work_root);
+        for r2 in active.iter().skip(i + 1) {
+            if normalize_path_key(&r2.runner_home) == home1 {
+                return Err(RegistryError::DuplicateHome);
+            }
+            if normalize_path_key(&r2.work_root) == work1 {
+                return Err(RegistryError::DuplicateWorkRoot);
+            }
+            if r1.registration_scope == r2.registration_scope && r1.runner_id == r2.runner_id {
+                return Err(RegistryError::DuplicateServerIdentity);
+            }
+            if r1.managed_admission
+                && r2.managed_admission
+                && r1.registration_scope == r2.registration_scope
+            {
+                return Err(RegistryError::SameScopeManagedAdmissionCollision);
+            }
+            if let (
+                RegistryBackendBinding::WindowsService { service_name: s1 },
+                RegistryBackendBinding::WindowsService { service_name: s2 },
+            ) = (&r1.backend, &r2.backend)
+            {
+                if s1.eq_ignore_ascii_case(s2) {
+                    return Err(RegistryError::DuplicateServiceBinding);
+                }
+            }
+        }
     }
     Ok(())
 }

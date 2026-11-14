@@ -311,7 +311,12 @@ impl RunningInstalledAgentSandbox {
     ///
     /// Wakes up or cancels any blocking `ConnectNamedPipe` waiting on the pipe thread,
     /// marks exit requested, and reclaims all thread handles within a bounded duration.
-    pub fn shutdown(mut self) {
+    pub fn shutdown(self) {
+        self.shutdown_with_timeout(std::time::Duration::from_secs(5));
+    }
+
+    /// Performs graceful shutdown with a caller-specified upper bound duration.
+    pub fn shutdown_with_timeout(mut self, timeout: std::time::Duration) {
         println!("[sandbox:shutdown] stage=shutdown-started");
         let _ = write_runtime_stage(&self.state_root, "shutdown-started");
         self.exit.requested.store(true, Ordering::Release);
@@ -340,13 +345,13 @@ impl RunningInstalledAgentSandbox {
 
         // Phase 3: Bounded reclamation of pipe thread
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(5);
         while let Some(ref handle) = self.pipe_thread {
             if handle.is_finished() {
                 break;
             }
             if start.elapsed() > timeout {
                 eprintln!("[sandbox:shutdown] WARN: pipe_thread did not terminate within timeout; escalating cancel before join");
+                let _ = write_runtime_stage(&self.state_root, "shutdown-timeout-escalated");
                 #[cfg(windows)]
                 {
                     if native_handle != 0 {
@@ -363,7 +368,7 @@ impl RunningInstalledAgentSandbox {
                 }
                 let _ = crate::ipc::wake_listener(&self.endpoint);
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
         // Even if timeout occurs, unconditionally join the thread — never skip join or leak threads

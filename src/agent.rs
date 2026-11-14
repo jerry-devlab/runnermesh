@@ -298,10 +298,47 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
     /// Target registration including optional real service name so SCM queries use the real service name.
     fn register_runner_target_with_service(
         &self,
+        local_runner_key: &str,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+        service_name: Option<&str>,
+    ) {
+        self.register_runner_target_detailed(
+            local_runner_key,
+            scope,
+            runner_id,
+            service_name,
+            None,
+            false,
+        );
+    }
+
+    /// Target registration directly from an enrolled RunnerRecord.
+    fn register_runner_record(&self, record: &RunnerRecord) {
+        let service_name = match &record.backend {
+            RegistryBackendBinding::WindowsService { service_name } => Some(service_name.as_str()),
+            _ => None,
+        };
+        let is_user_session = matches!(&record.backend, RegistryBackendBinding::UserSession);
+        self.register_runner_target_detailed(
+            &record.local_runner_key,
+            record.registration_scope.clone(),
+            record.runner_id,
+            service_name,
+            Some(&record.runner_home),
+            is_user_session,
+        );
+    }
+
+    /// Comprehensive target registration with home path and session kind.
+    fn register_runner_target_detailed(
+        &self,
         _local_runner_key: &str,
         _scope: crate::RegistrationScope,
         _runner_id: u64,
         _service_name: Option<&str>,
+        _runner_home: Option<&Path>,
+        _is_user_session: bool,
     ) {
     }
 }
@@ -441,10 +478,80 @@ pub trait MultiRunnerSessionCoordinator: Send + Sync {
     ) -> Result<bool, String>;
 }
 
-/// Standard fail-closed user session coordinator that verifies execution identity,
-/// home directory, run.cmd entrypoint, and work root ownership.
+/// Injectable process transport for owned user session runners.
+pub trait UserSessionProcessTransport: Send + Sync {
+    fn launch_listener(&self, record: &RunnerRecord) -> Result<bool, String>;
+    fn request_graceful_stop(&self, record: &RunnerRecord) -> Result<bool, String>;
+}
+
+/// Production default process transport for user session runners (sealed closed).
 #[derive(Clone, Debug, Default)]
-pub struct StandardSessionCoordinator;
+pub struct InertUserSessionProcessTransport;
+
+impl UserSessionProcessTransport for InertUserSessionProcessTransport {
+    fn launch_listener(&self, _record: &RunnerRecord) -> Result<bool, String> {
+        Err("session.transport-closed-production-inert".to_owned())
+    }
+
+    fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
+        Err("session.transport-closed-production-inert".to_owned())
+    }
+}
+
+/// Simulated user session process transport for tests and qualification.
+#[derive(Clone, Debug, Default)]
+pub struct SimulatedUserSessionProcessTransport {
+    pub launched: Arc<Mutex<Vec<String>>>,
+    pub stopped: Arc<Mutex<Vec<String>>>,
+}
+
+impl SimulatedUserSessionProcessTransport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl UserSessionProcessTransport for SimulatedUserSessionProcessTransport {
+    fn launch_listener(&self, record: &RunnerRecord) -> Result<bool, String> {
+        self.launched
+            .lock()
+            .unwrap()
+            .push(record.local_runner_key.clone());
+        Ok(true)
+    }
+
+    fn request_graceful_stop(&self, record: &RunnerRecord) -> Result<bool, String> {
+        self.stopped
+            .lock()
+            .unwrap()
+            .push(record.local_runner_key.clone());
+        Ok(true)
+    }
+}
+
+/// Standard fail-closed user session coordinator that verifies execution identity,
+/// home directory, run.cmd entrypoint, work root ownership, and process state.
+pub struct StandardSessionCoordinator {
+    transport: Arc<dyn UserSessionProcessTransport>,
+}
+
+impl Default for StandardSessionCoordinator {
+    fn default() -> Self {
+        Self {
+            transport: Arc::new(InertUserSessionProcessTransport),
+        }
+    }
+}
+
+impl StandardSessionCoordinator {
+    pub fn new(transport: Arc<dyn UserSessionProcessTransport>) -> Self {
+        Self { transport }
+    }
+
+    pub fn inert() -> Self {
+        Self::default()
+    }
+}
 
 impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
     fn dispatch_session(
@@ -471,9 +578,41 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
         {
             return Err("session.work-root-not-owned".to_owned());
         }
+
+        // Reparse point boundary checks (fail-closed)
+        #[cfg(windows)]
+        {
+            if crate::installation::is_reparse_point(&record.runner_home).unwrap_or(false) {
+                return Err("session.runner-home-reparse-point".to_owned());
+            }
+            if record.work_root.exists()
+                && crate::installation::is_reparse_point(&record.work_root).unwrap_or(false)
+            {
+                return Err("session.work-root-reparse-point".to_owned());
+            }
+        }
+
+        // Fresh process observation
+        let (listener_active, worker_active, _alive) =
+            crate::windows_runner_discovery::observe_runner_processes_for_home(&record.runner_home);
+
         match action {
-            crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => Ok(true),
+            crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => {
+                if worker_active {
+                    return Err("session.busy-worker".to_owned());
+                }
+                if !listener_active {
+                    return Ok(true);
+                }
+                self.transport.request_graceful_stop(record)
+            }
             crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener => {
+                if worker_active {
+                    return Err("session.busy-worker".to_owned());
+                }
+                if listener_active {
+                    return Ok(true);
+                }
                 #[cfg(windows)]
                 {
                     let supervisor = crate::WindowsUserSessionSupervisorAdapter::for_runner_home(
@@ -482,15 +621,18 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
                     if supervisor.readiness() != crate::WindowsSupervisorReadiness::Ready {
                         return Err("session.readiness-check-failed".to_owned());
                     }
-                    Ok(true)
                 }
-                #[cfg(not(windows))]
-                {
-                    let _ = record;
-                    Ok(true)
-                }
+                self.transport.launch_listener(record)
             }
-            crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => Ok(true),
+            crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => {
+                if worker_active {
+                    return Err("session.busy-worker".to_owned());
+                }
+                if !listener_active {
+                    return Err("session.no-listener-to-adopt".to_owned());
+                }
+                Ok(true)
+            }
         }
     }
 }
@@ -653,6 +795,8 @@ pub struct RunnerTargetRegistration {
     pub scope: crate::RegistrationScope,
     pub runner_id: u64,
     pub service_name: Option<String>,
+    pub runner_home: Option<PathBuf>,
+    pub is_user_session: bool,
 }
 
 type RunnerAdmissionMap =
@@ -707,15 +851,17 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
         scope: &crate::RegistrationScope,
         runner_id: u64,
     ) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> {
-        if let Some(coord) = self
+        let coords = self
             .admission_coordinators
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&(scope.clone(), runner_id))
-        {
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(coord) = coords.get(&(scope.clone(), runner_id)) {
             return Some(Arc::clone(coord));
         }
-        self.admission.as_ref().map(Arc::clone)
+        if coords.is_empty() {
+            return self.admission.as_ref().map(Arc::clone);
+        }
+        None
     }
 
     pub fn with_session_coordinator(
@@ -746,6 +892,25 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         runner_id: u64,
         service_name: Option<&str>,
     ) {
+        self.register_runner_target_detailed(
+            local_runner_key,
+            scope,
+            runner_id,
+            service_name,
+            None,
+            false,
+        );
+    }
+
+    fn register_runner_target_detailed(
+        &self,
+        local_runner_key: &str,
+        scope: crate::RegistrationScope,
+        runner_id: u64,
+        service_name: Option<&str>,
+        runner_home: Option<&Path>,
+        is_user_session: bool,
+    ) {
         self.runner_targets
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -755,6 +920,8 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
                     scope,
                     runner_id,
                     service_name: service_name.map(|s| s.to_string()),
+                    runner_home: runner_home.map(|p| p.to_path_buf()),
+                    is_user_session,
                 },
             );
     }
@@ -769,21 +936,43 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
 
         for key in local_runner_keys {
             let target_reg = targets.get(key);
-            let service_query = target_reg
-                .and_then(|r| r.service_name.as_deref())
-                .unwrap_or(key.as_str());
+            let is_user_session = target_reg
+                .as_ref()
+                .map(|r| r.is_user_session)
+                .unwrap_or(false);
+            let runner_home = target_reg.as_ref().and_then(|r| r.runner_home.as_deref());
 
-            let snap = self.helper.backend().query_exact(service_query);
-            let (lifecycle, ownership, worker_present) = match snap {
-                Ok(s) => {
-                    let busy = matches!(s.observation.state, DiscoveredLifecycle::Busy);
-                    (
-                        s.observation.state,
-                        s.observation.ownership_verified && s.observation.image_path_matches,
-                        busy,
-                    )
+            let (lifecycle, ownership, worker_present) = if is_user_session {
+                if let Some(home) = runner_home {
+                    let (listener_active, worker_active, _alive) =
+                        crate::windows_runner_discovery::observe_runner_processes_for_home(home);
+                    if worker_active {
+                        (DiscoveredLifecycle::Busy, true, true)
+                    } else if listener_active {
+                        (DiscoveredLifecycle::Listening, true, false)
+                    } else {
+                        (DiscoveredLifecycle::Stopped, true, false)
+                    }
+                } else {
+                    (DiscoveredLifecycle::Unknown, false, false)
                 }
-                Err(_) => (DiscoveredLifecycle::Unknown, false, false),
+            } else {
+                let service_query = target_reg
+                    .and_then(|r| r.service_name.as_deref())
+                    .unwrap_or(key.as_str());
+
+                let snap = self.helper.backend().query_exact(service_query);
+                match snap {
+                    Ok(s) => {
+                        let busy = matches!(s.observation.state, DiscoveredLifecycle::Busy);
+                        (
+                            s.observation.state,
+                            s.observation.ownership_verified && s.observation.image_path_matches,
+                            busy,
+                        )
+                    }
+                    Err(_) => (DiscoveredLifecycle::Unknown, false, false),
+                }
             };
 
             let (selector_present, selector_unknown) = match target_reg {
@@ -848,7 +1037,7 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
     ) -> Result<bool, String> {
         match &self.session {
             Some(coord) => coord.dispatch_session(record, action),
-            None => StandardSessionCoordinator.dispatch_session(record, action),
+            None => StandardSessionCoordinator::default().dispatch_session(record, action),
         }
     }
 }
@@ -936,18 +1125,7 @@ where
     /// admission selector withdrawal, and SCM dispatch.
     pub fn set_multi_runner_backend(&mut self, backend: Arc<dyn MultiRunnerLifecycleBackend>) {
         for record in self.runner_registry.registry().records.iter() {
-            let service_name = match &record.backend {
-                RegistryBackendBinding::WindowsService { service_name } => {
-                    Some(service_name.as_str())
-                }
-                _ => None,
-            };
-            backend.register_runner_target_with_service(
-                &record.local_runner_key,
-                record.registration_scope.clone(),
-                record.runner_id,
-                service_name,
-            );
+            backend.register_runner_record(record);
         }
         self.multi_runner_backend = Some(backend);
     }
@@ -1003,8 +1181,30 @@ where
                 Ok(false)
             };
 
+            if let Err(ref err) = advertise_result {
+                reports.push(PrivilegedScmReport {
+                    service_name: format!("admission:{}", record.local_runner_key),
+                    transaction_id: transaction_id.to_string(),
+                    applied: false,
+                    achieved_state: result.observed_lifecycle,
+                    achieved_start_mode: crate::ServiceStartMode::Disabled,
+                    refusal_reason: Some(format!("admission.advertise-failed:{err}")),
+                });
+            }
+
             if result.plan == PerRunnerPlan::WithdrawSelector {
-                let _ = backend.withdraw_selector(&record.registration_scope, record.runner_id);
+                if let Err(err) =
+                    backend.withdraw_selector(&record.registration_scope, record.runner_id)
+                {
+                    reports.push(PrivilegedScmReport {
+                        service_name: format!("admission:{}", record.local_runner_key),
+                        transaction_id: transaction_id.to_string(),
+                        applied: false,
+                        achieved_state: result.observed_lifecycle,
+                        achieved_start_mode: crate::ServiceStartMode::Disabled,
+                        refusal_reason: Some(format!("admission.withdraw-failed:{err}")),
+                    });
+                }
             }
 
             // Step 2: Strictly verify dispatch guards before issuing Stop or Start
@@ -1024,7 +1224,8 @@ where
 
             let plan_allows_stop = result.plan == PerRunnerPlan::Noop
                 && (result.achieved == PerRunnerAchieved::Drained
-                    || result.achieved == PerRunnerAchieved::Offline);
+                    || result.achieved == PerRunnerAchieved::Offline
+                    || result.reason_code.as_str() == "runners-listener-stop-unproven");
 
             match &record.backend {
                 RegistryBackendBinding::WindowsService { service_name } => {
@@ -1084,7 +1285,40 @@ where
                     };
 
                     if let Some(action) = session_action {
-                        let _ = backend.dispatch_session(record, action);
+                        let res = backend.dispatch_session(record, action.clone());
+                        let rep = match res {
+                            Ok(applied) => PrivilegedScmReport {
+                                service_name: format!("session:{}", record.local_runner_key),
+                                transaction_id: transaction_id.to_string(),
+                                applied,
+                                achieved_state: if applied {
+                                    match action {
+                                        crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener => {
+                                            DiscoveredLifecycle::Listening
+                                        }
+                                        crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => {
+                                            DiscoveredLifecycle::Stopped
+                                        }
+                                        crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => {
+                                            DiscoveredLifecycle::Listening
+                                        }
+                                    }
+                                } else {
+                                    result.observed_lifecycle
+                                },
+                                achieved_start_mode: crate::ServiceStartMode::Disabled,
+                                refusal_reason: None,
+                            },
+                            Err(err) => PrivilegedScmReport {
+                                service_name: format!("session:{}", record.local_runner_key),
+                                transaction_id: transaction_id.to_string(),
+                                applied: false,
+                                achieved_state: result.observed_lifecycle,
+                                achieved_start_mode: crate::ServiceStartMode::Disabled,
+                                refusal_reason: Some(err),
+                            },
+                        };
+                        reports.push(rep);
                     }
                 }
             }
@@ -1160,7 +1394,8 @@ where
 
             let plan_allows_stop = result.plan == PerRunnerPlan::Noop
                 && (result.achieved == PerRunnerAchieved::Drained
-                    || result.achieved == PerRunnerAchieved::Offline);
+                    || result.achieved == PerRunnerAchieved::Offline
+                    || result.reason_code.as_str() == "runners-listener-stop-unproven");
 
             let selector_confirmed_present = obs
                 .map(|o| o.selector_present == Some(true) && !o.selector_observation_unknown)
@@ -1396,18 +1631,7 @@ where
                         if let Some(record) = self.runner_registry.registry().get(local_runner_key)
                         {
                             if let Some(backend) = &self.multi_runner_backend {
-                                let service_name = match &record.backend {
-                                    RegistryBackendBinding::WindowsService { service_name } => {
-                                        Some(service_name.as_str())
-                                    }
-                                    _ => None,
-                                };
-                                backend.register_runner_target_with_service(
-                                    &record.local_runner_key,
-                                    record.registration_scope.clone(),
-                                    record.runner_id,
-                                    service_name,
-                                );
+                                backend.register_runner_record(record);
                             }
                         }
                     }
@@ -1420,6 +1644,11 @@ where
                             .map(|r| r.local_runner_key.clone())
                             .collect();
                         let observations = backend.observe_runners(&keys);
+                        let now_unix_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+
                         for record_view in &mut report.records {
                             if let Some(obs) = observations
                                 .iter()
@@ -1445,7 +1674,69 @@ where
                                     RunnerPresentationStatus::Disabled
                                 };
                             }
+
+                            let bound_service = self
+                                .runner_registry
+                                .registry()
+                                .get(&record_view.local_runner_key)
+                                .and_then(|rec| match &rec.backend {
+                                    RegistryBackendBinding::WindowsService { service_name } => {
+                                        Some(service_name.clone())
+                                    }
+                                    _ => None,
+                                });
+
+                            // Record partial failure and refusal from last reports if applicable
+                            if let Some(last_report) = self.last_runner_reports.iter().find(|r| {
+                                r.service_name == record_view.local_runner_key
+                                    || bound_service.as_deref() == Some(&r.service_name)
+                                    || r.service_name
+                                        .ends_with(&format!(":{}", record_view.local_runner_key))
+                            }) {
+                                if !last_report.applied && last_report.refusal_reason.is_some() {
+                                    record_view.item_applied = Some(false);
+                                    let code = last_report
+                                        .refusal_reason
+                                        .as_deref()
+                                        .and_then(|r| ReasonCode::new(r.replace('.', "-")).ok())
+                                        .unwrap_or_else(|| static_reason("runners-command-failed"));
+                                    record_view.item_reason_code = Some(code);
+                                    report.partial_failure = true;
+                                }
+                            }
                         }
+
+                        // Attach live read-only resource samples
+                        let mut samples_by_key = Vec::new();
+                        for record in self.runner_registry.registry().records.iter() {
+                            let (listener_active, worker_active, _) =
+                                crate::windows_runner_discovery::observe_runner_processes_for_home(
+                                    &record.runner_home,
+                                );
+                            let mut samples = Vec::new();
+                            if listener_active {
+                                samples.push(crate::runner_resource::RunnerMemorySample {
+                                    role: crate::runner_resource::RunnerResourceRole::Listener,
+                                    working_set_bytes: None,
+                                    sampled_at_unix_ms: now_unix_ms,
+                                    confidence:
+                                        crate::runner_resource::ResourceSampleConfidence::Estimate,
+                                });
+                            }
+                            if worker_active {
+                                samples.push(crate::runner_resource::RunnerMemorySample {
+                                    role: crate::runner_resource::RunnerResourceRole::Worker,
+                                    working_set_bytes: None,
+                                    sampled_at_unix_ms: now_unix_ms,
+                                    confidence:
+                                        crate::runner_resource::ResourceSampleConfidence::Estimate,
+                                });
+                            }
+                            if !samples.is_empty() {
+                                samples_by_key.push((record.local_runner_key.clone(), samples));
+                            }
+                        }
+                        report = report.with_resource_samples(&samples_by_key, now_unix_ms);
                     }
                 }
                 Ok(AgentResponse::Runners(report))
@@ -3592,7 +3883,23 @@ mod tests {
 
         let helper =
             PrivilegedScmHelper::new(crate::MockScmBackend::new(), LiveScmExecutionGate::CLOSED);
-        let backend = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
+        let backend_inert = AuthoritativeMultiRunnerLifecycleBackend::new(helper);
+
+        // Default unconfigured session coordinator is sealed closed (inert) in production
+        assert_eq!(
+            backend_inert.dispatch_session(
+                &record,
+                crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener
+            ),
+            Err("session.transport-closed-production-inert".to_string())
+        );
+
+        let transport = Arc::new(SimulatedUserSessionProcessTransport::new());
+        let backend = AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
+            crate::MockScmBackend::new(),
+            LiveScmExecutionGate::CLOSED,
+        ))
+        .with_session_coordinator(Arc::new(StandardSessionCoordinator::new(transport.clone())));
 
         // Valid session dispatch for graceful stop and launch
         assert!(backend
@@ -3607,6 +3914,10 @@ mod tests {
                 crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener
             )
             .unwrap());
+        assert_eq!(
+            *transport.launched.lock().unwrap(),
+            vec!["runner-sess-test".to_string()]
+        );
 
         // Fail-closed when run.cmd is missing
         fs::remove_file(&run_cmd).unwrap();

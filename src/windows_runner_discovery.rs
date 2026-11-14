@@ -255,7 +255,7 @@ fn observe_session_home(
     })
 }
 
-fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+pub(crate) fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
     #[cfg(windows)]
     {
         match crate::process_snapshot::executable_images() {
