@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
-use std::{fs, path::Path};
+use std::fs;
 
 #[cfg(windows)]
 use serde::Deserialize;
@@ -359,14 +359,15 @@ fn current_user_owns_runner_paths(runner_home: &Path, work_root: &Path) -> Owner
 }
 
 #[cfg(windows)]
-fn current_user_owns_path(path: &Path) -> Result<bool, ()> {
+#[allow(clippy::result_unit_err)]
+pub fn current_user_owns_path(path: &Path) -> Result<bool, ()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::{
         Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE},
         Security::{
             Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
-            EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION,
-            PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+            EqualSid, GetTokenInformation, TokenOwner, TokenUser, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -438,7 +439,149 @@ fn current_user_owns_path(path: &Path) -> Result<bool, ()> {
         return Err(());
     }
     let current_sid = unsafe { (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
-    Ok(unsafe { EqualSid(owner, current_sid) } != 0)
+    if unsafe { EqualSid(owner, current_sid) } != 0 {
+        return Ok(true);
+    }
+    // Elevated administrators create objects owned by their token's default owner (BUILTIN\Administrators).
+    let mut owner_required = 0_u32;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenOwner,
+            std::ptr::null_mut(),
+            0,
+            &mut owner_required,
+        );
+    }
+    if owner_required > 0 {
+        let mut owner_buffer = vec![0_usize; (owner_required as usize).div_ceil(unit)];
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenOwner,
+                owner_buffer.as_mut_ptr().cast(),
+                owner_required,
+                &mut owner_required,
+            )
+        } != 0
+        {
+            let token_owner_sid = unsafe { (*(owner_buffer.as_ptr().cast::<TOKEN_OWNER>())).Owner };
+            if unsafe { EqualSid(owner, token_owner_sid) } != 0 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(windows)]
+#[allow(clippy::result_unit_err)]
+pub fn paths_have_matching_owner(path_a: &Path, path_b: &Path) -> Result<bool, ()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{LocalFree, ERROR_SUCCESS},
+        Security::{
+            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+            EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        },
+    };
+
+    struct OwnedDescriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for OwnedDescriptor {
+        fn drop(&mut self) {
+            unsafe {
+                LocalFree(self.0.cast());
+            }
+        }
+    }
+
+    let wide_a = path_a
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut owner_a: PSID = std::ptr::null_mut();
+    let mut descriptor_a: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status_a = unsafe {
+        GetNamedSecurityInfoW(
+            wide_a.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_a,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor_a,
+        )
+    };
+    if status_a != ERROR_SUCCESS || descriptor_a.is_null() || owner_a.is_null() {
+        return Err(());
+    }
+    let _desc_a = OwnedDescriptor(descriptor_a);
+
+    let wide_b = path_b
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut owner_b: PSID = std::ptr::null_mut();
+    let mut descriptor_b: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status_b = unsafe {
+        GetNamedSecurityInfoW(
+            wide_b.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_b,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor_b,
+        )
+    };
+    if status_b != ERROR_SUCCESS || descriptor_b.is_null() || owner_b.is_null() {
+        return Err(());
+    }
+    let _desc_b = OwnedDescriptor(descriptor_b);
+
+    Ok(unsafe { EqualSid(owner_a, owner_b) } != 0)
+}
+
+#[cfg(windows)]
+pub fn verify_path_and_ancestor_ownership(path: &Path) -> bool {
+    if path.exists() {
+        if crate::installation::is_reparse_point(path).unwrap_or(true) {
+            return false;
+        }
+        return current_user_owns_path(path) == Ok(true);
+    }
+    let mut cur = path.parent();
+    while let Some(parent) = cur {
+        if parent.exists() {
+            if crate::installation::is_reparse_point(parent).unwrap_or(true) {
+                return false;
+            }
+            return current_user_owns_path(parent) == Ok(true);
+        }
+        cur = parent.parent();
+    }
+    false
+}
+
+#[cfg(not(windows))]
+#[allow(clippy::result_unit_err)]
+pub fn current_user_owns_path(_path: &Path) -> Result<bool, ()> {
+    Ok(false)
+}
+
+#[cfg(not(windows))]
+#[allow(clippy::result_unit_err)]
+pub fn paths_have_matching_owner(_path_a: &Path, _path_b: &Path) -> Result<bool, ()> {
+    Ok(false)
+}
+
+#[cfg(not(windows))]
+pub fn verify_path_and_ancestor_ownership(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(windows)]

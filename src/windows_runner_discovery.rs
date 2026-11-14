@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -17,14 +17,13 @@ use crate::{
     SessionDiscoverySource,
 };
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const SERVICE_ACCOUNT_IDENTITY_PROVIDER: &str = "windows-service-account-sha256-v1";
 
 /// Runs the pure inventory over live Service enumeration plus optional session homes.
 pub fn discover_local_runners_read_only(session_homes: Vec<PathBuf>) -> DiscoveryReport {
     let service = WindowsServiceDiscoverySource::default();
     let session = ConfiguredSessionDiscoverySource::new(session_homes);
-    let process_status = session.last_process_status();
     // Do not force current-user identity onto Service runners: their execution
     // identity is the service account. Session homes already carry current-user
     // opaque refs when available.
@@ -36,7 +35,7 @@ pub fn discover_local_runners_read_only(session_homes: Vec<PathBuf>) -> Discover
             expected_execution_identity: None,
         },
     );
-    inventory.discover_with_process_status(process_status)
+    inventory.discover()
 }
 
 /// Privacy-safe summary of a live discovery pass. Never includes paths, names,
@@ -68,6 +67,45 @@ impl PrivacySafeDiscoverySummary {
     }
 }
 
+/// Privacy-safe one-command operator card for ZenBookDuo HUX-1 collection.
+/// Does not invent host counts; keeps disposition `PENDING` until that host runs
+/// `discover-readonly`. Safe to print in public receipts.
+pub fn hux1_zenbookduo_operator_card() -> String {
+    [
+        "# HUX-1 ZenBookDuo read-only operator card",
+        "",
+        "PRODUCTION_MUTATION=false",
+        "HUX1_ZENBOOKDUO=PENDING",
+        "HOST_LABEL=ZenBookDuo",
+        "",
+        "## One command (run only on ZenBookDuo)",
+        "",
+        "```text",
+        "runnermesh-hux-sandbox discover-readonly",
+        "```",
+        "",
+        "## Record only these fields",
+        "",
+        "- candidate_count",
+        "- observed_only_count",
+        "- refused_count",
+        "- identity_complete_count",
+        "- service_enumeration",
+        "- session_enumeration",
+        "- process_observation",
+        "- incomplete",
+        "",
+        "## Rules",
+        "",
+        "- Do not substitute a development-host empty result for ZenBookDuo.",
+        "- EMPTY_OK is valid when that host truly has zero candidates.",
+        "- Never paste Service names, runner homes, work roots, SIDs, or tokens.",
+        "- Do not register, install, start, stop, or label anything for this card.",
+        "",
+    ]
+    .join("\n")
+}
+
 #[cfg(windows)]
 const ACTIONS_RUNNER_PREFIX: &str = "actions.runner.";
 
@@ -95,17 +133,18 @@ fn current_user_identity_optional() -> Option<OpaqueIdentityReference> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
     let normalized = account.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return None;
     }
+    // Well-known service accounts still hash; empty/whitespace never forge identity.
     let digest = hex_sha256(normalized.as_bytes());
     OpaqueIdentityReference::new(SERVICE_ACCOUNT_IDENTITY_PROVIDER, digest).ok()
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -151,6 +190,10 @@ impl SessionDiscoverySource for ConfiguredSessionDiscoverySource {
 
     fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
         DiscoveryEnumerationStatus::Ok
+    }
+
+    fn process_status(&self) -> DiscoveryEnumerationStatus {
+        self.last_process_status()
     }
 }
 
@@ -201,6 +244,16 @@ fn observe_session_home(
         DiscoveredLifecycle::Unknown
     };
     let identity = current_user_identity_optional();
+
+    // Verify ownership of runner_home and work_root (fail closed on foreign, unowned, or reparse)
+    let home_owned = runner_home.is_dir()
+        && !crate::installation::is_reparse_point(runner_home).unwrap_or(true)
+        && crate::runner_observer::current_user_owns_path(runner_home) == Ok(true);
+    let work_root_owned = work_root
+        .as_ref()
+        .is_none_or(|wr| crate::runner_observer::verify_path_and_ancestor_ownership(wr));
+    let current_user_owned = home_owned && work_root_owned;
+
     Some(SessionCandidateFact {
         runner_home: runner_home.to_path_buf(),
         work_root,
@@ -208,58 +261,154 @@ fn observe_session_home(
         runner_id: meta.as_ref().and_then(|m| m.agent_id),
         expected_runner_name: meta.as_ref().and_then(|m| m.agent_name.clone()),
         execution_identity_ref: identity,
-        current_user_owned: true,
+        current_user_owned,
         listener_present: listener_running,
         worker_present: worker_running,
         state,
     })
 }
 
-fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DiscoveredRunnerProcesses {
+    pub listener_present: bool,
+    pub worker_present: bool,
+    pub evidence_complete: bool,
+    pub listener_pid: Option<u32>,
+    pub worker_pid: Option<u32>,
+}
+
+pub fn observe_runner_processes_with_pids_from_images(
+    runner_home: &Path,
+    images: &[crate::process_snapshot::ProcessImage],
+) -> DiscoveredRunnerProcesses {
+    let home = normalize_path_key(runner_home);
+    let expected_listener =
+        normalize_path_key(&runner_home.join("bin").join("Runner.Listener.exe"));
+    let expected_worker = normalize_path_key(&runner_home.join("bin").join("Runner.Worker.exe"));
+    let mut listener = false;
+    let mut worker = false;
+    let mut evidence_complete = true;
+    let mut listener_pid = None;
+    let mut worker_pid = None;
+
+    for image in images {
+        let name = image.executable_name.to_ascii_lowercase();
+        let is_worker = name == "runner.worker.exe";
+        let is_listener = name == "runner.listener.exe";
+        if !is_worker && !is_listener {
+            continue;
+        }
+
+        let Some(path) = image.executable_path.as_ref() else {
+            // Process inspection is incomplete (e.g. access denied querying path).
+            // Any inaccessible runner worker must fail closed: mark worker as active
+            // and mark process evidence as incomplete so callers do not treat
+            // worker presence as safely absent.
+            evidence_complete = false;
+            if is_worker {
+                worker = true;
+                worker_pid = Some(image.process_id);
+            }
+            continue;
+        };
+
+        let path_key = normalize_path_key(path);
+        // Path-boundary under home (never raw prefix: ...\a vs ...\abc).
+        if !path_is_under_home_key(&path_key, &home) {
+            continue;
+        }
+        // Require affirmative current-user ownership evidence: reject foreign or ambiguous process identity
+        if image.user_matches_current != Some(true) {
+            if image.user_matches_current.is_none() {
+                evidence_complete = false;
+                if is_worker {
+                    worker = true;
+                    worker_pid = Some(image.process_id);
+                }
+            }
+            continue;
+        }
+
+        if is_listener
+            && (path_key == expected_listener || path_key.ends_with("\\bin\\runner.listener.exe"))
+        {
+            listener = true;
+            listener_pid = Some(image.process_id);
+        } else if is_worker
+            && (path_key == expected_worker || path_key.ends_with("\\bin\\runner.worker.exe"))
+        {
+            worker = true;
+            worker_pid = Some(image.process_id);
+        }
+    }
+
+    DiscoveredRunnerProcesses {
+        listener_present: listener,
+        worker_present: worker,
+        evidence_complete,
+        listener_pid,
+        worker_pid,
+    }
+}
+
+pub fn observe_runner_processes_from_images(
+    runner_home: &Path,
+    images: &[crate::process_snapshot::ProcessImage],
+) -> (bool, bool, bool) {
+    let p = observe_runner_processes_with_pids_from_images(runner_home, images);
+    (p.listener_present, p.worker_present, p.evidence_complete)
+}
+
+pub fn observe_runner_processes_with_pids(runner_home: &Path) -> DiscoveredRunnerProcesses {
     #[cfg(windows)]
     {
         match crate::process_snapshot::executable_images() {
-            Ok(images) => {
-                let home = normalize_path_key(runner_home);
-                let mut listener = false;
-                let mut worker = false;
-                for image in images {
-                    let Some(path) = image.executable_path.as_ref() else {
-                        continue;
-                    };
-                    let path_key = normalize_path_key(path);
-                    if !path_key.starts_with(&home) {
-                        continue;
-                    }
-                    // Require current-user ownership evidence when available.
-                    if image.user_matches_current == Some(false) {
-                        continue;
-                    }
-                    let name = image.executable_name.to_ascii_lowercase();
-                    if name == "runner.listener.exe" {
-                        listener = true;
-                    } else if name == "runner.worker.exe" {
-                        worker = true;
-                    }
-                }
-                (listener, worker, true)
-            }
-            Err(_) => (false, false, false),
+            Ok(images) => observe_runner_processes_with_pids_from_images(runner_home, &images),
+            Err(_) => DiscoveredRunnerProcesses {
+                listener_present: false,
+                worker_present: false,
+                evidence_complete: false,
+                listener_pid: None,
+                worker_pid: None,
+            },
         }
     }
     #[cfg(not(windows))]
     {
         let _ = runner_home;
-        (false, false, true)
+        DiscoveredRunnerProcesses {
+            listener_present: false,
+            worker_present: false,
+            evidence_complete: true,
+            listener_pid: None,
+            worker_pid: None,
+        }
     }
 }
 
-#[cfg(windows)]
+pub fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
+    let p = observe_runner_processes_with_pids(runner_home);
+    (p.listener_present, p.worker_present, p.evidence_complete)
+}
+
 fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
         .to_ascii_lowercase()
+}
+
+/// True when `path_key` is `home` or a descendant separated by `\`.
+/// Rejects sibling prefix collisions (`home\a` vs `home\abc`).
+fn path_is_under_home_key(path_key: &str, home_key: &str) -> bool {
+    if path_key == home_key {
+        return true;
+    }
+    if home_key.is_empty() {
+        return false;
+    }
+    let boundary = format!("{home_key}\\");
+    path_key.starts_with(&boundary)
 }
 
 #[derive(Clone, Default)]
@@ -495,33 +644,70 @@ fn service_fact_from_scm(
         }
         let mut needed = 0u32;
         QueryServiceConfigW(service, ptr::null_mut(), 0, &mut needed);
-        let mut buffer = vec![0u8; needed as usize];
-        let ok = QueryServiceConfigW(
-            service,
-            buffer.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW,
-            needed,
-            &mut needed,
-        );
+        if needed == 0 {
+            CloseServiceHandle(service);
+            return None;
+        }
+        // QUERY_SERVICE_CONFIGW must be aligned; trailing strings live in the same buffer.
+        let align = std::mem::align_of::<QUERY_SERVICE_CONFIGW>();
+        let mut raw = vec![0u8; needed as usize + align];
+        let unaligned = raw.as_mut_ptr() as usize;
+        let aligned = (unaligned + align - 1) & !(align - 1);
+        let config_ptr = aligned as *mut QUERY_SERVICE_CONFIGW;
+        let ok = QueryServiceConfigW(service, config_ptr, needed, &mut needed);
         if ok == 0 {
             CloseServiceHandle(service);
             return None;
         }
-        let config = &*(buffer.as_ptr() as *const QUERY_SERVICE_CONFIGW);
+        let config = &*config_ptr;
         let image = wide_to_string(config.lpBinaryPathName);
         let start_name = wide_to_string(config.lpServiceStartName);
         CloseServiceHandle(service);
-        let image_path = PathBuf::from(image.trim_matches('"'));
+        // lpBinaryPathName may be quoted and may carry args. `trim_matches('"')`
+        // corrupts `"C:\path\exe" -arg` into `C:\path\exe" -arg`.
+        let image_path = PathBuf::from(service_image_path_token(&image)?);
         let runner_home = runner_home_from_image(&image_path)
             .unwrap_or_else(|| image_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        if crate::installation::is_reparse_point(&runner_home).unwrap_or(true) {
+            return None;
+        }
         let meta = read_runner_metadata(&runner_home);
         let work_root = meta.as_ref().and_then(|m| {
-            m.work_folder.as_ref().map(|folder| {
+            m.work_folder.as_ref().and_then(|folder| {
                 let path = PathBuf::from(folder);
-                if path.is_absolute() {
+                let full_path = if path.is_absolute() {
                     path
                 } else {
                     runner_home.join(path)
+                };
+                if crate::installation::is_reparse_point(&full_path).unwrap_or(true) {
+                    return None;
                 }
+                if full_path.exists() {
+                    if crate::runner_observer::paths_have_matching_owner(&runner_home, &full_path)
+                        != Ok(true)
+                    {
+                        return None;
+                    }
+                } else {
+                    let mut cur = full_path.parent();
+                    let mut ok = false;
+                    while let Some(parent) = cur {
+                        if parent.exists() {
+                            ok = !crate::installation::is_reparse_point(parent).unwrap_or(true)
+                                && crate::runner_observer::paths_have_matching_owner(
+                                    &runner_home,
+                                    parent,
+                                ) == Ok(true);
+                            break;
+                        }
+                        cur = parent.parent();
+                    }
+                    if !ok {
+                        return None;
+                    }
+                }
+                Some(full_path)
             })
         });
         // When the service account cannot be hashed, leave identity missing
@@ -542,18 +728,70 @@ fn service_fact_from_scm(
     }
 }
 
-#[cfg(windows)]
-fn runner_home_from_image(image_path: &Path) -> Option<PathBuf> {
-    // Typical layout: <home>\bin\RunnerService.exe
-    let parent = image_path.parent()?;
-    if parent
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
-    {
-        return parent.parent().map(Path::to_path_buf);
+/// Extracts the executable path token from a Windows service `lpBinaryPathName`.
+///
+/// Handles quoted paths with trailing arguments and unquoted first-token forms.
+/// Empty / unclosed-quote / whitespace-only inputs fail closed (`None`).
+pub fn service_image_path_token(binary_path_name: &str) -> Option<&str> {
+    let trimmed = binary_path_name.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    Some(parent.to_path_buf())
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let end = rest.find('"')?;
+        let path = &rest[..end];
+        if path.is_empty() {
+            return None;
+        }
+        return Some(path);
+    }
+    // Unquoted ImagePath: check for .exe boundary followed by whitespace or end of string
+    // to correctly support unquoted paths with spaces (e.g. C:\Program Files\...).
+    let lower = trimmed.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(rel_pos) = lower[search_from..].find(".exe") {
+        let exe_end = search_from + rel_pos + 4;
+        if exe_end == trimmed.len() || trimmed[exe_end..].starts_with(char::is_whitespace) {
+            return Some(&trimmed[..exe_end]);
+        }
+        search_from = exe_end;
+    }
+    // Fallback: first whitespace-separated token is the executable.
+    let token = trimmed.split_whitespace().next()?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
+pub fn runner_home_from_image(image_path: &Path) -> Option<PathBuf> {
+    // Preserve original path casing.
+    #[cfg(windows)]
+    {
+        let parent = image_path.parent()?;
+        if parent
+            .file_name()
+            .map(|n| n.to_string_lossy().eq_ignore_ascii_case("bin"))
+            .unwrap_or(false)
+        {
+            return parent.parent().map(Path::to_path_buf);
+        }
+        Some(parent.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    {
+        let key = image_path.to_string_lossy().replace('/', "\\");
+        let (parent_key, file_name) = key.rsplit_once('\\')?;
+        if file_name.is_empty() {
+            return None;
+        }
+        if let Some((home_key, bin)) = parent_key.rsplit_once('\\') {
+            if bin.eq_ignore_ascii_case("bin") {
+                return Some(PathBuf::from(home_key));
+            }
+        }
+        Some(PathBuf::from(parent_key))
+    }
 }
 
 #[cfg(windows)]
@@ -590,6 +828,52 @@ unsafe fn wide_to_string(ptr: *const u16) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_boundary_rejects_sibling_prefix_homes() {
+        let home = normalize_path_key(Path::new(r"C:\runners\a"));
+        assert!(path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\a\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(path_is_under_home_key(&home, &home));
+        // Sibling `a` vs `abc` must not match via raw prefix.
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\abc\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\a-extra\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\other\bin\Runner.Listener.exe")),
+            &home
+        ));
+        assert!(!path_is_under_home_key(
+            &normalize_path_key(Path::new(r"C:\runners\a\bin\Runner.Listener.exe")),
+            ""
+        ));
+    }
+
+    #[test]
+    fn listener_worker_attribution_requires_bin_image_under_home() {
+        let home = PathBuf::from(r"C:\fixture\runners\exact-home");
+        let home_key = normalize_path_key(&home);
+        let ok_listener = normalize_path_key(&home.join("bin").join("Runner.Listener.exe"));
+        let sibling = normalize_path_key(Path::new(
+            r"C:\fixture\runners\exact-home-sibling\bin\Runner.Listener.exe",
+        ));
+        let wrong_layout = normalize_path_key(&home.join("Runner.Listener.exe"));
+        assert!(path_is_under_home_key(&ok_listener, &home_key));
+        assert!(!path_is_under_home_key(&sibling, &home_key));
+        assert!(path_is_under_home_key(&wrong_layout, &home_key));
+        // Wrong layout under home is still filtered by the bin\ name suffix check
+        // in observe_runner_processes_for_home.
+        assert!(!wrong_layout.ends_with("\\bin\\runner.listener.exe"));
+        assert!(ok_listener.ends_with("\\bin\\runner.listener.exe"));
+    }
 
     #[test]
     fn configured_session_source_observes_explicit_homes_read_only() {
@@ -679,5 +963,86 @@ mod tests {
         let summary = PrivacySafeDiscoverySummary::from_report(&report);
         assert_eq!(summary.candidate_count, 0);
         assert!(!summary.incomplete);
+    }
+
+    #[test]
+    fn hux1_operator_card_stays_pending_and_privacy_safe() {
+        let card = hux1_zenbookduo_operator_card();
+        assert!(card.contains("HUX1_ZENBOOKDUO=PENDING"));
+        assert!(card.contains("discover-readonly"));
+        assert!(card.contains("PRODUCTION_MUTATION=false"));
+        assert!(!card.contains("C:\\Users\\"));
+        assert!(!card.contains("/Users/"));
+        assert!(!card.contains("ghp_"));
+        // Must not invent a nonempty host disposition.
+        assert!(!card.contains("PASS_NONEMPTY"));
+        assert!(!card.contains("candidate_count=0"));
+    }
+
+    #[test]
+    fn service_account_identity_hashes_well_known_and_fails_closed_on_empty() {
+        assert!(opaque_from_account_name("").is_none());
+        assert!(opaque_from_account_name("   ").is_none());
+        let local_system = opaque_from_account_name("LocalSystem").expect("localsystem");
+        let local_service =
+            opaque_from_account_name(r"NT AUTHORITY\LocalService").expect("localservice");
+        assert_ne!(local_system.key, local_service.key);
+        // Case folding must not mint distinct identities for the same account.
+        assert_eq!(
+            opaque_from_account_name("localsystem").expect("folded").key,
+            local_system.key
+        );
+    }
+
+    #[test]
+    fn service_image_path_token_handles_quotes_and_args() {
+        assert_eq!(
+            service_image_path_token(
+                r#""C:\fixture\runners\svc-home\bin\RunnerService.exe" --runAsService"#
+            ),
+            Some(r"C:\fixture\runners\svc-home\bin\RunnerService.exe")
+        );
+        // Legacy trim_matches('"') would leave a trailing quote + args.
+        assert_ne!(
+            r#""C:\path\RunnerService.exe" -arg"#.trim_matches('"'),
+            r"C:\path\RunnerService.exe"
+        );
+        assert_eq!(
+            service_image_path_token(r"C:\fixture\bin\RunnerService.exe -svc"),
+            Some(r"C:\fixture\bin\RunnerService.exe")
+        );
+        assert_eq!(
+            service_image_path_token(r#""C:\fixture\bin\RunnerService.exe""#),
+            Some(r"C:\fixture\bin\RunnerService.exe")
+        );
+        assert_eq!(service_image_path_token(""), None);
+        assert_eq!(service_image_path_token("   "), None);
+        assert_eq!(service_image_path_token(r#""""#), None);
+        assert_eq!(
+            service_image_path_token(r#""C:\unclosed\RunnerService.exe"#),
+            None
+        );
+    }
+
+    #[test]
+    fn runner_home_from_quoted_service_image_uses_bin_parent() {
+        let image = PathBuf::from(
+            service_image_path_token(
+                r#""C:\fixture\runners\svc-home\bin\RunnerService.exe" --runAsService"#,
+            )
+            .expect("token"),
+        );
+        let home = runner_home_from_image(&image).expect("home");
+        assert_eq!(
+            normalize_path_key(&home),
+            normalize_path_key(Path::new(r"C:\fixture\runners\svc-home"))
+        );
+        // Non-bin layout falls back to parent directory only.
+        let odd = PathBuf::from(r"C:\fixture\runners\svc-home\RunnerService.exe");
+        let odd_home = runner_home_from_image(&odd).expect("odd home");
+        assert_eq!(
+            normalize_path_key(&odd_home),
+            normalize_path_key(Path::new(r"C:\fixture\runners\svc-home"))
+        );
     }
 }

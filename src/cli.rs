@@ -10,8 +10,8 @@ use crate::{
 /// [`AgentCommand`] instead of owning operational state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
-    Status { json: bool },
-    Doctor { json: bool },
+    Status { json: bool, diagnostic: bool },
+    Doctor { json: bool, diagnostic: bool },
     Mode { mode: UserMode },
     Zen { zen: ZenOverride },
     ProbeList,
@@ -24,13 +24,53 @@ pub enum CliCommand {
 /// Parses arguments after the executable name into the stable G05 command set.
 pub fn parse_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
     match arguments {
-        [command] if command == "status" => Ok(CliCommand::Status { json: false }),
-        [command, format] if command == "status" && format == "--json" => {
-            Ok(CliCommand::Status { json: true })
+        [command] if command == "status" => Ok(CliCommand::Status {
+            json: false,
+            diagnostic: false,
+        }),
+        [command, format] if command == "status" && format == "--json" => Ok(CliCommand::Status {
+            json: true,
+            diagnostic: false,
+        }),
+        [command, format] if command == "status" && format == "--diagnostic" => {
+            Ok(CliCommand::Status {
+                json: false,
+                diagnostic: true,
+            })
         }
-        [command] if command == "doctor" => Ok(CliCommand::Doctor { json: false }),
-        [command, format] if command == "doctor" && format == "--json" => {
-            Ok(CliCommand::Doctor { json: true })
+        [command, f1, f2]
+            if command == "status"
+                && ((f1 == "--json" && f2 == "--diagnostic")
+                    || (f1 == "--diagnostic" && f2 == "--json")) =>
+        {
+            Ok(CliCommand::Status {
+                json: true,
+                diagnostic: true,
+            })
+        }
+        [command] if command == "doctor" => Ok(CliCommand::Doctor {
+            json: false,
+            diagnostic: false,
+        }),
+        [command, format] if command == "doctor" && format == "--json" => Ok(CliCommand::Doctor {
+            json: true,
+            diagnostic: false,
+        }),
+        [command, format] if command == "doctor" && format == "--diagnostic" => {
+            Ok(CliCommand::Doctor {
+                json: false,
+                diagnostic: true,
+            })
+        }
+        [command, f1, f2]
+            if command == "doctor"
+                && ((f1 == "--json" && f2 == "--diagnostic")
+                    || (f1 == "--diagnostic" && f2 == "--json")) =>
+        {
+            Ok(CliCommand::Doctor {
+                json: true,
+                diagnostic: true,
+            })
         }
         [command, mode] if command == "mode" => Ok(CliCommand::Mode {
             mode: mode.parse().map_err(CliError::InvalidMode)?,
@@ -67,10 +107,11 @@ fn parse_runners_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
     let json = arguments.iter().any(|argument| argument == "--json");
     let prepare_only = arguments.iter().any(|argument| argument == "--prepare");
     let when_idle = arguments.iter().any(|argument| argument == "--when-idle");
+    let all = arguments.iter().any(|argument| argument == "--all");
     let positional: Vec<&str> = arguments
         .iter()
         .map(String::as_str)
-        .filter(|argument| !matches!(*argument, "--json" | "--prepare" | "--when-idle"))
+        .filter(|argument| !matches!(*argument, "--json" | "--prepare" | "--when-idle" | "--all"))
         .collect();
     let command = match positional.as_slice() {
         ["runners", "list"] => AgentCommand::RunnersList,
@@ -82,8 +123,18 @@ fn parse_runners_cli(arguments: &[String]) -> Result<CliCommand, CliError> {
             local_runner_key: (*key).to_owned(),
             prepare_only,
         },
+        ["runners", "enable-all"] => AgentCommand::RunnersEnableAll { prepare_only },
+        ["runners", "enable"] if all => AgentCommand::RunnersEnableAll { prepare_only },
         ["runners", "enable", key] => AgentCommand::RunnersEnable {
             local_runner_key: (*key).to_owned(),
+            prepare_only,
+        },
+        ["runners", "disable-all"] => AgentCommand::RunnersDisableAll {
+            when_idle,
+            prepare_only,
+        },
+        ["runners", "disable"] if all => AgentCommand::RunnersDisableAll {
+            when_idle,
             prepare_only,
         },
         ["runners", "disable", key] => AgentCommand::RunnersDisable {
@@ -143,18 +194,22 @@ pub fn execute_cli(
     version: &str,
 ) -> Result<String, CliError> {
     match parse_cli(arguments)? {
-        CliCommand::Status { json } => {
+        CliCommand::Status { json, diagnostic } => {
             let snapshot = request_snapshot(transport, AgentCommand::GetSnapshot)?;
             if json {
                 render_json(&snapshot)
+            } else if diagnostic {
+                Ok(render_snapshot_diagnostic_text(&snapshot))
             } else {
                 Ok(render_snapshot_text(&snapshot))
             }
         }
-        CliCommand::Doctor { json } => {
+        CliCommand::Doctor { json, diagnostic } => {
             let report = request_doctor(transport)?;
             if json {
                 render_json(&report)
+            } else if diagnostic {
+                Ok(render_doctor_diagnostic_text(&report))
             } else {
                 Ok(render_doctor_text(&report))
             }
@@ -309,7 +364,7 @@ fn render_json<T: serde::Serialize>(value: &T) -> Result<String, CliError> {
     serde_json::to_string_pretty(value).map_err(CliError::Json)
 }
 
-fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
+fn render_snapshot_text_with(snapshot: &AgentSnapshot, diagnostic: bool) -> String {
     let github = snapshot
         .links
         .iter()
@@ -326,7 +381,7 @@ fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
         .as_ref()
         .map(|reason| reason.as_str())
         .unwrap_or("none");
-    format!(
+    let mut text = format!(
         "Agent: {}\nDesired capacity: {} · {}\nAchieved capacity: {}\nAdmission control: {} · {} · {}\nRunner: {}\nGitHub: {}\nZen: {}",
         snapshot.health,
         snapshot.desired_node_state,
@@ -342,11 +397,32 @@ fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
         snapshot.runner_phase,
         github,
         snapshot.zen
-    )
+    );
+    if diagnostic {
+        text.push_str(&format!(
+            "\nDiagnostic: schema_version={} auto_idle_seconds={} probes={}",
+            snapshot.schema_version,
+            snapshot.auto_idle_threshold_seconds,
+            snapshot.probes.len()
+        ));
+    }
+    text
 }
 
-fn render_doctor_text(report: &DoctorReport) -> String {
-    let mut output = String::from("Doctor:");
+pub fn render_snapshot_text(snapshot: &AgentSnapshot) -> String {
+    render_snapshot_text_with(snapshot, false)
+}
+
+pub fn render_snapshot_diagnostic_text(snapshot: &AgentSnapshot) -> String {
+    render_snapshot_text_with(snapshot, true)
+}
+
+fn render_doctor_text_with(report: &DoctorReport, diagnostic: bool) -> String {
+    let mut output = if diagnostic {
+        String::from("Doctor (Diagnostic mode):")
+    } else {
+        String::from("Doctor:")
+    };
     for check in &report.checks {
         output.push_str(&format!("\n- {}: {}", check.id, check.status));
         if let Some(reason_code) = &check.reason_code {
@@ -354,6 +430,14 @@ fn render_doctor_text(report: &DoctorReport) -> String {
         }
     }
     output
+}
+
+pub fn render_doctor_text(report: &DoctorReport) -> String {
+    render_doctor_text_with(report, false)
+}
+
+pub fn render_doctor_diagnostic_text(report: &DoctorReport) -> String {
+    render_doctor_text_with(report, true)
 }
 
 fn render_probe_list(snapshot: &AgentSnapshot) -> String {
@@ -429,14 +513,27 @@ fn render_runners_text(report: &crate::RunnerCommandReport) -> String {
     for key in &report.discovered_keys {
         lines.push(format!("discovered: {key}"));
     }
+    for candidate in &report.discovered_candidates {
+        let refusal = candidate.refusal_reason.as_deref().unwrap_or("none");
+        lines.push(format!(
+            "candidate: {} backend={} disposition={} eligible={} collision={} refusal={}",
+            candidate.local_discovery_key,
+            candidate.backend_kind,
+            candidate.disposition,
+            candidate.enrollment_eligible,
+            candidate.same_scope_collision,
+            refusal
+        ));
+    }
     lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_cli, parse_cli, render_runner_status, render_snapshot_text, AgentTransport,
-        CliCommand,
+        execute_cli, parse_cli, render_doctor_diagnostic_text, render_doctor_text,
+        render_runner_status, render_runners_text, render_snapshot_diagnostic_text,
+        render_snapshot_text, AgentTransport, CliCommand,
     };
     use crate::{
         AdmissionControlSnapshot, AdmissionDecision, AdmissionLifecycleState,
@@ -552,6 +649,115 @@ mod tests {
     }
 
     #[test]
+    fn runners_json_renders_faithful_machine_contract_and_respects_prepare_flags() {
+        use crate::{
+            DiscoveredCandidateView, EnrollmentState, RunnerCommandReport,
+            RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let sample_report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: false,
+            prepare_only: true,
+            applied: false,
+            reason_code: Some(ReasonCode::new("runners-dry-run-prepared").unwrap()),
+            records: vec![RunnerRecordView {
+                local_runner_key: "runner-test".to_owned(),
+                runner_id: 101,
+                expected_runner_name: "test-runner".to_owned(),
+                desired_enabled: true,
+                enrollment_state: EnrollmentState::Enrolled,
+                managed_admission: true,
+                backend_kind: "user-session".to_owned(),
+                presentation_status: RunnerPresentationStatus::Enabled,
+                memory_samples: Vec::new(),
+                resource_samples: Vec::new(),
+                item_applied: Some(true),
+                item_reason_code: None,
+            }],
+            discovered_keys: vec!["disc-1".to_owned()],
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: false,
+            discovered_candidates: vec![DiscoveredCandidateView {
+                local_discovery_key: "disc-1".to_owned(),
+                backend_kind: "user-session".to_owned(),
+                disposition: "OBSERVED_ONLY".to_owned(),
+                refusal_reason: None,
+                enrollment_eligible: true,
+                same_scope_collision: false,
+            }],
+        };
+
+        // Test runners status --json
+        let transport = FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        let output = execute_cli(
+            &arguments(["runners", "status", "--json"]),
+            &transport,
+            "0.1.0",
+        )
+        .unwrap();
+        let deserialized: RunnerCommandReport = serde_json::from_str(&output).unwrap();
+        assert_eq!(deserialized, sample_report);
+        assert_eq!(
+            transport.requests(),
+            vec![AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            }]
+        );
+
+        // Test runners list --json
+        let transport_list =
+            FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        let output_list = execute_cli(
+            &arguments(["runners", "list", "--json"]),
+            &transport_list,
+            "0.1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<RunnerCommandReport>(&output_list).unwrap(),
+            sample_report
+        );
+        assert_eq!(transport_list.requests(), vec![AgentCommand::RunnersList]);
+
+        // Test runners enroll with --prepare
+        let transport_enroll =
+            FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        execute_cli(
+            &arguments(["runners", "enroll", "runner-test", "--prepare"]),
+            &transport_enroll,
+            "0.1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            transport_enroll.requests(),
+            vec![AgentCommand::RunnersEnroll {
+                local_runner_key: "runner-test".to_owned(),
+                prepare_only: true,
+            }]
+        );
+
+        // Test runners disable with --when-idle
+        let transport_disable =
+            FakeTransport::with_response(AgentResponse::Runners(sample_report.clone()));
+        execute_cli(
+            &arguments(["runners", "disable", "runner-test", "--when-idle"]),
+            &transport_disable,
+            "0.1.0",
+        )
+        .unwrap();
+        assert_eq!(
+            transport_disable.requests(),
+            vec![AgentCommand::RunnersDisable {
+                local_runner_key: "runner-test".to_owned(),
+                when_idle: true,
+                prepare_only: false,
+            }]
+        );
+    }
+
+    #[test]
     fn controls_use_agent_commands_and_do_not_claim_runner_control() {
         let mode_transport = FakeTransport::with_response(AgentResponse::Accepted {
             snapshot: snapshot(),
@@ -659,5 +865,138 @@ mod tests {
             auto_idle_threshold_seconds: 300,
             update_checks_enabled: true,
         }
+    }
+
+    #[test]
+    fn doctor_and_runners_text_omit_private_path_and_secret_shapes() {
+        use crate::{
+            DiscoveredCandidateView, EnrollmentState, RunnerCommandReport,
+            RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let doctor = DoctorReport {
+            checks: vec![DoctorCheck {
+                id: ReasonCode::new("agent-health").unwrap(),
+                status: DoctorStatus::Pass,
+                reason_code: Some(ReasonCode::new("host-observed").unwrap()),
+            }],
+        };
+        let doctor_text = render_doctor_text(&doctor);
+        assert!(doctor_text.contains("agent-health"));
+        assert!(!doctor_text.contains(r"C:\"));
+        assert!(!doctor_text.contains("/Users/"));
+        assert!(!doctor_text.contains("ghp_"));
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: true,
+            prepare_only: false,
+            applied: false,
+            reason_code: Some(ReasonCode::new("runners-partial-failure").unwrap()),
+            records: vec![RunnerRecordView {
+                local_runner_key: "runner-a".to_owned(),
+                runner_id: 7,
+                expected_runner_name: "fixture".to_owned(),
+                desired_enabled: true,
+                enrollment_state: EnrollmentState::Enrolled,
+                managed_admission: false,
+                backend_kind: "user-session".to_owned(),
+                presentation_status: RunnerPresentationStatus::Enabled,
+                memory_samples: Vec::new(),
+                resource_samples: Vec::new(),
+                item_applied: Some(false),
+                item_reason_code: Some(ReasonCode::new("runners-item-failed").unwrap()),
+            }],
+            discovered_keys: vec!["opaque-discovery-key".to_owned()],
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: true,
+            discovered_candidates: vec![DiscoveredCandidateView {
+                local_discovery_key: "opaque-discovery-key".to_owned(),
+                backend_kind: "user-session".to_owned(),
+                disposition: "OBSERVED_ONLY".to_owned(),
+                refusal_reason: None,
+                enrollment_eligible: true,
+                same_scope_collision: false,
+            }],
+        };
+        let runners_text = render_runners_text(&report);
+        assert!(runners_text.contains("partial_failure=true"));
+        assert!(runners_text.contains("opaque-discovery-key"));
+        assert!(!runners_text.contains(r"C:\fixture"));
+        assert!(!runners_text.contains("actions.runner."));
+        assert!(!runners_text.contains("ghp_"));
+    }
+
+    #[test]
+    fn diagnostic_mode_parsing_and_privacy_boundary() {
+        assert_eq!(
+            parse_cli(&arguments(["status", "--diagnostic"])).unwrap(),
+            CliCommand::Status {
+                json: false,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["status", "--json", "--diagnostic"])).unwrap(),
+            CliCommand::Status {
+                json: true,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["status", "--diagnostic", "--json"])).unwrap(),
+            CliCommand::Status {
+                json: true,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["doctor", "--diagnostic"])).unwrap(),
+            CliCommand::Doctor {
+                json: false,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["doctor", "--json", "--diagnostic"])).unwrap(),
+            CliCommand::Doctor {
+                json: true,
+                diagnostic: true,
+            }
+        );
+        assert_eq!(
+            parse_cli(&arguments(["doctor", "--diagnostic", "--json"])).unwrap(),
+            CliCommand::Doctor {
+                json: true,
+                diagnostic: true,
+            }
+        );
+
+        let snap = snapshot();
+        let diag_text = render_snapshot_diagnostic_text(&snap);
+        assert!(diag_text.contains("Diagnostic:"));
+        assert!(diag_text.contains("schema_version="));
+        assert!(!diag_text.contains(r"C:\"));
+        assert!(!diag_text.contains("/Users/"));
+        assert!(!diag_text.contains("ghp_"));
+
+        let doctor = DoctorReport {
+            checks: vec![DoctorCheck {
+                id: ReasonCode::new("agent-health").unwrap(),
+                status: DoctorStatus::Pass,
+                reason_code: Some(ReasonCode::new("host-observed").unwrap()),
+            }],
+        };
+        let diag_doc = render_doctor_diagnostic_text(&doctor);
+        assert!(diag_doc.contains("Diagnostic mode"));
+        assert!(diag_doc.contains("agent-health"));
+        assert!(!diag_doc.contains(r"C:\"));
+        assert!(!diag_doc.contains("/Users/"));
+        assert!(!diag_doc.contains("ghp_"));
+
+        let transport = FakeTransport::with_response(AgentResponse::Snapshot(snap));
+        let out = execute_cli(&arguments(["status", "--diagnostic"]), &transport, "0.1.0").unwrap();
+        assert!(out.contains("Diagnostic:"));
     }
 }

@@ -439,6 +439,88 @@ mod tests {
     }
 
     #[test]
+    fn restart_refuses_stale_or_ambiguous_process_ownership_without_adoption() {
+        let mut ambiguous = runner(RunnerPhase::Listening);
+        ambiguous.listener = ProcessOwnership::Unknown;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: ambiguous,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::ProcessOwnershipAmbiguous)
+        );
+        assert_eq!(recovered.directive, RecoveryDirective::Reobserve);
+        assert_ne!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Adopt
+        );
+    }
+
+    #[test]
+    fn restart_refuses_execution_identity_mismatch_without_adoption() {
+        let mut mismatched = runner(RunnerPhase::Listening);
+        mismatched.execution_identity = ExecutionIdentityEvidence::Mismatch;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: mismatched,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::ExecutionIdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn restart_refuses_foreign_worker_without_destructive_adoption() {
+        let mut foreign = runner(RunnerPhase::Busy);
+        foreign.worker = ProcessOwnership::Foreign;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: foreign,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::ForeignProcessObserved)
+        );
+        assert_eq!(recovered.directive, RecoveryDirective::Reobserve);
+    }
+
+    #[test]
+    fn restart_refuses_unowned_work_root_without_destructive_adoption() {
+        let mut foreign_root = runner(RunnerPhase::Listening);
+        foreign_root.work_root = OwnershipEvidence::NotOwned;
+        let source = QueueRecoverySource::new(vec![RecoveryObservation {
+            host: host_evidence(),
+            runner: foreign_root,
+            runner_home: OwnershipEvidence::Verified,
+            github_link: LinkState::Connected,
+        }]);
+        let mut reconstructor = RecoveryReconstructor::new(source);
+        let recovered = reconstructor.reconstruct(RecoveryTrigger::AgentRestart);
+        assert_eq!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Refused(AdoptionRefusal::WorkRootNotOwned)
+        );
+        assert_ne!(
+            recovered.existing_listener_adoption,
+            ExistingListenerAdoption::Adopt
+        );
+    }
+
+    #[test]
     fn resume_refuses_ambiguous_home_and_interruption_only_directs_reconnect() {
         let source = QueueRecoverySource::new(vec![
             RecoveryObservation {

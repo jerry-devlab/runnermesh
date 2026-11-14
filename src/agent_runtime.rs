@@ -9,12 +9,12 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicIsize, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -26,15 +26,17 @@ use tray_icon::{
 use crate::{
     ActivityWorkloadProbe, AdmissionAgentReconciler, AdmissionControlSnapshot, AdmissionController,
     AdmissionDecision, AgentCommand, AgentCore, AgentHealth, AgentObservation, AgentObserver,
-    AgentReconciler, AgentResponse, AgentSnapshot, BuildProvenance, DesiredAdmissionState,
-    DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
-    ExecutionIdentityEvidence, FileConfigStore, HardSafetyState, HostSnapshot, HostSource,
-    Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    LocalAgentTransport, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
-    ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph, TrayMenuEntry,
-    TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
-    WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
-    WindowsSteamAppIdSource, WindowsUserActivitySource, WindowsUserSessionSupervisorAdapter,
+    AgentReconciler, AgentResponse, AgentSnapshot, AuthoritativeMultiRunnerLifecycleBackend,
+    BuildProvenance, DesiredAdmissionState, DoctorCheck, DoctorReport, DoctorStatus,
+    EffectiveLocale, EffectiveTheme, ExecutionIdentityEvidence, FileConfigStore, HardSafetyState,
+    HostSnapshot, HostSource, Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind,
+    LinkSnapshot, LinkState, LiveScmExecutionGate, LocalAgentTransport,
+    MultiRunnerLifecycleBackend, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
+    PrivilegedScmHelper, ProcessListProbe, ReasonCode, RegistryStore, RunnerPhase, ThemePreference,
+    TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
+    UserActivityProbe, WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource,
+    WindowsRunnerSource, WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
+    WindowsUserSessionSupervisorAdapter,
 };
 
 /// Reconstructable smoke evidence persisted only under the selected runtime
@@ -81,7 +83,7 @@ impl RuntimeReadiness {
     }
 }
 
-enum RuntimeReconciler {
+pub enum RuntimeReconciler {
     Unconfigured(NoRunnerControl),
     Configured(Box<AdmissionAgentReconciler<WindowsGithubAdmissionBackend>>),
 }
@@ -99,7 +101,7 @@ impl AgentReconciler for RuntimeReconciler {
     }
 }
 
-type RuntimeCore = AgentCore<RuntimeObserver, RuntimeReconciler, FileConfigStore>;
+pub type RuntimeCore = AgentCore<RuntimeObserver, RuntimeReconciler, FileConfigStore>;
 
 /// Starts the development-only Agent. `development_root` must be a caller-owned
 /// sandbox path; no default is intentionally provided.
@@ -115,7 +117,9 @@ pub fn run_development_agent(
         development_root,
         observer,
         RuntimeReconciler::Unconfigured(NoRunnerControl),
+        None,
         true,
+        None,
     )
 }
 
@@ -146,25 +150,35 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     let binding = installation
         .runtime_binding()
         .map_err(|error| error.to_string())?;
-    let (observer, reconciler) = match binding {
-        Some(binding) => {
+    let (observer, reconciler, admission_coord) = match binding {
+        Some(ref binding) => {
             let backend = crate::windows_github_admission_backend(binding.admission.clone())
                 .map_err(|error| error.to_string())?;
             let observer = RuntimeObserver::new_bound(
                 &binding.local,
                 &binding.admission,
-                binding.process_probe_executables,
+                binding.process_probe_executables.clone(),
             );
+            let coord = Arc::new(crate::BoundRunnerAdmissionCoordinator::new(
+                binding.admission.scope.clone(),
+                binding.admission.runner_id,
+                backend,
+            ));
             (
                 observer,
                 RuntimeReconciler::Configured(Box::new(AdmissionAgentReconciler::new(
-                    AdmissionController::new(backend),
+                    AdmissionController::new(
+                        crate::windows_github_admission_backend(binding.admission.clone())
+                            .map_err(|error| error.to_string())?,
+                    ),
                 ))),
+                Some(coord as Arc<dyn crate::MultiRunnerAdmissionCoordinator>),
             )
         }
         None => (
             RuntimeObserver::new(None, Vec::new()),
             RuntimeReconciler::Unconfigured(NoRunnerControl),
+            None,
         ),
     };
     let state_root = installation.agent_state_dir();
@@ -175,38 +189,85 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
         return Err("installed Agent state root is a reparse point".to_owned());
     }
+    let mut authoritative_backend =
+        AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
+            WindowsScmBackend::mutation_inert(),
+            LiveScmExecutionGate::CLOSED,
+        ))
+        .with_session_coordinator(Arc::new(crate::StandardSessionCoordinator::new(
+            Arc::new(crate::GatedUserSessionProcessTransport::closed()),
+        )));
+
+    let config_path = installation.agent_config_path();
+    let registry_path = config_path
+        .parent()
+        .map(|parent| parent.join("runners-registry.json"))
+        .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
+
+    if registry_path.is_file() {
+        if let Ok(Some(registry)) = crate::FileRegistryStore::new(&registry_path).load() {
+            for record in registry.records {
+                let service_name = match record.backend {
+                    crate::RegistryBackendBinding::WindowsService { ref service_name } => {
+                        Some(service_name.clone())
+                    }
+                    _ => None,
+                };
+                authoritative_backend.register_runner_target_with_service(
+                    &record.local_runner_key,
+                    record.registration_scope.clone(),
+                    record.runner_id,
+                    service_name.as_deref(),
+                );
+                if record.managed_admission {
+                    if let Some(ref binding) = binding {
+                        if binding.admission.scope == record.registration_scope
+                            && binding.admission.runner_id == record.runner_id
+                        {
+                            if let Some(ref coord) = admission_coord {
+                                authoritative_backend.register_runner_admission_coordinator(
+                                    record.registration_scope.clone(),
+                                    record.runner_id,
+                                    Arc::clone(coord),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(coord) = admission_coord {
+        authoritative_backend = authoritative_backend.with_admission_coordinator(coord);
+    }
+    let multi_runner_backend: Arc<dyn MultiRunnerLifecycleBackend> =
+        Arc::new(authoritative_backend);
     run_agent(
         installation.agent_config_path(),
         state_root,
         observer,
         reconciler,
+        Some(multi_runner_backend),
         false,
+        binding.as_ref(),
     )
 }
 
-fn run_agent(
+/// Common assembly entry point for installed AgentCore.
+///
+/// Attaches config store, file registry store, build provenance, read-only runner discovery,
+/// and the multi-runner lifecycle backend (when configured).
+pub fn assemble_installed_core(
     config_path: PathBuf,
-    runtime_state_root: PathBuf,
     observer: RuntimeObserver,
     reconciler: RuntimeReconciler,
-    development_controls: bool,
-) -> Result<(), String> {
-    // Acquire the user-scoped authority guard before constructing a configured
-    // core or performing any observation/reconciliation that could mutate the
-    // remote admission selector.
-    let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
-    let server = IpcServer::bind(endpoint).map_err(|error| error.to_string())?;
-    let runner_home = observer.runner_home.as_deref();
-    let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
+    multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+) -> Result<RuntimeCore, String> {
     let store = FileConfigStore::new(config_path.clone());
     let registry_path = config_path
         .parent()
         .map(|parent| parent.join("runners-registry.json"))
         .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
-    let readiness = Arc::new(RuntimeReadiness::from_runner_home(
-        runner_home,
-        runner_control_configured,
-    ));
     let mut core = AgentCore::with_registry_store(
         observer,
         reconciler,
@@ -217,6 +278,371 @@ fn run_agent(
     .map_err(|error| error.to_string())?;
     // Best-effort read-only host discovery at startup (never mutates Services).
     core.set_runner_discovery(crate::discover_local_runners_read_only(Vec::new()));
+    if let Some(backend) = multi_runner_backend {
+        core.set_multi_runner_backend(backend);
+    }
+    Ok(core)
+}
+
+/// Explicit sandbox configuration for running the installed Agent in test/qualification environments.
+#[derive(Clone)]
+pub struct InstalledAgentSandboxConfig {
+    pub install_root: PathBuf,
+    pub ipc_endpoint: IpcEndpoint,
+    pub multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+    pub discovery_report: Option<crate::DiscoveryReport>,
+    pub poll_interval: Duration,
+    pub enable_periodic_scheduler: bool,
+}
+
+#[cfg(windows)]
+pub(crate) fn cancel_thread_io(thread_handle: isize) -> bool {
+    if thread_handle != 0 {
+        let ret = unsafe {
+            windows_sys::Win32::System::IO::CancelSynchronousIo(
+                thread_handle as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
+        ret != 0
+    } else {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ShutdownError {
+    Incomplete {
+        pipe_timed_out: bool,
+        poll_timed_out: bool,
+        elapsed_ms: u128,
+    },
+}
+
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incomplete {
+                pipe_timed_out,
+                poll_timed_out,
+                elapsed_ms,
+            } => write!(
+                f,
+                "shutdown-incomplete: pipe_timed_out={pipe_timed_out}, poll_timed_out={poll_timed_out}, elapsed_ms={elapsed_ms}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ShutdownError {}
+
+/// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
+pub struct RunningInstalledAgentSandbox {
+    core: Arc<Mutex<RuntimeCore>>,
+    exit: Arc<RuntimeExitState>,
+    endpoint: IpcEndpoint,
+    state_root: PathBuf,
+    pipe_thread: Option<thread::JoinHandle<()>>,
+    poll_thread: Option<thread::JoinHandle<()>>,
+    #[cfg(windows)]
+    pipe_thread_native_handle: Arc<AtomicIsize>,
+}
+
+impl RunningInstalledAgentSandbox {
+    /// Returns the current snapshot from the running AgentCore.
+    pub fn snapshot(&self) -> AgentSnapshot {
+        self.core.lock().unwrap().snapshot()
+    }
+
+    /// Inspects whether the exit state has been requested.
+    pub fn is_exit_requested(&self) -> bool {
+        self.exit.requested.load(Ordering::Acquire)
+    }
+
+    /// Returns the IPC endpoint bound by this sandbox.
+    pub fn endpoint(&self) -> &IpcEndpoint {
+        &self.endpoint
+    }
+
+    /// Fault injection helper for qualification: attaches an uncompleted thread to simulate
+    /// a worker or background loop that is still finishing work when shutdown is invoked.
+    pub fn attach_slow_worker_for_test(
+        &mut self,
+        duration: std::time::Duration,
+    ) -> std::sync::mpsc::Sender<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.poll_thread = Some(thread::spawn(move || {
+            let _ = rx.recv_timeout(duration);
+        }));
+        tx
+    }
+
+    /// Returns the state directory of this sandbox.
+    pub fn state_root(&self) -> &Path {
+        &self.state_root
+    }
+
+    /// Reads the current recorded runtime stage if present.
+    pub fn stage(&self) -> Option<String> {
+        let stage_file = self.state_root.join("runtime-stage.txt");
+        fs::read_to_string(stage_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    /// Inspects whether all background threads have been safely joined.
+    pub fn is_completely_shutdown(&self) -> bool {
+        self.pipe_thread.is_none() && self.poll_thread.is_none()
+    }
+
+    /// Performs graceful shutdown of the background pipe and polling threads.
+    ///
+    /// Wakes up or cancels any blocking `ConnectNamedPipe` waiting on the pipe thread,
+    /// marks exit requested, and reclaims all thread handles within a bounded duration.
+    pub fn shutdown(mut self) -> Result<(), ShutdownError> {
+        self.shutdown_with_timeout(std::time::Duration::from_secs(5))
+    }
+
+    /// Performs graceful shutdown with a caller-specified upper bound duration.
+    ///
+    /// If all threads terminate within `timeout`, returns `Ok(())` and writes `shutdown-complete`.
+    /// If any thread fails to exit within `timeout`, the handle is preserved, `shutdown-incomplete`
+    /// is written, and `Err(ShutdownError::Incomplete)` is returned, allowing the caller to retain
+    /// recoverable control authority without dropping or leaking threads.
+    pub fn shutdown_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<(), ShutdownError> {
+        println!("[sandbox:shutdown] stage=shutdown-started");
+        let _ = write_runtime_stage(&self.state_root, "shutdown-started");
+        self.exit.requested.store(true, Ordering::Release);
+
+        #[cfg(windows)]
+        let native_handle = self.pipe_thread_native_handle.load(Ordering::Acquire);
+
+        // Phase 1: Cancel any synchronous I/O on pipe thread (ConnectNamedPipe)
+        #[cfg(windows)]
+        if native_handle != 0 {
+            let cancelled = cancel_thread_io(native_handle);
+            println!("[sandbox:shutdown] stage=pipe-io-cancelled cancelled={cancelled}");
+            let _ = write_runtime_stage(&self.state_root, "pipe-io-cancelled");
+        }
+
+        // Phase 2: Wake listener via named pipe connection probe
+        #[cfg(windows)]
+        {
+            let woken = crate::ipc::wake_listener(&self.endpoint);
+            println!(
+                "[sandbox:shutdown] stage=pipe-listener-woken ok={}",
+                woken.is_ok()
+            );
+            let _ = write_runtime_stage(&self.state_root, "pipe-listener-woken");
+        }
+
+        let start = std::time::Instant::now();
+
+        // Phase 3: Bounded reclamation of pipe thread
+        let mut pipe_joined = true;
+        if let Some(ref handle) = self.pipe_thread {
+            while !handle.is_finished() && start.elapsed() < timeout {
+                #[cfg(windows)]
+                {
+                    let nh = self.pipe_thread_native_handle.load(Ordering::Acquire);
+                    if nh != 0 {
+                        let _ = cancel_thread_io(nh);
+                    }
+                    let _ = crate::ipc::wake_listener(&self.endpoint);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            if handle.is_finished() {
+                let handle = self.pipe_thread.take().unwrap();
+                let _ = handle.join();
+                println!(
+                    "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
+                    start.elapsed().as_millis()
+                );
+                let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
+            } else {
+                eprintln!("[sandbox:shutdown] ERROR: pipe_thread failed to exit within timeout; preserving handle for recovery");
+                let _ = write_runtime_stage(&self.state_root, "pipe-thread-deadline-exceeded");
+                pipe_joined = false;
+            }
+        }
+
+        // Phase 4: Bounded reclamation of poll thread
+        let mut poll_joined = true;
+        if let Some(ref handle) = self.poll_thread {
+            let poll_start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < timeout {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            if handle.is_finished() {
+                let handle = self.poll_thread.take().unwrap();
+                let _ = handle.join();
+                println!(
+                    "[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}",
+                    poll_start.elapsed().as_millis()
+                );
+                let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
+            } else {
+                eprintln!("[sandbox:shutdown] ERROR: poll_thread failed to exit within timeout; preserving handle for recovery");
+                let _ = write_runtime_stage(&self.state_root, "poll-thread-deadline-exceeded");
+                poll_joined = false;
+            }
+        }
+
+        if !pipe_joined || !poll_joined {
+            eprintln!("[sandbox:shutdown] stage=shutdown-incomplete");
+            let _ = write_runtime_stage(&self.state_root, "shutdown-incomplete");
+            return Err(ShutdownError::Incomplete {
+                pipe_timed_out: !pipe_joined,
+                poll_timed_out: !poll_joined,
+                elapsed_ms: start.elapsed().as_millis(),
+            });
+        }
+
+        println!(
+            "[sandbox:shutdown] stage=shutdown-complete total_elapsed_ms={}",
+            start.elapsed().as_millis()
+        );
+        let _ = write_runtime_stage(&self.state_root, "shutdown-complete");
+        Ok(())
+    }
+}
+
+/// Spawns the authentic periodic observation, decision, reconciliation, and multi-runner
+/// dispatch loop shared by installed production and sandboxed test execution.
+pub(crate) fn spawn_periodic_loop(
+    core: Arc<Mutex<RuntimeCore>>,
+    exit: Arc<RuntimeExitState>,
+    interval: Duration,
+    snapshot_sender: Option<Sender<AgentSnapshot>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !exit.requested.load(Ordering::Acquire) {
+            thread::sleep(interval);
+            if exit.requested.load(Ordering::Acquire) {
+                break;
+            }
+            if let Ok(mut core) = core.lock() {
+                if let Ok(snapshot) = core.observe_decide_reconcile() {
+                    if exit.after_drain.load(Ordering::Acquire)
+                        && snapshot.achieved_node_state == Some(crate::NodeState::Drained)
+                    {
+                        exit.requested.store(true, Ordering::Release);
+                    }
+                    if let Some(ref sender) = snapshot_sender {
+                        let _ = sender.send(snapshot);
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Starts an installed Agent runtime under explicit sandbox configuration.
+///
+/// Drives the runtime through the actual installed startup path:
+/// 1. Prepares config, registry, and state paths within the explicit `install_root`.
+/// 2. Assembles the installed AgentCore with attached multi-runner lifecycle backend and discovery report.
+/// 3. Binds the real IPC server on the explicit `ipc_endpoint`.
+/// 4. Spawns the authentic `spawn_pipe_loop` thread for receiving typed IPC commands.
+/// 5. Spawns the authentic periodic polling loop running `observe_decide_reconcile`.
+pub fn start_installed_agent_sandbox(
+    config: InstalledAgentSandboxConfig,
+) -> Result<RunningInstalledAgentSandbox, String> {
+    let state_root = config.install_root.join("agent_state");
+    fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
+    let config_path = config.install_root.join("config.json");
+
+    let observer = RuntimeObserver::new(None, Vec::new());
+    let reconciler = RuntimeReconciler::Unconfigured(NoRunnerControl::new());
+    let mut core = assemble_installed_core(
+        config_path,
+        observer,
+        reconciler,
+        config.multi_runner_backend,
+    )?;
+    if let Some(discovery) = config.discovery_report {
+        core.set_runner_discovery(discovery);
+    }
+
+    let endpoint = config.ipc_endpoint.clone();
+    let server = IpcServer::bind(config.ipc_endpoint).map_err(|error| error.to_string())?;
+    let _ = core
+        .observe_decide_reconcile()
+        .map_err(|error| error.to_string())?;
+
+    let core = Arc::new(Mutex::new(core));
+    let exit = Arc::new(RuntimeExitState::default());
+    let readiness = Arc::new(RuntimeReadiness::from_runner_home(None, false));
+    let (snapshot_sender, _snapshot_receiver) = mpsc::channel();
+
+    #[cfg(windows)]
+    let pipe_thread_native_handle = Arc::new(AtomicIsize::new(0));
+
+    let pipe_thread = spawn_pipe_loop(
+        server,
+        Arc::clone(&core),
+        Arc::clone(&exit),
+        readiness,
+        snapshot_sender,
+        false,
+        #[cfg(windows)]
+        Arc::clone(&pipe_thread_native_handle),
+    );
+
+    let poll_thread = if config.enable_periodic_scheduler {
+        Some(spawn_periodic_loop(
+            Arc::clone(&core),
+            Arc::clone(&exit),
+            config.poll_interval,
+            None,
+        ))
+    } else {
+        None
+    };
+
+    Ok(RunningInstalledAgentSandbox {
+        core,
+        exit,
+        endpoint,
+        state_root,
+        pipe_thread: Some(pipe_thread),
+        poll_thread,
+        #[cfg(windows)]
+        pipe_thread_native_handle,
+    })
+}
+
+fn run_agent(
+    config_path: PathBuf,
+    runtime_state_root: PathBuf,
+    observer: RuntimeObserver,
+    reconciler: RuntimeReconciler,
+    multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+    development_controls: bool,
+    runtime_binding: Option<&crate::InstalledRuntimeBinding>,
+) -> Result<(), String> {
+    // Acquire the user-scoped authority guard before constructing a configured
+    // core or performing any observation/reconciliation that could mutate the
+    // remote admission selector.
+    let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
+    let server = IpcServer::bind(endpoint.clone()).map_err(|error| error.to_string())?;
+    let runner_home = observer.runner_home.as_deref().map(Path::to_path_buf);
+    let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
+    let readiness = Arc::new(RuntimeReadiness::from_runner_home(
+        runner_home.as_deref(),
+        runner_control_configured,
+    ));
+    let mut core =
+        assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)?;
+    if let Some(binding) = runtime_binding {
+        core.migrate_v01_binding_if_needed(binding, None)
+            .map_err(|error| format!("migration of v0.1 binding failed: {error}"))?;
+    }
     let initial_snapshot = core
         .observe_decide_reconcile()
         .map_err(|error| error.to_string())?;
@@ -225,18 +651,28 @@ fn run_agent(
     let exit = Arc::new(RuntimeExitState::default());
     write_runtime_stage(&runtime_state_root, "pipe-bound")?;
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    #[cfg(windows)]
+    let pipe_native_handle = Arc::new(AtomicIsize::new(0));
+
     let pipe_thread = spawn_pipe_loop(
         server,
         Arc::clone(&core),
         Arc::clone(&exit),
         Arc::clone(&readiness),
-        snapshot_sender,
+        snapshot_sender.clone(),
         development_controls,
+        #[cfg(windows)]
+        Arc::clone(&pipe_native_handle),
+    );
+    let periodic_thread = spawn_periodic_loop(
+        Arc::clone(&core),
+        Arc::clone(&exit),
+        Duration::from_secs(1),
+        Some(snapshot_sender),
     );
 
     let result = run_native_tray_loop(
         &runtime_state_root,
-        Arc::clone(&core),
         initial_snapshot,
         snapshot_receiver,
         Arc::clone(&exit),
@@ -244,14 +680,23 @@ fn run_agent(
         development_controls,
     );
     exit.requested.store(true, Ordering::Release);
+    #[cfg(windows)]
+    {
+        let h = pipe_native_handle.load(Ordering::Acquire);
+        if h != 0 {
+            let _ = cancel_thread_io(h);
+        }
+        let _ = crate::ipc::wake_listener(&endpoint);
+    }
     // Exit is requested through the same typed local IPC route. The pipe loop
     // returns after that request; never force-terminate a thread or runner.
     let _ = pipe_thread.join();
+    let _ = periodic_thread.join();
     result
 }
 
 #[derive(Default)]
-struct RuntimeExitState {
+pub(crate) struct RuntimeExitState {
     requested: AtomicBool,
     after_drain: AtomicBool,
 }
@@ -272,8 +717,45 @@ fn spawn_pipe_loop(
     readiness: Arc<RuntimeReadiness>,
     snapshot_sender: Sender<AgentSnapshot>,
     development_controls: bool,
+    #[cfg(windows)] native_thread_handle: Arc<AtomicIsize>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            let mut real_handle: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+            let dup_ok = unsafe {
+                windows_sys::Win32::Foundation::DuplicateHandle(
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    windows_sys::Win32::System::Threading::GetCurrentThread(),
+                    windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                    &mut real_handle,
+                    0,
+                    0,
+                    windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if dup_ok != 0 {
+                native_thread_handle.store(real_handle as isize, Ordering::Release);
+            }
+        }
+        #[cfg(windows)]
+        struct NativeHandleCleanup(Arc<AtomicIsize>);
+        #[cfg(windows)]
+        impl Drop for NativeHandleCleanup {
+            fn drop(&mut self) {
+                let h = self.0.swap(0, Ordering::AcqRel);
+                if h != 0 {
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(
+                            h as windows_sys::Win32::Foundation::HANDLE,
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        let _cleanup = NativeHandleCleanup(Arc::clone(&native_thread_handle));
+
         while !exit.requested.load(Ordering::Acquire) {
             let core = Arc::clone(&core);
             let exit = Arc::clone(&exit);
@@ -339,7 +821,6 @@ fn spawn_pipe_loop(
 
 fn run_native_tray_loop(
     runtime_state_root: &Path,
-    core: Arc<Mutex<RuntimeCore>>,
     initial_snapshot: AgentSnapshot,
     snapshots: Receiver<AgentSnapshot>,
     exit: Arc<RuntimeExitState>,
@@ -376,42 +857,9 @@ fn run_native_tray_loop(
     )?;
     write_runtime_stage(runtime_state_root, "runtime-ready")?;
     write_hint_evidence(runtime_state_root, &mut native)?;
-    let mut last_observation = Instant::now();
 
     while !exit.requested.load(Ordering::Acquire) {
         pump_windows_messages();
-        if last_observation.elapsed() >= Duration::from_secs(1) {
-            // Observation is reconstructed in the Agent Core on the normal
-            // Observe -> Decide -> Reconcile path. It is independent of tray
-            // rendering. Installed runtimes reconcile only through the exact
-            // accepted binding; development remains explicitly unconfigured.
-            if let Ok(mut core) = core.lock() {
-                if let Ok(snapshot) = core.observe_decide_reconcile() {
-                    current_snapshot = snapshot;
-                    let render = frontend
-                        .apply(TrayUiUpdate::Snapshot(current_snapshot.clone()))
-                        .map_err(|error| error.to_string())?;
-                    native.apply(
-                        render,
-                        current_snapshot.effective_ui_preferences.theme,
-                        current_snapshot.ui_preferences.theme != ThemePreference::System,
-                    )?;
-                    refreshes += 1;
-                    write_runtime_evidence(
-                        runtime_state_root,
-                        &current_snapshot,
-                        refreshes,
-                        development_controls,
-                    )?;
-                    if exit.after_drain.load(Ordering::Acquire)
-                        && current_snapshot.achieved_node_state == Some(crate::NodeState::Drained)
-                    {
-                        exit.requested.store(true, Ordering::Release);
-                    }
-                }
-            }
-            last_observation = Instant::now();
-        }
         if native.take_dpi_refresh_request() {
             let render = frontend
                 .current_render()
@@ -923,17 +1371,17 @@ fn pump_windows_messages() {
     }
 }
 
-struct RuntimeObserver {
-    host: WindowsHostSource,
-    user_activity: UserActivityProbe<WindowsUserActivitySource>,
-    steam: crate::SteamGameProbe<WindowsSteamAppIdSource>,
-    process_list: ProcessListProbe<WindowsProcessSource>,
-    runner_home: Option<PathBuf>,
-    exact_runner_source: Option<WindowsRunnerSource>,
+pub struct RuntimeObserver {
+    pub(crate) host: WindowsHostSource,
+    pub(crate) user_activity: UserActivityProbe<WindowsUserActivitySource>,
+    pub(crate) steam: crate::SteamGameProbe<WindowsSteamAppIdSource>,
+    pub(crate) process_list: ProcessListProbe<WindowsProcessSource>,
+    pub(crate) runner_home: Option<PathBuf>,
+    pub(crate) exact_runner_source: Option<WindowsRunnerSource>,
 }
 
 impl RuntimeObserver {
-    fn new(runner_home: Option<PathBuf>, process_probe_names: Vec<String>) -> Self {
+    pub fn new(runner_home: Option<PathBuf>, process_probe_names: Vec<String>) -> Self {
         Self {
             host: WindowsHostSource::default(),
             user_activity: UserActivityProbe::new(WindowsUserActivitySource, 300),
@@ -1023,7 +1471,14 @@ fn hard_safety_from_host(host: &HostSnapshot) -> HardSafetyState {
     }
 }
 
-struct NoRunnerControl;
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoRunnerControl;
+
+impl NoRunnerControl {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 impl AgentReconciler for NoRunnerControl {
     fn reconcile(

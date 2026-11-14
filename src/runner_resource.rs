@@ -1,7 +1,8 @@
-//! Sampled per-runner resource evidence (LRM-07).
+//! Sampled per-runner resource evidence (LRM-07 / P08-01).
 //!
-//! Samples are estimates with explicit timestamps. Missing or unattributable
-//! evidence stays `Unknown` and must never be presented as zero savings.
+//! Samples are estimates with explicit timestamps and freshness TTLs. Missing,
+//! stale, or unattributable evidence stays `Unknown` and must never be presented
+//! as zero savings.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,46 @@ use serde::{Deserialize, Serialize};
 pub enum ResourceSampleConfidence {
     Estimate,
     Unknown,
+}
+
+/// Status of attributing a process or process tree to an enrolled runner.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProcessAttributionDisposition {
+    /// Exactly matched the enrolled runner listener or worker PID and path.
+    DirectVerified,
+    /// Child process spawned under the verified runner tree.
+    ChildTree,
+    /// Attribution is uncertain, ambiguous, exited PID, or cross-session.
+    Uncertain,
+    /// Query failed or access denied.
+    Unsupported,
+}
+
+/// Stable role labels for resource attribution.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RunnerResourceRole {
+    Listener,
+    Worker,
+}
+
+/// Sampled CPU consumption for a runner process or tree.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerCpuSample {
+    /// Total kernel mode execution time in milliseconds.
+    pub kernel_time_ms: u64,
+    /// Total user mode execution time in milliseconds.
+    pub user_time_ms: u64,
+    /// Optional instantaneous CPU usage estimate in basis points (100 = 1.00%).
+    pub cpu_percent_x100: Option<u32>,
+}
+
+impl RunnerCpuSample {
+    pub fn total_time_ms(&self) -> u64 {
+        self.kernel_time_ms.saturating_add(self.user_time_ms)
+    }
 }
 
 /// Timestamped memory sample for one runner role (Listener or Worker).
@@ -23,12 +64,101 @@ pub struct RunnerMemorySample {
     pub confidence: ResourceSampleConfidence,
 }
 
-/// Stable role labels for resource attribution.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum RunnerResourceRole {
-    Listener,
-    Worker,
+/// Full timestamped resource sample for one runner instance or role with TTL
+/// and attribution provenance (P08-01).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerResourceSample {
+    pub local_runner_key: String,
+    pub role: RunnerResourceRole,
+    pub pid: Option<u32>,
+    pub working_set_bytes: Option<u64>,
+    pub cpu: Option<RunnerCpuSample>,
+    pub sampled_at_unix_ms: u64,
+    pub ttl_ms: u64,
+    pub attribution: ProcessAttributionDisposition,
+    pub confidence: ResourceSampleConfidence,
+}
+
+impl RunnerResourceSample {
+    /// Default time-to-live for live resource samples (5 seconds).
+    pub const DEFAULT_TTL_MS: u64 = 5_000;
+
+    /// Creates a verified estimate sample.
+    pub fn new_verified(
+        local_runner_key: impl Into<String>,
+        role: RunnerResourceRole,
+        pid: u32,
+        working_set_bytes: u64,
+        cpu: Option<RunnerCpuSample>,
+        sampled_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            local_runner_key: local_runner_key.into(),
+            role,
+            pid: Some(pid),
+            working_set_bytes: Some(working_set_bytes),
+            cpu,
+            sampled_at_unix_ms,
+            ttl_ms: Self::DEFAULT_TTL_MS,
+            attribution: ProcessAttributionDisposition::DirectVerified,
+            confidence: ResourceSampleConfidence::Estimate,
+        }
+    }
+
+    /// Creates an explicitly uncertain sample (ambiguous, missing, or foreign).
+    pub fn new_uncertain(
+        local_runner_key: impl Into<String>,
+        role: RunnerResourceRole,
+        sampled_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            local_runner_key: local_runner_key.into(),
+            role,
+            pid: None,
+            working_set_bytes: None,
+            cpu: None,
+            sampled_at_unix_ms,
+            ttl_ms: Self::DEFAULT_TTL_MS,
+            attribution: ProcessAttributionDisposition::Uncertain,
+            confidence: ResourceSampleConfidence::Unknown,
+        }
+    }
+
+    /// Returns whether the sample is within its validity TTL.
+    pub fn is_fresh(&self, current_time_ms: u64) -> bool {
+        current_time_ms.saturating_sub(self.sampled_at_unix_ms) <= self.ttl_ms
+    }
+
+    /// Evaluates effective confidence accounting for freshness and attribution.
+    pub fn effective_confidence(&self, current_time_ms: u64) -> ResourceSampleConfidence {
+        if !self.is_fresh(current_time_ms) {
+            return ResourceSampleConfidence::Unknown;
+        }
+        match self.attribution {
+            ProcessAttributionDisposition::DirectVerified
+            | ProcessAttributionDisposition::ChildTree => self.confidence,
+            ProcessAttributionDisposition::Uncertain
+            | ProcessAttributionDisposition::Unsupported => ResourceSampleConfidence::Unknown,
+        }
+    }
+
+    /// Converts to the baseline memory sample view, downgrading to Unknown if
+    /// stale or unattributable.
+    pub fn to_memory_sample(&self, current_time_ms: u64) -> RunnerMemorySample {
+        let confidence = self.effective_confidence(current_time_ms);
+        let working_set_bytes = if confidence == ResourceSampleConfidence::Estimate {
+            self.working_set_bytes
+        } else {
+            None
+        };
+        RunnerMemorySample {
+            role: self.role,
+            working_set_bytes,
+            sampled_at_unix_ms: self.sampled_at_unix_ms,
+            confidence,
+        }
+    }
 }
 
 /// Aggregate estimate across enrolled runners. Never claims exact savings.
@@ -41,6 +171,99 @@ pub struct RunnerResourceAggregate {
     pub instance_count: usize,
     pub unknown_sample_count: usize,
     pub confidence: ResourceSampleConfidence,
+}
+
+/// Detailed aggregate encompassing both memory and CPU across runners.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerAggregateSnapshot {
+    pub sampled_at_unix_ms: u64,
+    pub listener_working_set_bytes: Option<u64>,
+    pub worker_working_set_bytes: Option<u64>,
+    pub listener_cpu_time_ms: Option<u64>,
+    pub worker_cpu_time_ms: Option<u64>,
+    pub instance_count: usize,
+    pub unknown_sample_count: usize,
+    pub stale_sample_count: usize,
+    pub confidence: ResourceSampleConfidence,
+}
+
+impl RunnerAggregateSnapshot {
+    /// Projects to the backward-compatible memory-only aggregate view.
+    pub fn to_memory_aggregate(&self) -> RunnerResourceAggregate {
+        RunnerResourceAggregate {
+            sampled_at_unix_ms: self.sampled_at_unix_ms,
+            listener_working_set_bytes: self.listener_working_set_bytes,
+            worker_working_set_bytes: self.worker_working_set_bytes,
+            instance_count: self.instance_count,
+            unknown_sample_count: self.unknown_sample_count,
+            confidence: self.confidence,
+        }
+    }
+}
+
+pub fn aggregate_runner_resources(
+    samples: &[RunnerResourceSample],
+    now_unix_ms: u64,
+) -> RunnerAggregateSnapshot {
+    let mut listener_mem = 0_u64;
+    let mut worker_mem = 0_u64;
+    let mut listener_cpu = 0_u64;
+    let mut worker_cpu = 0_u64;
+    let mut listener_seen = false;
+    let mut worker_seen = false;
+    let mut unknown = 0_usize;
+    let mut stale = 0_usize;
+    let instances = samples.len();
+
+    for sample in samples {
+        if !sample.is_fresh(now_unix_ms) {
+            stale += 1;
+            unknown += 1;
+            continue;
+        }
+
+        match (
+            sample.effective_confidence(now_unix_ms),
+            sample.working_set_bytes,
+        ) {
+            (ResourceSampleConfidence::Estimate, Some(bytes)) => match sample.role {
+                RunnerResourceRole::Listener => {
+                    listener_mem = listener_mem.saturating_add(bytes);
+                    if let Some(cpu) = sample.cpu {
+                        listener_cpu = listener_cpu.saturating_add(cpu.total_time_ms());
+                    }
+                    listener_seen = true;
+                }
+                RunnerResourceRole::Worker => {
+                    worker_mem = worker_mem.saturating_add(bytes);
+                    if let Some(cpu) = sample.cpu {
+                        worker_cpu = worker_cpu.saturating_add(cpu.total_time_ms());
+                    }
+                    worker_seen = true;
+                }
+            },
+            _ => unknown += 1,
+        }
+    }
+
+    let confidence = if unknown > 0 || samples.is_empty() {
+        ResourceSampleConfidence::Unknown
+    } else {
+        ResourceSampleConfidence::Estimate
+    };
+
+    RunnerAggregateSnapshot {
+        sampled_at_unix_ms: now_unix_ms,
+        listener_working_set_bytes: listener_seen.then_some(listener_mem),
+        worker_working_set_bytes: worker_seen.then_some(worker_mem),
+        listener_cpu_time_ms: listener_seen.then_some(listener_cpu),
+        worker_cpu_time_ms: worker_seen.then_some(worker_cpu),
+        instance_count: instances,
+        unknown_sample_count: unknown,
+        stale_sample_count: stale,
+        confidence,
+    }
 }
 
 /// Builds an aggregate from per-instance samples without inventing zeros.
@@ -123,6 +346,68 @@ pub fn format_resource_estimate(aggregate: &RunnerResourceAggregate, chinese: bo
     }
 }
 
+/// Queries point-in-time process memory working set bytes without elevation or process mutation.
+#[cfg(windows)]
+pub fn query_process_working_set(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    type GetProcessMemoryInfoFn =
+        unsafe extern "system" fn(HANDLE, *mut ProcessMemoryCounters, u32) -> i32;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let kernel32 = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
+            c"kernel32.dll".as_ptr().cast(),
+        );
+        let proc = if !kernel32.is_null() {
+            windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                kernel32,
+                c"K32GetProcessMemoryInfo".as_ptr().cast(),
+            )
+        } else {
+            None
+        };
+        let res = if let Some(proc) = proc {
+            let func: GetProcessMemoryInfoFn = std::mem::transmute(proc);
+            let mut counters: ProcessMemoryCounters = std::mem::zeroed();
+            counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+            if func(handle, &mut counters, counters.cb) != 0 {
+                Some(counters.working_set_size as u64)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        CloseHandle(handle);
+        res
+    }
+}
+
+/// Point-in-time process memory working set query on non-Windows platforms.
+#[cfg(not(windows))]
+pub fn query_process_working_set(_pid: u32) -> Option<u64> {
+    None
+}
+
 fn format_bytes(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     if bytes >= MIB {
@@ -161,5 +446,128 @@ mod tests {
         assert!(english.contains("not exact"));
         assert!(english.contains("unknown"));
         assert!(!english.contains("Worker 0"));
+    }
+
+    #[test]
+    fn detailed_resources_preserve_freshness_and_attribution_boundaries() {
+        let sample = RunnerResourceSample::new_verified(
+            "runner-a",
+            RunnerResourceRole::Listener,
+            1234,
+            64 * 1024 * 1024,
+            Some(RunnerCpuSample {
+                kernel_time_ms: 100,
+                user_time_ms: 200,
+                cpu_percent_x100: Some(250),
+            }),
+            10_000,
+        );
+
+        // Fresh sample at 11_000 (age 1_000ms <= TTL 5_000ms)
+        assert!(sample.is_fresh(11_000));
+        assert_eq!(
+            sample.effective_confidence(11_000),
+            ResourceSampleConfidence::Estimate
+        );
+        let mem = sample.to_memory_sample(11_000);
+        assert_eq!(mem.working_set_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(mem.confidence, ResourceSampleConfidence::Estimate);
+
+        // Stale sample at 16_000 (age 6_000ms > TTL 5_000ms)
+        assert!(!sample.is_fresh(16_000));
+        assert_eq!(
+            sample.effective_confidence(16_000),
+            ResourceSampleConfidence::Unknown
+        );
+        let stale_mem = sample.to_memory_sample(16_000);
+        assert_eq!(stale_mem.working_set_bytes, None);
+        assert_eq!(stale_mem.confidence, ResourceSampleConfidence::Unknown);
+    }
+
+    #[test]
+    fn stale_and_uncertain_attribution_never_claim_zero_savings() {
+        let now = 20_000;
+        let mut sample_uncertain =
+            RunnerResourceSample::new_uncertain("runner-b", RunnerResourceRole::Worker, now - 500);
+        sample_uncertain.working_set_bytes = Some(100 * 1024 * 1024);
+        sample_uncertain.attribution = ProcessAttributionDisposition::Uncertain;
+
+        // Effective confidence remains Unknown and to_memory_sample strips bytes to None
+        assert_eq!(
+            sample_uncertain.effective_confidence(now),
+            ResourceSampleConfidence::Unknown
+        );
+        let mem = sample_uncertain.to_memory_sample(now);
+        assert_eq!(mem.working_set_bytes, None);
+        assert_eq!(mem.confidence, ResourceSampleConfidence::Unknown);
+
+        let aggregate = aggregate_runner_resources(&[sample_uncertain], now);
+        assert_eq!(aggregate.confidence, ResourceSampleConfidence::Unknown);
+        assert_eq!(aggregate.worker_working_set_bytes, None);
+        assert_eq!(aggregate.worker_cpu_time_ms, None);
+        assert_eq!(aggregate.unknown_sample_count, 1);
+    }
+
+    #[test]
+    fn aggregate_detailed_resources_honors_cpu_and_memory() {
+        let now = 50_000;
+        let samples = vec![
+            RunnerResourceSample::new_verified(
+                "runner-a",
+                RunnerResourceRole::Listener,
+                100,
+                50 * 1024 * 1024,
+                Some(RunnerCpuSample {
+                    kernel_time_ms: 50,
+                    user_time_ms: 150,
+                    cpu_percent_x100: Some(150),
+                }),
+                now - 1_000,
+            ),
+            RunnerResourceSample::new_verified(
+                "runner-a",
+                RunnerResourceRole::Worker,
+                200,
+                150 * 1024 * 1024,
+                Some(RunnerCpuSample {
+                    kernel_time_ms: 200,
+                    user_time_ms: 800,
+                    cpu_percent_x100: Some(500),
+                }),
+                now - 1_000,
+            ),
+        ];
+
+        let agg = aggregate_runner_resources(&samples, now);
+        assert_eq!(agg.confidence, ResourceSampleConfidence::Estimate);
+        assert_eq!(agg.listener_working_set_bytes, Some(50 * 1024 * 1024));
+        assert_eq!(agg.worker_working_set_bytes, Some(150 * 1024 * 1024));
+        assert_eq!(agg.listener_cpu_time_ms, Some(200));
+        assert_eq!(agg.worker_cpu_time_ms, Some(1000));
+        assert_eq!(agg.unknown_sample_count, 0);
+        assert_eq!(agg.stale_sample_count, 0);
+
+        let mem_agg = agg.to_memory_aggregate();
+        assert_eq!(mem_agg.listener_working_set_bytes, Some(50 * 1024 * 1024));
+        assert_eq!(mem_agg.worker_working_set_bytes, Some(150 * 1024 * 1024));
+        assert_eq!(mem_agg.confidence, ResourceSampleConfidence::Estimate);
+    }
+
+    #[test]
+    fn query_working_set_for_current_and_invalid_pid() {
+        #[cfg(windows)]
+        {
+            let current_pid = std::process::id();
+            let ws = query_process_working_set(current_pid);
+            assert!(
+                ws.is_some_and(|bytes| bytes > 0),
+                "Working set of current process must be non-zero"
+            );
+            assert!(query_process_working_set(0).is_none());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(query_process_working_set(std::process::id()).is_none());
+        }
     }
 }

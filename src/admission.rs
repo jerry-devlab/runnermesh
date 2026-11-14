@@ -566,7 +566,7 @@ impl fmt::Display for AdmissionBackendError {
 
 impl std::error::Error for AdmissionBackendError {}
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RegistrationScope {
     Organization { organization: String },

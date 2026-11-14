@@ -3,6 +3,7 @@
 //! Usage:
 //!   runnermesh-hux-sandbox prepare <absolute-sandbox-root>
 //!   runnermesh-hux-sandbox discover-readonly
+//!   runnermesh-hux-sandbox operator-card-hux1
 //!
 //! Never mutates production installs, Services, labels, or credentials.
 
@@ -12,6 +13,12 @@ fn main() {
         usage();
     };
     match command.as_str() {
+        "operator-card-hux1" => {
+            if args.next().is_some() {
+                usage();
+            }
+            print!("{}", runnermesh::hux1_zenbookduo_operator_card());
+        }
         "prepare" => {
             let Some(root) = args.next() else {
                 usage();
@@ -72,5 +79,6 @@ fn main() {
 fn usage() -> ! {
     eprintln!("usage: runnermesh-hux-sandbox prepare <absolute-sandbox-root>");
     eprintln!("       runnermesh-hux-sandbox discover-readonly");
+    eprintln!("       runnermesh-hux-sandbox operator-card-hux1");
     std::process::exit(2);
 }

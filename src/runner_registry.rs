@@ -180,9 +180,12 @@ pub enum RegistryError {
     InvalidRecord(&'static str),
     DuplicateKey,
     DuplicateHome,
+    DuplicateWorkRoot,
     DuplicateServerIdentity,
+    DuplicateServiceBinding,
     SameScopeManagedAdmissionCollision,
     NotEnrollmentEligible,
+    ProcessEvidenceIncomplete,
     NotFound,
     Forgotten,
 }
@@ -199,14 +202,19 @@ impl fmt::Display for RegistryError {
             Self::InvalidRecord(reason) => write!(formatter, "invalid runner record: {reason}"),
             Self::DuplicateKey => formatter.write_str("duplicate local runner key"),
             Self::DuplicateHome => formatter.write_str("duplicate runner home"),
+            Self::DuplicateWorkRoot => formatter.write_str("duplicate runner work root"),
             Self::DuplicateServerIdentity => {
                 formatter.write_str("duplicate server runner identity")
             }
+            Self::DuplicateServiceBinding => formatter.write_str("duplicate service binding"),
             Self::SameScopeManagedAdmissionCollision => {
                 formatter.write_str("same-scope managed admission collision")
             }
             Self::NotEnrollmentEligible => {
                 formatter.write_str("candidate is not enrollment eligible")
+            }
+            Self::ProcessEvidenceIncomplete => {
+                formatter.write_str("process observation evidence is incomplete or unavailable")
             }
             Self::NotFound => formatter.write_str("runner record not found"),
             Self::Forgotten => formatter.write_str("runner record is forgotten"),
@@ -548,6 +556,14 @@ impl RunnerRegistryEditor {
         {
             return Err(RegistryError::DuplicateHome);
         }
+        let work_root_key = normalize_path_key(&record.work_root);
+        if self
+            .registry
+            .active_records()
+            .any(|existing| normalize_path_key(&existing.work_root) == work_root_key)
+        {
+            return Err(RegistryError::DuplicateWorkRoot);
+        }
         if self.registry.active_records().any(|existing| {
             existing.registration_scope == record.registration_scope
                 && existing.runner_id == record.runner_id
@@ -576,6 +592,38 @@ fn validate_registry(registry: &RunnerRegistry) -> Result<(), RegistryError> {
     }
     if !registry.is_valid() {
         return Err(RegistryError::InvalidRecord("registry failed validation"));
+    }
+
+    let active: Vec<&RunnerRecord> = registry.active_records().collect();
+    for (i, r1) in active.iter().enumerate() {
+        let home1 = normalize_path_key(&r1.runner_home);
+        let work1 = normalize_path_key(&r1.work_root);
+        for r2 in active.iter().skip(i + 1) {
+            if normalize_path_key(&r2.runner_home) == home1 {
+                return Err(RegistryError::DuplicateHome);
+            }
+            if normalize_path_key(&r2.work_root) == work1 {
+                return Err(RegistryError::DuplicateWorkRoot);
+            }
+            if r1.registration_scope == r2.registration_scope && r1.runner_id == r2.runner_id {
+                return Err(RegistryError::DuplicateServerIdentity);
+            }
+            if r1.managed_admission
+                && r2.managed_admission
+                && r1.registration_scope == r2.registration_scope
+            {
+                return Err(RegistryError::SameScopeManagedAdmissionCollision);
+            }
+            if let (
+                RegistryBackendBinding::WindowsService { service_name: s1 },
+                RegistryBackendBinding::WindowsService { service_name: s2 },
+            ) = (&r1.backend, &r2.backend)
+            {
+                if s1.eq_ignore_ascii_case(s2) {
+                    return Err(RegistryError::DuplicateServiceBinding);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -817,6 +865,82 @@ mod tests {
             collided,
             Err(RegistryError::SameScopeManagedAdmissionCollision)
         ));
+    }
+
+    #[test]
+    fn distinct_scopes_or_unmanaged_runners_coexist_without_collision() {
+        let mut editor = RunnerRegistryEditor::empty();
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-a",
+                    scope_a(),
+                    1,
+                    r"C:\fixture\runners\a",
+                    RunnerBackendKind::WindowsService,
+                    Some("actions.runner.a"),
+                ),
+                None,
+                true,
+            )
+            .unwrap();
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-b",
+                    scope_b(),
+                    2,
+                    r"C:\fixture\runners\b",
+                    RunnerBackendKind::WindowsService,
+                    Some("actions.runner.b"),
+                ),
+                None,
+                true,
+            )
+            .unwrap();
+
+        editor
+            .enroll_from_discovery(
+                &discovered(
+                    "key-a2-unmanaged",
+                    scope_a(),
+                    3,
+                    r"C:\fixture\runners\a2",
+                    RunnerBackendKind::WindowsService,
+                    Some("actions.runner.a2"),
+                ),
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(editor.registry().records.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_work_root_across_distinct_homes_is_refused() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut cand_a = discovered(
+            "key-a",
+            scope_a(),
+            1,
+            r"C:\fixture\runners\a",
+            RunnerBackendKind::UserSession,
+            None,
+        );
+        cand_a.identity.work_root = Some(PathBuf::from(r"C:\fixture\shared_work"));
+        editor.enroll_from_discovery(&cand_a, None, false).unwrap();
+
+        let mut cand_b = discovered(
+            "key-b",
+            scope_b(),
+            2,
+            r"C:\fixture\runners\b",
+            RunnerBackendKind::UserSession,
+            None,
+        );
+        cand_b.identity.work_root = Some(PathBuf::from(r"C:\fixture\shared_work"));
+        let err = editor.enroll_from_discovery(&cand_b, None, false);
+        assert!(matches!(err, Err(RegistryError::DuplicateWorkRoot)));
     }
 
     #[test]

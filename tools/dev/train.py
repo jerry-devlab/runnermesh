@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -70,6 +72,7 @@ class Runner(Protocol):
         cwd: Path,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        stdin_input: str | None = None,
     ) -> CommandResult: ...
 
 
@@ -84,12 +87,15 @@ class SubprocessRunner:
         cwd: Path,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        stdin_input: str | None = None,
     ) -> CommandResult:
         try:
             completed = subprocess.run(
                 list(args),
                 cwd=cwd,
                 env=dict(env) if env is not None else None,
+                input=stdin_input,
+                stdin=subprocess.DEVNULL if stdin_input is None else None,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -184,6 +190,9 @@ class Repository:
     def clean(self) -> bool:
         return not bool(self.git(("status", "--porcelain")))
 
+    def status_porcelain(self) -> str:
+        return self.git(("status", "--porcelain"))
+
     def authoritative_main(self) -> str:
         output = self.git(("ls-remote", "--exit-code", "origin", "refs/heads/main"))
         lines = [line for line in output.splitlines() if line.strip()]
@@ -204,6 +213,102 @@ class Repository:
             )
         )
         return Path(value)
+
+
+APPROVED_CANDIDATE_UNTRACKED_DIR = "goals/RM-160H-DELIVERY-PROGRAM-001"
+
+
+def fingerprint_directory(root: Path, rel_dir: str) -> dict[str, str]:
+    """Computes a deterministic fingerprint of an approved untracked directory."""
+    target_dir = (root / rel_dir).resolve()
+    if not target_dir.exists():
+        return {}
+    if not target_dir.is_dir():
+        raise ToolError(f"approved untracked path is not a directory: {rel_dir}")
+    try:
+        target_dir.relative_to(root.resolve())
+    except ValueError as error:
+        raise ToolError(f"approved untracked path escapes repo root: {rel_dir}") from error
+
+    fingerprint: dict[str, str] = {}
+    for entry in sorted(target_dir.rglob("*")):
+        if entry.is_symlink() or (hasattr(os, "readlink") and os.path.islink(entry)):
+            raise ToolError(f"symlink detected in approved untracked path: {entry}")
+        if sys.platform == "win32":
+            try:
+                import stat
+
+                st = entry.lstat()
+                if st.st_file_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+                    raise ToolError(f"reparse point detected in approved untracked path: {entry}")
+            except (OSError, AttributeError):
+                pass
+        if entry.is_file():
+            rel = entry.relative_to(root.resolve()).as_posix()
+            data = entry.read_bytes()
+            hasher = hashlib.sha256()
+            hasher.update(data)
+            fingerprint[rel] = f"{len(data)}:{hasher.hexdigest()}"
+    return fingerprint
+
+
+def check_candidate_worktree(
+    repository: Repository,
+    approved_untracked_dir: str = APPROVED_CANDIDATE_UNTRACKED_DIR,
+) -> tuple[bool, str | None, dict[str, str]]:
+    """Validates that a worktree is clean for candidate execution.
+
+    Permits exclusively the single explicitly approved untracked directory.
+    All tracked files must be clean. Any other untracked file or directory,
+    path traversal, prefix-similar evasion, or reparse point is refused.
+    Returns (is_valid, error_reason, fingerprint).
+    """
+    if hasattr(repository, "status_porcelain"):
+        status_val = repository.status_porcelain()
+        if isinstance(status_val, str):
+            status_raw = status_val
+        elif getattr(repository, "clean", None) and callable(repository.clean):
+            is_clean = repository.clean()
+            if isinstance(is_clean, bool):
+                status_raw = "" if is_clean else " M dirty"
+            else:
+                status_raw = ""
+        else:
+            status_raw = ""
+    else:
+        status_raw = repository.git(("status", "--porcelain"))
+
+    if not isinstance(status_raw, str):
+        return False, "unable to parse worktree status", {}
+
+    lines = [line.rstrip() for line in status_raw.splitlines() if line.strip()]
+    if not lines:
+        return True, None, {}
+
+    norm_approved = approved_untracked_dir.replace("\\", "/").strip("/")
+    approved_prefix = f"{norm_approved}/"
+
+    has_approved_dir = False
+    for line in lines:
+        code = line[:2]
+        item_path = line[3:].strip()
+        if item_path.startswith('"') and item_path.endswith('"'):
+            item_path = item_path[1:-1]
+        norm_item = item_path.replace("\\", "/").rstrip("/")
+
+        if code != "??":
+            return False, f"tracked changes present in worktree: {line}", {}
+
+        if norm_item == norm_approved or norm_item.startswith(approved_prefix):
+            parts = norm_item.split("/")
+            if ".." in parts or any(p == "" for p in parts[:-1]):
+                return False, f"path traversal in untracked path: {item_path}", {}
+            has_approved_dir = True
+        else:
+            return False, f"unapproved untracked file or directory: {item_path}", {}
+
+    fingerprint = fingerprint_directory(repository.root, norm_approved) if has_approved_dir else {}
+    return True, None, fingerprint
 
 
 class GithubClient:
@@ -872,8 +977,9 @@ def classify_main_commit(repository: Repository, sha: str) -> ChangeClass:
 def command_candidate(args: argparse.Namespace) -> int:
     repository = Repository(REPO_ROOT)
     repository.assert_identity()
-    if not repository.clean():
-        raise ToolError("candidate requires a clean worktree bound to a commit")
+    is_valid, err_msg, fp_start = check_candidate_worktree(repository)
+    if not is_valid:
+        raise ToolError(f"candidate requires a clean worktree bound to a commit: {err_msg}")
     head = resolve_head("HEAD", REPO_ROOT)
     base = resolve_base(args.base, head, REPO_ROOT)
     paths = git_changed_paths(base, head, "merge-base", REPO_ROOT)
@@ -895,6 +1001,49 @@ def command_candidate(args: argparse.Namespace) -> int:
             "CHANGE_CLASS": change_class.value,
         }
     )
+
+    # Optional evidence validation
+    evidence_index_path = getattr(args, "evidence_index", None)
+    if getattr(args, "check_evidence", False) and evidence_index_path is None:
+        default_locations = [
+            REPO_ROOT / "evidence" / "FINAL-EVIDENCE-INDEX.json",
+            REPO_ROOT.parent / "runnermesh-160h-audit" / "2026-11-12" / "160H-FINAL-CLOSEOUT-2703a1e" / "evidence" / "FINAL-EVIDENCE-INDEX.json",
+            REPO_ROOT.parents[1] / "runnermesh-160h-audit" / "2026-11-12" / "160H-FINAL-CLOSEOUT-2703a1e" / "evidence" / "FINAL-EVIDENCE-INDEX.json",
+        ]
+        evidence_index_path = next((p for p in default_locations if p.is_file()), None)
+
+    if evidence_index_path:
+        from tools.dev.evidence_check import check_evidence_index
+
+        try:
+            ev_data = json.loads(evidence_index_path.read_text(encoding="utf-8"))
+            base_dir = (
+                evidence_index_path.parent.parent
+                if evidence_index_path.parent.name == "evidence"
+                else evidence_index_path.parent
+            )
+            ev_result = check_evidence_index(ev_data, base_dir=base_dir, repo_root=REPO_ROOT)
+            _emit(
+                {
+                    "EVIDENCE_BINDING_CHECK": ev_result.disposition,
+                    "PRODUCT_SOURCE_STATUS": ev_result.product_source_status,
+                    "PRODUCT_SECURITY_REVIEW": ev_result.product_security_review,
+                }
+            )
+            if not ev_result.is_pass():
+                ended = time.time()
+                data = timing.update(candidate_ready=ended)
+                _emit(
+                    {
+                        "CANDIDATE_READY": _iso(ended),
+                        "LOCAL_GATE": "FAIL",
+                        **calculate_timing_fields(data),
+                    }
+                )
+                return 1
+        except Exception as error:
+            raise ToolError(f"evidence check failed on {evidence_index_path}: {error}") from error
+
     command = (
         sys.executable,
         "tools/quality/fast_gate.py",
@@ -919,7 +1068,8 @@ def command_candidate(args: argparse.Namespace) -> int:
 
     portability = run_portability(change_class, args.portability, REPO_ROOT)
     ended = time.time()
-    if repository.head() != head or not repository.clean():
+    is_valid_after, err_after, fp_end = check_candidate_worktree(repository)
+    if repository.head() != head or not is_valid_after or fp_start != fp_end:
         data = timing.update(candidate_ready=ended, portability=portability.status)
         _emit(
             {
@@ -1302,6 +1452,16 @@ def build_parser() -> argparse.ArgumentParser:
     candidate.add_argument("--base", required=True, help="accepted main commit")
     candidate.add_argument(
         "--portability", choices=("auto", "off"), default="auto"
+    )
+    candidate.add_argument(
+        "--evidence-index",
+        type=Path,
+        help="path to evidence index JSON to verify during candidate gate",
+    )
+    candidate.add_argument(
+        "--check-evidence",
+        action="store_true",
+        help="verify evidence index bindings during candidate gate",
     )
     candidate.set_defaults(handler=command_candidate)
 

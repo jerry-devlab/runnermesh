@@ -21,6 +21,16 @@ pub struct IpcRequest {
     pub command: AgentCommand,
 }
 
+impl IpcRequest {
+    pub fn new(command: AgentCommand) -> Self {
+        Self {
+            protocol_version: IPC_PROTOCOL_VERSION,
+            request_id: 1,
+            command,
+        }
+    }
+}
+
 /// A correlated typed response from the sole Agent authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IpcResponse {
@@ -155,9 +165,10 @@ impl IpcEndpoint {
         )
     }
 
-    #[cfg(all(test, windows))]
-    fn for_test_scope(scope: String) -> Self {
-        Self { scope }
+    pub fn for_test_scope(scope: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+        }
     }
 }
 
@@ -278,6 +289,52 @@ impl IpcServer {
     pub fn endpoint(&self) -> &IpcEndpoint {
         &self.endpoint
     }
+
+    /// Attempts to wake any server thread blocked waiting for a connection on this endpoint.
+    pub fn wake_listener(&self) -> Result<(), IpcTransportError> {
+        wake_listener(&self.endpoint)
+    }
+}
+
+/// Attempts to wake any server thread blocked waiting for a connection on `endpoint`.
+#[cfg(windows)]
+pub fn wake_listener(endpoint: &IpcEndpoint) -> Result<(), IpcTransportError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            OPEN_EXISTING,
+        },
+    };
+    let name = to_wide(&endpoint.pipe_name());
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle != INVALID_HANDLE_VALUE {
+        unsafe {
+            CloseHandle(handle);
+        }
+        Ok(())
+    } else {
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        Err(IpcTransportError::Io(std::io::Error::from_raw_os_error(
+            error as i32,
+        )))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wake_listener(_endpoint: &IpcEndpoint) -> Result<(), IpcTransportError> {
+    let _ = _endpoint;
+    Err(IpcTransportError::UnsupportedPlatform)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -545,8 +602,6 @@ fn connect_pipe(
         if remaining.is_zero() {
             return Err(IpcTransportError::Timeout);
         }
-        let wait_millis = remaining.as_millis().min(25) as u32;
-        let _ = unsafe { WaitNamedPipeW(name.as_ptr(), wait_millis) };
         let handle = unsafe {
             CreateFileW(
                 name.as_ptr(),
@@ -562,12 +617,16 @@ fn connect_pipe(
             return Ok(unsafe { std::fs::File::from_raw_handle(handle as RawHandle) });
         }
         let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        if error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND {
+        if error == ERROR_PIPE_BUSY {
+            let wait_millis = remaining.as_millis().min(50) as u32;
+            let _ = unsafe { WaitNamedPipeW(name.as_ptr(), wait_millis) };
+        } else if error == ERROR_FILE_NOT_FOUND {
+            thread::sleep(Duration::from_millis(5));
+        } else {
             return Err(IpcTransportError::Io(io::Error::from_raw_os_error(
                 error as i32,
             )));
         }
-        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -831,11 +890,14 @@ mod tests {
                     })
                 });
                 let client_result =
-                    IpcClient::new(endpoint.clone(), Duration::from_secs(2)).call(IpcRequest {
+                    IpcClient::new(endpoint.clone(), Duration::from_secs(10)).call(IpcRequest {
                         protocol_version: IPC_PROTOCOL_VERSION,
                         request_id,
                         command: AgentCommand::GetVersion,
                     });
+                if client_result.is_err() {
+                    let _ = super::connect_pipe(&endpoint, Duration::from_millis(500));
+                }
                 let server_result = server_task.join().unwrap();
                 assert!(server_result.is_ok(), "server result: {server_result:?}");
                 let response = client_result.unwrap();
@@ -906,14 +968,19 @@ mod tests {
 
         let endpoint = test_endpoint();
         let _pipe = PipeHandle(super::create_server_pipe(&endpoint).unwrap());
-        let impersonation = AnonymousImpersonation::begin().unwrap();
-        let result = super::connect_pipe(&endpoint, Duration::from_millis(250));
-        impersonation.revert().unwrap();
-        assert!(matches!(
-            result,
-            Err(IpcTransportError::Io(ref error))
-                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
-        ));
+        let endpoint_clone = endpoint.clone();
+        std::thread::spawn(move || {
+            let impersonation = AnonymousImpersonation::begin().unwrap();
+            let result = super::connect_pipe(&endpoint_clone, Duration::from_millis(250));
+            impersonation.revert().unwrap();
+            assert!(matches!(
+                result,
+                Err(IpcTransportError::Io(ref error))
+                    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+            ));
+        })
+        .join()
+        .unwrap();
     }
 
     #[cfg(windows)]

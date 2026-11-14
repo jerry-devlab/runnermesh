@@ -20,6 +20,8 @@ pub enum TrayMenuId {
     Mode(UserMode),
     ProbeToggle(ProbeId),
     RunnersRefresh,
+    RunnersEnableAll,
+    RunnersDisableAll,
     RunnerToggle(String),
     RunnerStatus(String),
     StatusDetails,
@@ -49,6 +51,8 @@ impl TrayMenuId {
             Self::Mode(mode) => format!("control.mode.{mode}"),
             Self::ProbeToggle(probe_id) => format!("control.probe.{probe_id}"),
             Self::RunnersRefresh => "control.runners.refresh".to_owned(),
+            Self::RunnersEnableAll => "control.runners.enable-all".to_owned(),
+            Self::RunnersDisableAll => "control.runners.disable-all".to_owned(),
             Self::RunnerToggle(key) => format!("control.runners.toggle.{key}"),
             Self::RunnerStatus(key) => format!("control.runners.status.{key}"),
             Self::StatusDetails => "action.status-details".to_owned(),
@@ -342,6 +346,13 @@ fn command_for(
         TrayMenuId::RunnersRefresh => Some(AgentCommand::RunnersStatus {
             local_runner_key: None,
         }),
+        TrayMenuId::RunnersEnableAll => Some(AgentCommand::RunnersEnableAll {
+            prepare_only: false,
+        }),
+        TrayMenuId::RunnersDisableAll => Some(AgentCommand::RunnersDisableAll {
+            when_idle: true,
+            prepare_only: false,
+        }),
         TrayMenuId::RunnerToggle(key) => {
             let enabled = runners
                 .and_then(|report| {
@@ -626,12 +637,26 @@ fn runners_entries(
     runners: Option<&RunnerCommandReport>,
     language: LanguagePreference,
 ) -> Vec<TrayMenuEntry> {
-    let mut entries = vec![item(
-        TrayMenuId::RunnersRefresh,
-        text(language, Text::RunnersRefresh).to_owned(),
-        None,
-        true,
-    )];
+    let mut entries = vec![
+        item(
+            TrayMenuId::RunnersRefresh,
+            text(language, Text::RunnersRefresh).to_owned(),
+            None,
+            true,
+        ),
+        item(
+            TrayMenuId::RunnersEnableAll,
+            text(language, Text::RunnersEnableAll).to_owned(),
+            None,
+            true,
+        ),
+        item(
+            TrayMenuId::RunnersDisableAll,
+            text(language, Text::RunnersDisableAll).to_owned(),
+            None,
+            true,
+        ),
+    ];
     let Some(report) = runners else {
         entries.push(item(
             TrayMenuId::RunnerStatus("_empty".to_owned()),
@@ -823,6 +848,8 @@ enum Text {
     Runner,
     Runners,
     RunnersRefresh,
+    RunnersEnableAll,
+    RunnersDisableAll,
     RunnersEmpty,
     RunnersPartialFailure,
     RunnerStatus,
@@ -859,6 +886,8 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (false, Text::Runner) => "Runner",
         (false, Text::Runners) => "Runners",
         (false, Text::RunnersRefresh) => "Refresh runners",
+        (false, Text::RunnersEnableAll) => "Enable all runners",
+        (false, Text::RunnersDisableAll) => "Disable all runners",
         (false, Text::RunnersEmpty) => "No enrolled runners yet",
         (false, Text::RunnersPartialFailure) => "Partial failure — inspect item results",
         (false, Text::RunnerStatus) => "Observed",
@@ -890,6 +919,8 @@ fn text(language: LanguagePreference, key: Text) -> &'static str {
         (true, Text::Runner) => "运行器",
         (true, Text::Runners) => "运行器列表",
         (true, Text::RunnersRefresh) => "刷新运行器",
+        (true, Text::RunnersEnableAll) => "启用全部运行器",
+        (true, Text::RunnersDisableAll) => "禁用全部运行器",
         (true, Text::RunnersEmpty) => "尚未登记运行器",
         (true, Text::RunnersPartialFailure) => "部分失败 — 请查看单项结果",
         (true, Text::RunnerStatus) => "观察状态",
@@ -1260,6 +1291,7 @@ mod tests {
                 backend_kind: "user-session".to_owned(),
                 presentation_status: RunnerPresentationStatus::Enabled,
                 memory_samples: Vec::new(),
+                resource_samples: Vec::new(),
                 item_applied: None,
                 item_reason_code: None,
             }],
@@ -1274,6 +1306,7 @@ mod tests {
                 confidence: ResourceSampleConfidence::Unknown,
             }),
             partial_failure: false,
+            discovered_candidates: Vec::new(),
         };
         let english_snapshot = sample_snapshot();
         let mut chinese_snapshot = sample_snapshot();
@@ -1309,6 +1342,216 @@ mod tests {
         );
         assert_eq!(english_snapshot.admission, sample_snapshot().admission);
         let _ = chinese_snapshot;
+    }
+
+    #[test]
+    fn tray_multi_runner_entries_preserve_stable_ids_and_distinguish_service_and_session() {
+        use crate::{
+            EnrollmentState, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: true,
+            prepare_only: false,
+            applied: false,
+            reason_code: None,
+            records: vec![
+                RunnerRecordView {
+                    local_runner_key: "svc-runner".to_owned(),
+                    runner_id: 10,
+                    expected_runner_name: "fixture-svc".to_owned(),
+                    desired_enabled: false,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: true,
+                    backend_kind: "windows-service".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Disabled,
+                    memory_samples: Vec::new(),
+                    resource_samples: Vec::new(),
+                    item_applied: None,
+                    item_reason_code: None,
+                },
+                RunnerRecordView {
+                    local_runner_key: "sess-runner".to_owned(),
+                    runner_id: 20,
+                    expected_runner_name: "fixture-sess".to_owned(),
+                    desired_enabled: true,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: false,
+                    backend_kind: "user-session".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Enabled,
+                    memory_samples: Vec::new(),
+                    resource_samples: Vec::new(),
+                    item_applied: None,
+                    item_reason_code: None,
+                },
+            ],
+            discovered_keys: Vec::new(),
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: false,
+            discovered_candidates: Vec::new(),
+        };
+
+        let english_snapshot = sample_snapshot();
+        let mut chinese_snapshot = sample_snapshot();
+        chinese_snapshot.effective_ui_preferences.locale = EffectiveLocale::ZhCn;
+        chinese_snapshot.ui_preferences.language = LanguagePreference::ZhCn;
+
+        let english = render(&english_snapshot, Some(&report));
+        let chinese = render(&chinese_snapshot, Some(&report));
+
+        assert_eq!(collect_ids(&english.entries), collect_ids(&chinese.entries));
+        assert!(
+            collect_ids(&english.entries).contains(&"control.runners.toggle.svc-runner".to_owned())
+        );
+        assert!(collect_ids(&english.entries)
+            .contains(&"control.runners.toggle.sess-runner".to_owned()));
+
+        let transport = FakeTransport::new(AgentResponse::Runners(report.clone()));
+        let mut tray = NativeTrayEventLoop::new(transport.clone());
+        tray.apply(TrayUiUpdate::Snapshot(english_snapshot.clone()))
+            .unwrap();
+
+        // 1. Initial refresh populates tray's cached runners report
+        let refresh = tray
+            .activate(&TrayMenuId::RunnersRefresh, &english_snapshot)
+            .unwrap();
+        assert!(matches!(refresh, TrayActionResult::Runners(_)));
+
+        // 2. Activating disabled svc-runner issues RunnersEnable
+        let action_enable = tray
+            .activate(
+                &TrayMenuId::RunnerToggle("svc-runner".to_owned()),
+                &english_snapshot,
+            )
+            .unwrap();
+        assert!(matches!(action_enable, TrayActionResult::Runners(_)));
+
+        // 3. Activating enabled sess-runner issues RunnersDisable { when_idle: true }
+        let action_disable = tray
+            .activate(
+                &TrayMenuId::RunnerToggle("sess-runner".to_owned()),
+                &english_snapshot,
+            )
+            .unwrap();
+        assert!(matches!(action_disable, TrayActionResult::Runners(_)));
+
+        assert_eq!(
+            transport.commands(),
+            vec![
+                AgentCommand::RunnersStatus {
+                    local_runner_key: None,
+                },
+                AgentCommand::RunnersEnable {
+                    local_runner_key: "svc-runner".to_owned(),
+                    prepare_only: false,
+                },
+                AgentCommand::RunnersDisable {
+                    local_runner_key: "sess-runner".to_owned(),
+                    when_idle: true,
+                    prepare_only: false,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn runners_partial_failure_banner_and_item_failed_are_localized() {
+        use crate::{
+            EnrollmentState, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+        };
+
+        let report = RunnerCommandReport {
+            schema_version: 1,
+            read_only: false,
+            prepare_only: false,
+            applied: true,
+            reason_code: Some(ReasonCode::new("runners-partial-failure").unwrap()),
+            records: vec![
+                RunnerRecordView {
+                    local_runner_key: "runner-a".to_owned(),
+                    runner_id: 1,
+                    expected_runner_name: "fixture-a".to_owned(),
+                    desired_enabled: true,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: false,
+                    backend_kind: "user-session".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Enabled,
+                    memory_samples: Vec::new(),
+                    resource_samples: Vec::new(),
+                    item_applied: Some(true),
+                    item_reason_code: None,
+                },
+                RunnerRecordView {
+                    local_runner_key: "runner-b".to_owned(),
+                    runner_id: 2,
+                    expected_runner_name: "fixture-b".to_owned(),
+                    desired_enabled: true,
+                    enrollment_state: EnrollmentState::Enrolled,
+                    managed_admission: false,
+                    backend_kind: "user-session".to_owned(),
+                    presentation_status: RunnerPresentationStatus::Enabled,
+                    memory_samples: Vec::new(),
+                    resource_samples: Vec::new(),
+                    item_applied: Some(false),
+                    item_reason_code: Some(ReasonCode::new("runners-item-failed").unwrap()),
+                },
+            ],
+            discovered_keys: Vec::new(),
+            same_scope_collisions: 0,
+            resource_aggregate: None,
+            partial_failure: true,
+            discovered_candidates: Vec::new(),
+        };
+
+        let english_snapshot = sample_snapshot();
+        let mut chinese_snapshot = sample_snapshot();
+        chinese_snapshot.effective_ui_preferences.locale = EffectiveLocale::ZhCn;
+        chinese_snapshot.ui_preferences.language = LanguagePreference::ZhCn;
+
+        let english = render(&english_snapshot, Some(&report));
+        let chinese = render(&chinese_snapshot, Some(&report));
+        assert_eq!(collect_ids(&english.entries), collect_ids(&chinese.entries));
+        assert!(
+            collect_ids(&english.entries).contains(&"control.runners.status._partial".to_owned())
+        );
+
+        fn find_label<'a>(entries: &'a [TrayMenuEntry], id: &TrayMenuId) -> Option<&'a str> {
+            for entry in entries {
+                match entry {
+                    TrayMenuEntry::Item(item) if &item.id == id => {
+                        return Some(item.label.as_str())
+                    }
+                    TrayMenuEntry::Submenu { entries, .. } => {
+                        if let Some(label) = find_label(entries, id) {
+                            return Some(label);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        fn any_label(entries: &[TrayMenuEntry], needle: &str) -> bool {
+            entries.iter().any(|entry| match entry {
+                TrayMenuEntry::Item(item) => item.label.contains(needle),
+                TrayMenuEntry::Submenu { entries, .. } => any_label(entries, needle),
+                TrayMenuEntry::Separator => false,
+            })
+        }
+
+        let partial_id = TrayMenuId::RunnerStatus("_partial".to_owned());
+        assert_eq!(
+            find_label(&english.entries, &partial_id),
+            Some("Partial failure — inspect item results")
+        );
+        assert_eq!(
+            find_label(&chinese.entries, &partial_id),
+            Some("部分失败 — 请查看单项结果")
+        );
+        assert!(any_label(&english.entries, "failed"));
+        assert!(any_label(&chinese.entries, "失败"));
     }
 
     #[test]
