@@ -366,8 +366,8 @@ pub fn current_user_owns_path(path: &Path) -> Result<bool, ()> {
         Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE},
         Security::{
             Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
-            EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION,
-            PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+            EqualSid, GetTokenInformation, TokenOwner, TokenUser, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -439,7 +439,39 @@ pub fn current_user_owns_path(path: &Path) -> Result<bool, ()> {
         return Err(());
     }
     let current_sid = unsafe { (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
-    Ok(unsafe { EqualSid(owner, current_sid) } != 0)
+    if unsafe { EqualSid(owner, current_sid) } != 0 {
+        return Ok(true);
+    }
+    // Elevated administrators create objects owned by their token's default owner (BUILTIN\Administrators).
+    let mut owner_required = 0_u32;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenOwner,
+            std::ptr::null_mut(),
+            0,
+            &mut owner_required,
+        );
+    }
+    if owner_required > 0 {
+        let mut owner_buffer = vec![0_usize; (owner_required as usize).div_ceil(unit)];
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenOwner,
+                owner_buffer.as_mut_ptr().cast(),
+                owner_required,
+                &mut owner_required,
+            )
+        } != 0
+        {
+            let token_owner_sid = unsafe { (*(owner_buffer.as_ptr().cast::<TOKEN_OWNER>())).Owner };
+            if unsafe { EqualSid(owner, token_owner_sid) } != 0 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]
