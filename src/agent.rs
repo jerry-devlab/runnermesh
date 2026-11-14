@@ -579,16 +579,22 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
             return Err("session.work-root-not-owned".to_owned());
         }
 
-        // Reparse point boundary checks (fail-closed)
+        // Reparse point and ownership boundary checks (fail-closed)
         #[cfg(windows)]
         {
-            if crate::installation::is_reparse_point(&record.runner_home).unwrap_or(false) {
+            if crate::installation::is_reparse_point(&record.runner_home).unwrap_or(true) {
                 return Err("session.runner-home-reparse-point".to_owned());
             }
+            if crate::runner_observer::current_user_owns_path(&record.runner_home) != Ok(true) {
+                return Err("session.runner-home-not-owned".to_owned());
+            }
             if record.work_root.exists()
-                && crate::installation::is_reparse_point(&record.work_root).unwrap_or(false)
+                && crate::installation::is_reparse_point(&record.work_root).unwrap_or(true)
             {
                 return Err("session.work-root-reparse-point".to_owned());
+            }
+            if !crate::runner_observer::verify_path_and_ancestor_ownership(&record.work_root) {
+                return Err("session.work-root-not-owned".to_owned());
             }
         }
 
@@ -1752,6 +1758,9 @@ where
             }),
             Err(RegistryError::NotEnrollmentEligible) => Ok(AgentResponse::Rejected {
                 reason_code: static_reason("runners-not-enrollment-eligible"),
+            }),
+            Err(RegistryError::ProcessEvidenceIncomplete) => Ok(AgentResponse::Rejected {
+                reason_code: static_reason("runners-process-evidence-incomplete"),
             }),
             Err(RegistryError::SameScopeManagedAdmissionCollision) => Ok(AgentResponse::Rejected {
                 reason_code: static_reason("runners-same-scope-collision"),

@@ -185,6 +185,7 @@ pub enum RegistryError {
     DuplicateServiceBinding,
     SameScopeManagedAdmissionCollision,
     NotEnrollmentEligible,
+    ProcessEvidenceIncomplete,
     NotFound,
     Forgotten,
 }
@@ -211,6 +212,9 @@ impl fmt::Display for RegistryError {
             }
             Self::NotEnrollmentEligible => {
                 formatter.write_str("candidate is not enrollment eligible")
+            }
+            Self::ProcessEvidenceIncomplete => {
+                formatter.write_str("process observation evidence is incomplete or unavailable")
             }
             Self::NotFound => formatter.write_str("runner record not found"),
             Self::Forgotten => formatter.write_str("runner record is forgotten"),

@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    aggregate_runner_memory, DiscoveryReport, EnrollmentState, ReasonCode, RegistryError,
-    RunnerMemorySample, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
-    RunnerResourceAggregate,
+    aggregate_runner_memory, DiscoveredLifecycle, DiscoveryEnumerationStatus, DiscoveryReport,
+    EnrollmentState, ReasonCode, RegistryError, RunnerMemorySample, RunnerRecord, RunnerRegistry,
+    RunnerRegistryEditor, RunnerResourceAggregate,
 };
 
 /// Presentation vocabulary for Tray/CLI. Stable non-localized values.
@@ -307,18 +307,22 @@ pub fn handle_runners_command(
             local_runner_key,
             prepare_only,
         } => {
-            let candidate = discovery
-                .and_then(|report| {
-                    report
-                        .candidates
-                        .iter()
-                        .find(|candidate| candidate.local_discovery_key == *local_runner_key)
-                })
+            let report = discovery.ok_or(RegistryError::NotFound)?;
+            if report.process_observation != DiscoveryEnumerationStatus::Ok {
+                return Err(RegistryError::ProcessEvidenceIncomplete);
+            }
+            let candidate = report
+                .candidates
+                .iter()
+                .find(|candidate| candidate.local_discovery_key == *local_runner_key)
                 .ok_or(RegistryError::NotFound)?;
+            if candidate.observed_lifecycle == DiscoveredLifecycle::Unknown {
+                return Err(RegistryError::ProcessEvidenceIncomplete);
+            }
+            if !candidate.capabilities.enrollment_eligible {
+                return Err(RegistryError::NotEnrollmentEligible);
+            }
             if *prepare_only {
-                if !candidate.capabilities.enrollment_eligible {
-                    return Err(RegistryError::NotEnrollmentEligible);
-                }
                 return Ok(RunnerCommandReport::from_registry(
                     editor.registry(),
                     false,

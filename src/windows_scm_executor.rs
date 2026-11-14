@@ -2553,8 +2553,8 @@ fn new_transaction_id() -> String {
 
 /// Opaque fingerprint helper for image paths (never store raw private paths).
 pub fn opaque_image_token(image_path: &str) -> String {
-    let clean = crate::windows_runner_discovery::service_image_path_token(image_path)
-        .unwrap_or_else(|| image_path.trim_matches('"'));
+    let clean =
+        crate::windows_runner_discovery::service_image_path_token(image_path).unwrap_or(image_path);
     let digest = Sha256::digest(clean.trim().to_ascii_lowercase().as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -2771,24 +2771,18 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
         let config = &*config_ptr;
         let image = wide_to_string(config.lpBinaryPathName);
         let start_name = wide_to_string(config.lpServiceStartName);
-        let image_token = opaque_image_token(image.trim_matches('"'));
+        let image_token = opaque_image_token(&image);
         let execution_identity_token = opaque_image_token(&start_name);
         let start_mode = map_start_type(config.dwStartType);
 
-        let clean_image = image.trim_matches('"');
-        let runner_home = Path::new(clean_image).parent().and_then(|p| {
-            if p.file_name()
-                .map(|n| n.to_string_lossy().eq_ignore_ascii_case("bin"))
-                .unwrap_or(false)
-            {
-                p.parent()
-            } else {
-                Some(p)
-            }
+        let clean_image = crate::windows_runner_discovery::service_image_path_token(&image);
+        let runner_home = clean_image.and_then(|p| {
+            crate::windows_runner_discovery::runner_home_from_image(Path::new(p))
+                .or_else(|| Path::new(p).parent().map(Path::to_path_buf))
         });
         if let Some(home) = runner_home {
             let (listener_present, worker_present, obs_ok) =
-                crate::windows_runner_discovery::observe_runner_processes_for_home(home);
+                crate::windows_runner_discovery::observe_runner_processes_for_home(&home);
             if worker_present {
                 state = DiscoveredLifecycle::Busy;
             } else if !obs_ok {

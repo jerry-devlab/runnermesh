@@ -1978,3 +1978,226 @@ fn regression_f01_inaccessible_worker_process_evidence_fails_closed() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[cfg(windows)]
+#[test]
+fn regression_finding1_runner_ownership_verification_fails_closed() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "runnermesh-repro-finding1-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let runner_home = temp_dir.join("finding1-home");
+    std::fs::create_dir_all(&runner_home).unwrap();
+    let bin_dir = runner_home.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let listener_exe = bin_dir.join("Runner.Listener.exe");
+    std::fs::write(&listener_exe, b"listener").unwrap();
+    let worker_exe = bin_dir.join("Runner.Worker.exe");
+    std::fs::write(&worker_exe, b"worker").unwrap();
+
+    // 1. Process images where user_matches_current is None or Some(false)
+    // user_matches_current == Some(false) is foreign: must be ignored
+    let images_foreign = vec![
+        runnermesh::ProcessImage {
+            process_id: 111,
+            executable_name: "Runner.Listener.exe".to_string(),
+            executable_path: Some(listener_exe.clone()),
+            user_matches_current: Some(false),
+        },
+        runnermesh::ProcessImage {
+            process_id: 112,
+            executable_name: "Runner.Worker.exe".to_string(),
+            executable_path: Some(worker_exe.clone()),
+            user_matches_current: Some(false),
+        },
+    ];
+    let (listener_f, worker_f, complete_f) =
+        runnermesh::observe_runner_processes_from_images(&runner_home, &images_foreign);
+    assert!(
+        !listener_f,
+        "Foreign listener must not be attributed to session"
+    );
+    assert!(
+        !worker_f,
+        "Foreign worker must not be attributed to session"
+    );
+    assert!(
+        complete_f,
+        "Complete inspection of foreign processes succeeds"
+    );
+
+    // user_matches_current == None is ambiguous: must fail closed (worker = true, evidence_complete = false)
+    let images_ambiguous = vec![runnermesh::ProcessImage {
+        process_id: 113,
+        executable_name: "Runner.Worker.exe".to_string(),
+        executable_path: Some(worker_exe.clone()),
+        user_matches_current: None,
+    }];
+    let (listener_a, worker_a, complete_a) =
+        runnermesh::observe_runner_processes_from_images(&runner_home, &images_ambiguous);
+    assert!(
+        worker_a,
+        "Ambiguous worker must fail closed as worker present"
+    );
+    assert!(
+        !complete_a,
+        "Ambiguous user token must mark evidence as incomplete"
+    );
+    assert!(!listener_a);
+
+    // 2. Verified ownership for locally created path
+    assert_eq!(
+        runnermesh::current_user_owns_path(&runner_home),
+        Ok(true),
+        "Locally created temp runner_home must be owned by current user"
+    );
+    let work_root = runner_home.join("_work");
+    std::fs::create_dir_all(&work_root).unwrap();
+    assert!(
+        runnermesh::verify_path_and_ancestor_ownership(&work_root),
+        "Locally created work_root must be verified as owned"
+    );
+    assert_eq!(
+        runnermesh::paths_have_matching_owner(&runner_home, &work_root),
+        Ok(true),
+        "runner_home and work_root created by same user must have matching owners"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn regression_finding2_incomplete_process_evidence_propagates_and_gates_enrollment() {
+    use runnermesh::{
+        handle_runners_command, DiscoveryEnumerationStatus, RunnerRegistry, RunnerRegistryEditor,
+    };
+
+    let registry = RunnerRegistry::default();
+    let mut editor = RunnerRegistryEditor::new(registry).unwrap();
+
+    let candidate = DiscoveredRunner {
+        local_discovery_key: "r-test".to_string(),
+        disposition: DiscoveryDisposition::ObservedOnly,
+        refusal: None,
+        backend: RunnerBackendKind::WindowsService,
+        identity: DiscoveredRunnerIdentity {
+            registration_scope: Some(RegistrationScope::Repository {
+                owner: "org".to_string(),
+                repository: "repo".to_string(),
+            }),
+            runner_id: Some(101),
+            expected_runner_name: Some("test-runner".to_string()),
+            runner_home: std::path::PathBuf::from(r"C:\test-runner"),
+            work_root: Some(std::path::PathBuf::from(r"C:\test-runner\_work")),
+            execution_identity_ref: Some(
+                OpaqueIdentityReference::new(
+                    WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                )
+                .unwrap(),
+            ),
+        },
+        service: Some(DiscoveredServiceBinding {
+            service_name: "actions.runner.test".to_string(),
+            display_name: None,
+            image_path: None,
+            state: DiscoveredLifecycle::Listening,
+        }),
+        session: None,
+        capabilities: DiscoveryCapabilities {
+            service_control_contract: true,
+            user_session_control_contract: false,
+            enrollment_eligible: true,
+        },
+        same_scope_collision: false,
+        observed_lifecycle: DiscoveredLifecycle::Listening,
+    };
+
+    // 1. Report with process_observation = Unavailable must reject RunnersEnroll
+    let incomplete_report = DiscoveryReport {
+        schema_version: runnermesh::RUNNER_DISCOVERY_SCHEMA_VERSION,
+        read_only: true,
+        exhaustive: false,
+        service_enumeration: DiscoveryEnumerationStatus::Ok,
+        session_enumeration: DiscoveryEnumerationStatus::Ok,
+        process_observation: DiscoveryEnumerationStatus::Unavailable,
+        candidates: vec![candidate.clone()],
+    };
+
+    let enroll_cmd = AgentCommand::RunnersEnroll {
+        local_runner_key: "r-test".to_string(),
+        prepare_only: false,
+    };
+    let err = handle_runners_command(&mut editor, Some(&incomplete_report), &enroll_cmd);
+    assert!(
+        matches!(err, Err(RegistryError::ProcessEvidenceIncomplete)),
+        "RunnersEnroll must fail with ProcessEvidenceIncomplete when discovery process_observation is Unavailable"
+    );
+
+    // 2. Candidate with observed_lifecycle = Unknown must reject RunnersEnroll
+    let mut unknown_candidate = candidate.clone();
+    unknown_candidate.observed_lifecycle = DiscoveredLifecycle::Unknown;
+    let ok_report = DiscoveryReport {
+        schema_version: runnermesh::RUNNER_DISCOVERY_SCHEMA_VERSION,
+        read_only: true,
+        exhaustive: false,
+        service_enumeration: DiscoveryEnumerationStatus::Ok,
+        session_enumeration: DiscoveryEnumerationStatus::Ok,
+        process_observation: DiscoveryEnumerationStatus::Ok,
+        candidates: vec![unknown_candidate],
+    };
+    let err_unknown = handle_runners_command(&mut editor, Some(&ok_report), &enroll_cmd);
+    assert!(
+        matches!(err_unknown, Err(RegistryError::ProcessEvidenceIncomplete)),
+        "RunnersEnroll must fail with ProcessEvidenceIncomplete when candidate lifecycle is Unknown"
+    );
+}
+
+#[test]
+fn regression_finding3_scm_quoted_image_path_with_arguments_parsed_consistently() {
+    use runnermesh::{opaque_image_token, runner_home_from_image, service_image_path_token};
+
+    // 1. Quoted ImagePath with trailing service arguments
+    let quoted_with_args =
+        r#""C:\Program Files\fixture-runner\bin\RunnerService.exe" --runAsService"#;
+    let token = service_image_path_token(quoted_with_args);
+    assert_eq!(
+        token,
+        Some(r"C:\Program Files\fixture-runner\bin\RunnerService.exe"),
+        "service_image_path_token must extract exact quoted executable path"
+    );
+
+    let home = runner_home_from_image(std::path::Path::new(token.unwrap()));
+    assert_eq!(
+        home,
+        Some(std::path::PathBuf::from(r"C:\Program Files\fixture-runner")),
+        "runner_home_from_image must extract runner home from <home>/bin/RunnerService.exe"
+    );
+
+    let hash_quoted = opaque_image_token(quoted_with_args);
+    let hash_clean = opaque_image_token(r"C:\Program Files\fixture-runner\bin\RunnerService.exe");
+    assert_eq!(
+        hash_quoted, hash_clean,
+        "opaque_image_token must match between quoted-with-args and clean executable path"
+    );
+
+    // 2. Unquoted ImagePath with trailing arguments
+    let unquoted_with_args = r"C:\fixture-runners\home\bin\RunnerService.exe -svc";
+    let token_unquoted = service_image_path_token(unquoted_with_args);
+    assert_eq!(
+        token_unquoted,
+        Some(r"C:\fixture-runners\home\bin\RunnerService.exe"),
+        "service_image_path_token must extract first whitespace-separated token"
+    );
+    let hash_unquoted = opaque_image_token(unquoted_with_args);
+    let hash_unquoted_clean = opaque_image_token(r"C:\fixture-runners\home\bin\RunnerService.exe");
+    assert_eq!(
+        hash_unquoted, hash_unquoted_clean,
+        "opaque_image_token must match between unquoted-with-args and clean executable path"
+    );
+}

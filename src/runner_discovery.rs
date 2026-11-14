@@ -294,6 +294,10 @@ pub trait SessionDiscoverySource {
     fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
         DiscoveryEnumerationStatus::Ok
     }
+    /// Process-observation status after inspecting session runner processes.
+    fn process_status(&self) -> DiscoveryEnumerationStatus {
+        DiscoveryEnumerationStatus::Ok
+    }
 }
 
 /// Read-only unsupported-mode discovery source (scheduled tasks, etc.).
@@ -454,7 +458,7 @@ where
             exhaustive: false,
             service_enumeration: self.service_source.enumeration_status(),
             session_enumeration: self.session_source.enumeration_status(),
-            process_observation: DiscoveryEnumerationStatus::Ok,
+            process_observation: self.session_source.process_status(),
             candidates: drafts,
         }
     }

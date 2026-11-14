@@ -156,6 +156,7 @@ pub use runner_discovery::{
     UnsupportedDiscoverySource, RUNNER_DISCOVERY_SCHEMA_VERSION,
 };
 pub use runner_observer::{
+    current_user_owns_path, paths_have_matching_owner, verify_path_and_ancestor_ownership,
     ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
     RunnerLocalEvidence, RunnerObservation, RunnerSource, WindowsRunnerSource,
 };
@@ -231,8 +232,8 @@ pub use windows_github::{
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
     observe_runner_processes_for_home, observe_runner_processes_from_images,
-    service_image_path_token, ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary,
-    WindowsServiceDiscoverySource,
+    runner_home_from_image, service_image_path_token, ConfiguredSessionDiscoverySource,
+    PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
     opaque_image_token, reconcile_interrupted_scm_journal, runner_service_binary_path,

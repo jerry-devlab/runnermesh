@@ -24,7 +24,6 @@ const SERVICE_ACCOUNT_IDENTITY_PROVIDER: &str = "windows-service-account-sha256-
 pub fn discover_local_runners_read_only(session_homes: Vec<PathBuf>) -> DiscoveryReport {
     let service = WindowsServiceDiscoverySource::default();
     let session = ConfiguredSessionDiscoverySource::new(session_homes);
-    let process_status = session.last_process_status();
     // Do not force current-user identity onto Service runners: their execution
     // identity is the service account. Session homes already carry current-user
     // opaque refs when available.
@@ -36,7 +35,7 @@ pub fn discover_local_runners_read_only(session_homes: Vec<PathBuf>) -> Discover
             expected_execution_identity: None,
         },
     );
-    inventory.discover_with_process_status(process_status)
+    inventory.discover()
 }
 
 /// Privacy-safe summary of a live discovery pass. Never includes paths, names,
@@ -192,6 +191,10 @@ impl SessionDiscoverySource for ConfiguredSessionDiscoverySource {
     fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
         DiscoveryEnumerationStatus::Ok
     }
+
+    fn process_status(&self) -> DiscoveryEnumerationStatus {
+        self.last_process_status()
+    }
 }
 
 fn observe_session_home(
@@ -241,6 +244,16 @@ fn observe_session_home(
         DiscoveredLifecycle::Unknown
     };
     let identity = current_user_identity_optional();
+
+    // Verify ownership of runner_home and work_root (fail closed on foreign, unowned, or reparse)
+    let home_owned = runner_home.is_dir()
+        && !crate::installation::is_reparse_point(runner_home).unwrap_or(true)
+        && crate::runner_observer::current_user_owns_path(runner_home) == Ok(true);
+    let work_root_owned = work_root
+        .as_ref()
+        .is_none_or(|wr| crate::runner_observer::verify_path_and_ancestor_ownership(wr));
+    let current_user_owned = home_owned && work_root_owned;
+
     Some(SessionCandidateFact {
         runner_home: runner_home.to_path_buf(),
         work_root,
@@ -248,7 +261,7 @@ fn observe_session_home(
         runner_id: meta.as_ref().and_then(|m| m.agent_id),
         expected_runner_name: meta.as_ref().and_then(|m| m.agent_name.clone()),
         execution_identity_ref: identity,
-        current_user_owned: true,
+        current_user_owned,
         listener_present: listener_running,
         worker_present: worker_running,
         state,
@@ -292,8 +305,14 @@ pub fn observe_runner_processes_from_images(
         if !path_is_under_home_key(&path_key, &home) {
             continue;
         }
-        // Require current-user ownership evidence when available.
-        if image.user_matches_current == Some(false) {
+        // Require affirmative current-user ownership evidence: reject foreign or ambiguous process identity
+        if image.user_matches_current != Some(true) {
+            if image.user_matches_current.is_none() {
+                evidence_complete = false;
+                if is_worker {
+                    worker = true;
+                }
+            }
             continue;
         }
 
@@ -603,15 +622,46 @@ fn service_fact_from_scm(
         let image_path = PathBuf::from(service_image_path_token(&image)?);
         let runner_home = runner_home_from_image(&image_path)
             .unwrap_or_else(|| image_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        if crate::installation::is_reparse_point(&runner_home).unwrap_or(true) {
+            return None;
+        }
         let meta = read_runner_metadata(&runner_home);
         let work_root = meta.as_ref().and_then(|m| {
-            m.work_folder.as_ref().map(|folder| {
+            m.work_folder.as_ref().and_then(|folder| {
                 let path = PathBuf::from(folder);
-                if path.is_absolute() {
+                let full_path = if path.is_absolute() {
                     path
                 } else {
                     runner_home.join(path)
+                };
+                if crate::installation::is_reparse_point(&full_path).unwrap_or(true) {
+                    return None;
                 }
+                if full_path.exists() {
+                    if crate::runner_observer::paths_have_matching_owner(&runner_home, &full_path)
+                        != Ok(true)
+                    {
+                        return None;
+                    }
+                } else {
+                    let mut cur = full_path.parent();
+                    let mut ok = false;
+                    while let Some(parent) = cur {
+                        if parent.exists() {
+                            ok = !crate::installation::is_reparse_point(parent).unwrap_or(true)
+                                && crate::runner_observer::paths_have_matching_owner(
+                                    &runner_home,
+                                    parent,
+                                ) == Ok(true);
+                            break;
+                        }
+                        cur = parent.parent();
+                    }
+                    if !ok {
+                        return None;
+                    }
+                }
+                Some(full_path)
             })
         });
         // When the service account cannot be hashed, leave identity missing
@@ -649,7 +699,18 @@ pub fn service_image_path_token(binary_path_name: &str) -> Option<&str> {
         }
         return Some(path);
     }
-    // Unquoted ImagePath: first whitespace-separated token is the executable.
+    // Unquoted ImagePath: check for .exe boundary followed by whitespace or end of string
+    // to correctly support unquoted paths with spaces (e.g. C:\Program Files\...).
+    let lower = trimmed.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(rel_pos) = lower[search_from..].find(".exe") {
+        let exe_end = search_from + rel_pos + 4;
+        if exe_end == trimmed.len() || trimmed[exe_end..].starts_with(char::is_whitespace) {
+            return Some(&trimmed[..exe_end]);
+        }
+        search_from = exe_end;
+    }
+    // Fallback: first whitespace-separated token is the executable.
     let token = trimmed.split_whitespace().next()?;
     if token.is_empty() {
         return None;
@@ -657,25 +718,34 @@ pub fn service_image_path_token(binary_path_name: &str) -> Option<&str> {
     Some(token)
 }
 
-#[cfg(any(windows, test))]
-fn runner_home_from_image(image_path: &Path) -> Option<PathBuf> {
-    // Use normalized `\` keys so Windows ImagePath fixtures remain meaningful
-    // under Unix unit tests (Path::parent treats `\` as a name character there).
-    let key = normalize_path_key(image_path);
-    if key.is_empty() {
-        return None;
-    }
-    let (parent_key, file_name) = key.rsplit_once('\\')?;
-    if file_name.is_empty() {
-        return None;
-    }
-    // Typical layout: <home>\bin\RunnerService.exe
-    if let Some((home_key, bin)) = parent_key.rsplit_once('\\') {
-        if bin.eq_ignore_ascii_case("bin") {
-            return Some(PathBuf::from(home_key));
+pub fn runner_home_from_image(image_path: &Path) -> Option<PathBuf> {
+    // Preserve original path casing.
+    #[cfg(windows)]
+    {
+        let parent = image_path.parent()?;
+        if parent
+            .file_name()
+            .map(|n| n.to_string_lossy().eq_ignore_ascii_case("bin"))
+            .unwrap_or(false)
+        {
+            return parent.parent().map(Path::to_path_buf);
         }
+        Some(parent.to_path_buf())
     }
-    Some(PathBuf::from(parent_key))
+    #[cfg(not(windows))]
+    {
+        let key = image_path.to_string_lossy().replace('/', "\\");
+        let (parent_key, file_name) = key.rsplit_once('\\')?;
+        if file_name.is_empty() {
+            return None;
+        }
+        if let Some((home_key, bin)) = parent_key.rsplit_once('\\') {
+            if bin.eq_ignore_ascii_case("bin") {
+                return Some(PathBuf::from(home_key));
+            }
+        }
+        Some(PathBuf::from(parent_key))
+    }
 }
 
 #[cfg(windows)]
