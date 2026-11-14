@@ -281,6 +281,15 @@ pub fn observe_runner_processes_with_pids_from_images(
     runner_home: &Path,
     images: &[crate::process_snapshot::ProcessImage],
 ) -> DiscoveredRunnerProcesses {
+    if !runner_home.is_dir() {
+        return DiscoveredRunnerProcesses {
+            listener_present: false,
+            worker_present: false,
+            evidence_complete: false,
+            listener_pid: None,
+            worker_pid: None,
+        };
+    }
     let home = normalize_path_key(runner_home);
     let expected_listener =
         normalize_path_key(&runner_home.join("bin").join("Runner.Listener.exe"));
@@ -362,6 +371,15 @@ pub fn observe_runner_processes_from_images(
 pub fn observe_runner_processes_with_pids(runner_home: &Path) -> DiscoveredRunnerProcesses {
     #[cfg(windows)]
     {
+        if !runner_home.is_dir() {
+            return DiscoveredRunnerProcesses {
+                listener_present: false,
+                worker_present: false,
+                evidence_complete: false,
+                listener_pid: None,
+                worker_pid: None,
+            };
+        }
         match crate::process_snapshot::executable_images() {
             Ok(images) => observe_runner_processes_with_pids_from_images(runner_home, &images),
             Err(_) => DiscoveredRunnerProcesses {

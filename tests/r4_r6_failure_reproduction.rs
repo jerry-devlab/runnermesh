@@ -2915,3 +2915,311 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+fn make_f_runner_record(
+    key: &str,
+    home: std::path::PathBuf,
+    work: std::path::PathBuf,
+) -> runnermesh::RunnerRecord {
+    runnermesh::RunnerRecord {
+        local_runner_key: key.to_string(),
+        registration_scope: runnermesh::RegistrationScope::Repository {
+            owner: "org".to_string(),
+            repository: "repo".to_string(),
+        },
+        runner_id: 100,
+        expected_runner_name: format!("name-{key}"),
+        runner_home: home,
+        work_root: work,
+        execution_identity_ref: runnermesh::OpaqueIdentityReference::new(
+            "test-provider",
+            "test-key",
+        )
+        .unwrap(),
+        backend: runnermesh::RegistryBackendBinding::UserSession,
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: false,
+    }
+}
+
+#[test]
+fn regression_finding1_session_gate_cannot_be_opened_without_authority_and_binding() {
+    use runnermesh::{
+        GatedUserSessionProcessTransport, LiveSessionExecutionGate, UserSessionProcessTransport,
+    };
+
+    let record_a = make_f_runner_record(
+        "runner-a",
+        std::env::temp_dir().join("runnermesh-test-reg1-home-a"),
+        std::env::temp_dir().join("runnermesh-test-reg1-work-a"),
+    );
+    let record_b = make_f_runner_record(
+        "runner-b",
+        std::env::temp_dir().join("runnermesh-test-reg1-home-b"),
+        std::env::temp_dir().join("runnermesh-test-reg1-work-b"),
+    );
+
+    // 1. Default gate is CLOSED and parameterless open() is un-exported
+    let transport_closed = GatedUserSessionProcessTransport::closed();
+    assert!(!transport_closed.gate().is_open());
+    let launch_err = transport_closed.launch_listener(&record_a).unwrap_err();
+    assert!(
+        launch_err.contains("session.transport-refused")
+            || launch_err.contains("session.gate-closed")
+    );
+    let stop_err = transport_closed
+        .request_graceful_stop(&record_a)
+        .unwrap_err();
+    assert!(
+        stop_err.contains("session.transport-refused") || stop_err.contains("session.gate-closed")
+    );
+
+    // 2. Bound gate rejects runner mismatch
+    let gate_a = LiveSessionExecutionGate::open_for_test("runner-a");
+    let transport_a = GatedUserSessionProcessTransport::with_test_gate(gate_a);
+    let mismatch_err = transport_a.launch_listener(&record_b).unwrap_err();
+    assert!(mismatch_err.contains("session.target-runner-mismatch"));
+
+    // 3. Expired gate rejects
+    let gate_expired =
+        LiveSessionExecutionGate::mint_trusted_live_for_test("runner-a", "test-key", "tx-1", 100);
+    let transport_expired = GatedUserSessionProcessTransport::with_test_gate(gate_expired);
+    let expired_err = transport_expired.launch_listener(&record_a).unwrap_err();
+    assert!(expired_err.contains("session.gate-expired"));
+}
+
+#[test]
+fn regression_finding2_incomplete_process_evidence_yields_unknown_and_refuses() {
+    use runnermesh::{
+        DiscoveredLifecycle, GatedUserSessionProcessTransport, UserSessionProcessTransport,
+    };
+
+    // When process discovery evidence is incomplete or home doesn't exist, Gated transport
+    // must report Unknown, never masquerading as Stopped!
+    let record = make_f_runner_record(
+        "nonexistent-runner",
+        std::path::PathBuf::from("Z:\\nonexistent\\path\\unlikely\\to\\exist"),
+        std::path::PathBuf::from("Z:\\nonexistent\\work\\path"),
+    );
+    let transport = GatedUserSessionProcessTransport::closed();
+    let obs = transport.observe_session(&record);
+    #[cfg(windows)]
+    assert_eq!(obs, Some(DiscoveredLifecycle::Unknown));
+}
+
+#[test]
+fn regression_finding3_session_action_performs_post_action_readback_truthfully() {
+    use runnermesh::{
+        DiscoveredLifecycle, MultiRunnerSessionCoordinator, PreparedSessionAction, RunnerRecord,
+        SimulatedUserSessionProcessTransport, StandardSessionCoordinator,
+        UserSessionProcessTransport,
+    };
+
+    let record = make_f_runner_record(
+        "runner-test-f3",
+        std::env::temp_dir().join("runnermesh-f3-home"),
+        std::env::temp_dir().join("runnermesh-f3-work"),
+    );
+    std::fs::create_dir_all(&record.runner_home).unwrap();
+    std::fs::create_dir_all(&record.work_root).unwrap();
+    std::fs::write(record.runner_home.join("run.cmd"), b"@echo off\r\n").unwrap();
+
+    // 1. COUNTEREXAMPLE: Transport claims stop succeeded, but readback still sees Listening process.
+    // StandardSessionCoordinator must fail closed with session.stop-readback-unconfirmed!
+    struct StubbornStopTransport;
+    impl UserSessionProcessTransport for StubbornStopTransport {
+        fn launch_listener(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn observe_session(&self, _record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+            Some(DiscoveredLifecycle::Listening)
+        }
+    }
+    let coordinator_stubborn_stop =
+        StandardSessionCoordinator::new(std::sync::Arc::new(StubbornStopTransport));
+    let stop_res = coordinator_stubborn_stop
+        .dispatch_session(&record, PreparedSessionAction::RequestGracefulStop);
+    assert_eq!(stop_res.unwrap_err(), "session.stop-readback-unconfirmed");
+
+    // 2. COUNTEREXAMPLE: Transport claims launch succeeded, but readback still sees Stopped process.
+    // StandardSessionCoordinator must fail closed with session.launch-readback-unconfirmed!
+    struct StubbornLaunchTransport;
+    impl UserSessionProcessTransport for StubbornLaunchTransport {
+        fn launch_listener(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn observe_session(&self, _record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+            Some(DiscoveredLifecycle::Stopped)
+        }
+    }
+    let coordinator_stubborn_launch =
+        StandardSessionCoordinator::new(std::sync::Arc::new(StubbornLaunchTransport));
+    let launch_res = coordinator_stubborn_launch
+        .dispatch_session(&record, PreparedSessionAction::LaunchOwnedListener);
+    assert_eq!(
+        launch_res.unwrap_err(),
+        "session.launch-readback-unconfirmed"
+    );
+
+    // 3. POSITIVE CASE: Transport actually updates state, readback confirms truthful transition!
+    let simulated = std::sync::Arc::new(SimulatedUserSessionProcessTransport::new());
+    let coordinator_truthful = StandardSessionCoordinator::new(simulated.clone());
+
+    let honest_launch =
+        coordinator_truthful.dispatch_session(&record, PreparedSessionAction::LaunchOwnedListener);
+    assert!(honest_launch.unwrap());
+    assert_eq!(
+        simulated.observe_session(&record),
+        Some(DiscoveredLifecycle::Listening)
+    );
+
+    let honest_stop =
+        coordinator_truthful.dispatch_session(&record, PreparedSessionAction::RequestGracefulStop);
+    assert!(honest_stop.unwrap());
+    assert_eq!(
+        simulated.observe_session(&record),
+        Some(DiscoveredLifecycle::Stopped)
+    );
+
+    let _ = std::fs::remove_dir_all(&record.runner_home);
+    let _ = std::fs::remove_dir_all(&record.work_root);
+}
+
+#[test]
+fn regression_finding4_durable_ledger_fails_closed_on_corrupt_hash_parse_or_lock_failure() {
+    use runnermesh::SharedAuthorizationLedger;
+
+    let temp_dir = std::env::temp_dir().join("runnermesh-ledger-f4-test");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let ledger_path = temp_dir.join("ledger.json");
+
+    // 1. Invalid token hash hex in durable file fails closed with Err
+    let invalid_entry = serde_json::json!([
+        {
+            "token_hash_hex": "not-valid-hex-at-all",
+            "nonce": "test-nonce-1",
+            "consumed_at_unix_ms": 1000
+        }
+    ]);
+    std::fs::write(&ledger_path, serde_json::to_vec(&invalid_entry).unwrap()).unwrap();
+    let load_res = SharedAuthorizationLedger::with_durable_file(&ledger_path);
+    assert!(
+        load_res.is_err(),
+        "Invalid token hash hex in durable ledger must return Err on load"
+    );
+
+    // 2. Corrupt JSON in durable file fails closed in is_consumed()
+    let hash = [1u8; 32];
+    std::fs::write(&ledger_path, b"[]").unwrap();
+    let ledger = SharedAuthorizationLedger::with_durable_file(&ledger_path).unwrap();
+    std::fs::write(&ledger_path, b"{ corrupt json").unwrap();
+    assert!(
+        ledger.is_consumed(&hash, "nonce-x"),
+        "is_consumed must fail closed (return true) when file is corrupt"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn regression_finding5_runner_registry_scope_validation_strictly_matches_admission() {
+    use runnermesh::RegistrationScope;
+
+    // Characters like '?', '#', '&', '@', ':' are rejected by GitHub admission validator
+    // and must now also be rejected by RunnerRecord::is_valid!
+    let invalid_scopes = [
+        RegistrationScope::Organization {
+            organization: "org?with-query".to_string(),
+        },
+        RegistrationScope::Organization {
+            organization: "org#fragment".to_string(),
+        },
+        RegistrationScope::Organization {
+            organization: "org/injection".to_string(),
+        },
+        RegistrationScope::Repository {
+            owner: "owner&more".to_string(),
+            repository: "repo".to_string(),
+        },
+        RegistrationScope::Repository {
+            owner: "owner".to_string(),
+            repository: "repo:port".to_string(),
+        },
+    ];
+
+    for scope in invalid_scopes {
+        assert!(
+            !scope.validate(),
+            "Scope {:?} must be invalid under admission rules",
+            scope
+        );
+        let mut record = make_f_runner_record(
+            "valid-key",
+            std::env::temp_dir().join("f5-home"),
+            std::env::temp_dir().join("f5-work"),
+        );
+        record.registration_scope = scope;
+        assert!(
+            !record.is_valid(),
+            "RunnerRecord must be invalid when scope contains invalid characters"
+        );
+    }
+
+    // Valid scopes pass both
+    let valid_scope = RegistrationScope::Repository {
+        owner: "valid-owner".to_string(),
+        repository: "valid-repo.name_test-1".to_string(),
+    };
+    assert!(valid_scope.validate());
+}
+
+#[test]
+fn regression_finding6_scm_stop_secondary_verification_refuses_busy_worker() {
+    use runnermesh::{
+        next_control_phase_with_admission, DesiredServiceLifecycle, DiscoveredLifecycle,
+        ServiceControlPhase, ServiceObservation, ServiceStartMode,
+    };
+
+    let observed_busy = ServiceObservation {
+        service_name: "test-service".to_string(),
+        state: DiscoveredLifecycle::Busy,
+        start_mode: ServiceStartMode::Automatic,
+        image_path_matches: true,
+        ownership_verified: true,
+    };
+
+    // 1. next_control_phase_with_admission: caller supplies worker_busy: false, but observed.state is Busy
+    let phase = next_control_phase_with_admission(
+        DesiredServiceLifecycle::DrainThenStop,
+        &observed_busy,
+        true,  // admission_selector_absent
+        false, // worker_busy passed as false by caller!
+        true,  // managed_admission
+    );
+    assert_eq!(
+        phase,
+        ServiceControlPhase::WaitIdle { worker_busy: true },
+        "When observed.state is Busy, contract MUST return WaitIdle even if caller passed worker_busy: false"
+    );
+
+    // 2. Under StayStopped unmanaged: contract MUST Refuse BusyWorker
+    let phase_unmanaged = next_control_phase_with_admission(
+        DesiredServiceLifecycle::StayStopped,
+        &observed_busy,
+        true,
+        false, // worker_busy false
+        false, // unmanaged
+    );
+    match phase_unmanaged {
+        ServiceControlPhase::Refused { reason } => assert_eq!(reason, "service.busy-worker"),
+        other => panic!("Expected Refused with service.busy-worker, got {other:?}"),
+    }
+}

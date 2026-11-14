@@ -104,15 +104,7 @@ impl RunnerRecord {
     }
 
     fn registration_scope_valid(&self) -> bool {
-        // RegistrationScope::validate is private; round-trip through AdmissionBinding
-        // rules by checking path components via JSON shape we already trust from
-        // serde + non-empty known fields.
-        match &self.registration_scope {
-            RegistrationScope::Organization { organization } => valid_scope_component(organization),
-            RegistrationScope::Repository { owner, repository } => {
-                valid_scope_component(owner) && valid_scope_component(repository)
-            }
-        }
+        self.registration_scope.validate()
     }
 
     pub fn is_active_enrollment(&self) -> bool {
@@ -669,10 +661,6 @@ fn absolute_path_like(path: &Path) -> bool {
     !raw.is_empty()
         && !raw.contains('\0')
         && (path.is_absolute() || raw.chars().nth(1) == Some(':') || raw.starts_with('/'))
-}
-
-fn valid_scope_component(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 128 && !value.contains(['\0', '\r', '\n', '/', '\\', ' '])
 }
 
 #[cfg(test)]

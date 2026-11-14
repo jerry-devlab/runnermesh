@@ -285,6 +285,12 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
         Ok(false)
     }
 
+    /// Observes the active user-session process state for a runner record.
+    fn observe_session(&self, record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+        let _ = record;
+        None
+    }
+
     /// Optional target registration so multi-runner observers can map local keys to remote scopes.
     fn register_runner_target(
         &self,
@@ -520,6 +526,10 @@ impl UserSessionProcessTransport for InertUserSessionProcessTransport {
 /// opens the gate for bounded session process management.
 #[derive(Clone, Debug)]
 pub struct LiveSessionExecutionGate {
+    bound_runner_key: Option<String>,
+    bound_execution_identity_token: Option<String>,
+    bound_transaction_id: Option<String>,
+    expires_at_epoch_seconds: u64,
     is_open: Option<Arc<AtomicBool>>,
 }
 
@@ -530,12 +540,52 @@ impl Default for LiveSessionExecutionGate {
 }
 
 impl LiveSessionExecutionGate {
-    pub const CLOSED: Self = Self { is_open: None };
+    pub const CLOSED: Self = Self {
+        bound_runner_key: None,
+        bound_execution_identity_token: None,
+        bound_transaction_id: None,
+        expires_at_epoch_seconds: 0,
+        is_open: None,
+    };
 
-    pub fn open() -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn mint_trusted_live(
+        runner_key: &str,
+        execution_identity_token: &str,
+        transaction_id: &str,
+        expires_at_epoch_seconds: u64,
+    ) -> Self {
         Self {
+            bound_runner_key: Some(runner_key.to_string()),
+            bound_execution_identity_token: Some(execution_identity_token.to_string()),
+            bound_transaction_id: Some(transaction_id.to_string()),
+            expires_at_epoch_seconds,
             is_open: Some(Arc::new(AtomicBool::new(true))),
         }
+    }
+
+    pub fn bound_transaction_id(&self) -> Option<&str> {
+        self.bound_transaction_id.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn open_for_test(runner_key: &str) -> Self {
+        Self::mint_trusted_live(runner_key, "test-identity", "test-tx", u64::MAX)
+    }
+
+    #[doc(hidden)]
+    pub fn mint_trusted_live_for_test(
+        runner_key: &str,
+        execution_identity_token: &str,
+        transaction_id: &str,
+        expires_at_epoch_seconds: u64,
+    ) -> Self {
+        Self::mint_trusted_live(
+            runner_key,
+            execution_identity_token,
+            transaction_id,
+            expires_at_epoch_seconds,
+        )
     }
 
     pub fn is_open(&self) -> bool {
@@ -543,6 +593,32 @@ impl LiveSessionExecutionGate {
             .as_ref()
             .map(|b| b.load(Ordering::Acquire))
             .unwrap_or(false)
+    }
+
+    pub fn authorizes_runner(
+        &self,
+        record: &RunnerRecord,
+        now_epoch_seconds: u64,
+    ) -> Result<(), &'static str> {
+        if !self.is_open() {
+            return Err("session.gate-closed");
+        }
+        if now_epoch_seconds > self.expires_at_epoch_seconds {
+            return Err("session.gate-expired");
+        }
+        if let Some(ref bound_key) = self.bound_runner_key {
+            if bound_key != &record.local_runner_key {
+                return Err("session.target-runner-mismatch");
+            }
+        } else {
+            return Err("session.gate-unbound");
+        }
+        if let Some(ref bound_id) = self.bound_execution_identity_token {
+            if bound_id != &record.execution_identity_ref.key {
+                return Err("session.identity-mismatch");
+            }
+        }
+        Ok(())
     }
 
     pub fn close(&self) {
@@ -569,7 +645,13 @@ impl GatedUserSessionProcessTransport {
         }
     }
 
-    pub fn with_gate(gate: LiveSessionExecutionGate) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_gate(gate: LiveSessionExecutionGate) -> Self {
+        Self { gate }
+    }
+
+    #[doc(hidden)]
+    pub fn with_test_gate(gate: LiveSessionExecutionGate) -> Self {
         Self { gate }
     }
 
@@ -580,12 +662,20 @@ impl GatedUserSessionProcessTransport {
 
 impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
     fn launch_listener(&self, record: &RunnerRecord) -> Result<bool, String> {
-        if !self.gate.is_open() {
-            return Err("session.transport-gated-closed".to_owned());
-        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.gate
+            .authorizes_runner(record, now)
+            .map_err(|e| format!("session.transport-refused: {e}"))?;
+
         let entrypoint = record.runner_home.join("run.cmd");
         if !entrypoint.is_file() {
             return Err("session.entrypoint-missing".to_owned());
+        }
+        if !crate::runner_observer::verify_path_and_ancestor_ownership(&record.runner_home) {
+            return Err("session.runner-home-unverified".to_owned());
         }
         #[cfg(windows)]
         {
@@ -604,11 +694,45 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
         }
     }
 
-    fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
-        if !self.gate.is_open() {
-            return Err("session.transport-gated-closed".to_owned());
+    fn request_graceful_stop(&self, record: &RunnerRecord) -> Result<bool, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.gate
+            .authorizes_runner(record, now)
+            .map_err(|e| format!("session.transport-refused: {e}"))?;
+
+        #[cfg(windows)]
+        {
+            let discovered = crate::windows_runner_discovery::observe_runner_processes_with_pids(
+                &record.runner_home,
+            );
+            if let Some(pid) = discovered.listener_pid {
+                unsafe {
+                    use windows_sys::Win32::Foundation::CloseHandle;
+                    use windows_sys::Win32::System::Threading::{
+                        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+                    };
+                    let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                    if !handle.is_null()
+                        && handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+                    {
+                        let res = TerminateProcess(handle, 0);
+                        CloseHandle(handle);
+                        if res == 0 {
+                            return Err(format!("session.terminate-pid-{pid}-failed"));
+                        }
+                    }
+                }
+            }
+            Ok(true)
         }
-        Ok(true)
+        #[cfg(not(windows))]
+        {
+            let _ = record;
+            Ok(true)
+        }
     }
 
     fn observe_session(&self, record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
@@ -617,7 +741,9 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             let discovered = crate::windows_runner_discovery::observe_runner_processes_with_pids(
                 &record.runner_home,
             );
-            if discovered.worker_pid.is_some() {
+            if !discovered.evidence_complete {
+                Some(DiscoveredLifecycle::Unknown)
+            } else if discovered.worker_pid.is_some() {
                 Some(DiscoveredLifecycle::Busy)
             } else if discovered.listener_pid.is_some() {
                 Some(DiscoveredLifecycle::Listening)
@@ -777,7 +903,18 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
                 if !listener_active {
                     return Ok(true);
                 }
-                self.transport.request_graceful_stop(record)
+                let stopped = self.transport.request_graceful_stop(record)?;
+                if stopped {
+                    if let Some(after) = self.transport.observe_session(record) {
+                        if matches!(
+                            after,
+                            DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
+                        ) {
+                            return Err("session.stop-readback-unconfirmed".to_owned());
+                        }
+                    }
+                }
+                Ok(stopped)
             }
             crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener => {
                 if worker_active {
@@ -795,7 +932,18 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
                         return Err("session.readiness-check-failed".to_owned());
                     }
                 }
-                self.transport.launch_listener(record)
+                let launched = self.transport.launch_listener(record)?;
+                if launched {
+                    if let Some(after) = self.transport.observe_session(record) {
+                        if !matches!(
+                            after,
+                            DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
+                        ) {
+                            return Err("session.launch-readback-unconfirmed".to_owned());
+                        }
+                    }
+                }
+                Ok(launched)
             }
             crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => {
                 if worker_active {
@@ -1126,7 +1274,8 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
                     .and_then(|s| s.observe_session_for_key(key))
                 {
                     let busy = matches!(transport_obs, DiscoveredLifecycle::Busy);
-                    (transport_obs, true, busy)
+                    let valid_obs = !matches!(transport_obs, DiscoveredLifecycle::Unknown);
+                    (transport_obs, valid_obs, busy)
                 } else if let Some(home) = runner_home {
                     let (listener_active, worker_active, obs_ok) =
                         crate::windows_runner_discovery::observe_runner_processes_for_home(home);
@@ -1224,6 +1373,13 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         match &self.session {
             Some(coord) => coord.dispatch_session(record, action),
             None => StandardSessionCoordinator::default().dispatch_session(record, action),
+        }
+    }
+
+    fn observe_session(&self, record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+        match &self.session {
+            Some(coord) => coord.observe_session(record),
+            None => StandardSessionCoordinator::default().observe_session(record),
         }
     }
 }
@@ -1478,17 +1634,9 @@ where
                                 transaction_id: transaction_id.to_string(),
                                 applied,
                                 achieved_state: if applied {
-                                    match action {
-                                        crate::runner_session_backend::PreparedSessionAction::LaunchOwnedListener => {
-                                            DiscoveredLifecycle::Listening
-                                        }
-                                        crate::runner_session_backend::PreparedSessionAction::RequestGracefulStop => {
-                                            DiscoveredLifecycle::Stopped
-                                        }
-                                        crate::runner_session_backend::PreparedSessionAction::AdoptVerifiedListener => {
-                                            DiscoveredLifecycle::Listening
-                                        }
-                                    }
+                                    backend
+                                        .observe_session(record)
+                                        .unwrap_or(result.observed_lifecycle)
                                 } else {
                                     result.observed_lifecycle
                                 },

@@ -228,14 +228,26 @@ static GLOBAL_AUTH_LEDGER: std::sync::OnceLock<SharedAuthorizationLedger> =
     std::sync::OnceLock::new();
 
 fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
         return None;
     }
-    let mut bytes = [0u8; 32];
+    let mut out = [0u8; 32];
     for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+        let hi = hex_digit(bytes[i * 2])?;
+        let lo = hex_digit(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
     }
-    Some(bytes)
+    Some(out)
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -413,9 +425,16 @@ impl SharedAuthorizationLedger {
                 )
             })?;
             for rec in records {
-                if let Some(arr) = decode_hex_32(&rec.token_hash_hex) {
-                    consumed_tokens.insert(arr);
-                }
+                let Some(arr) = decode_hex_32(&rec.token_hash_hex) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "corrupt ledger entry with invalid token hash: {}",
+                            rec.token_hash_hex
+                        ),
+                    ));
+                };
+                consumed_tokens.insert(arr);
                 consumed_nonces.insert(rec.nonce);
             }
         }
@@ -437,8 +456,9 @@ impl SharedAuthorizationLedger {
     /// the ledger state unmodified.
     pub fn try_consume(&self, token_hash: [u8; 32], nonce: &str) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let durable_path = state.durable_path.clone();
 
-        if let Some(ref path) = state.durable_path {
+        if let Some(ref path) = durable_path {
             let lock_path = path.with_extension("lock");
             let _lock = match ProcessFileLock::acquire(&lock_path) {
                 Ok(l) => l,
@@ -472,11 +492,12 @@ impl SharedAuthorizationLedger {
             // 2. Check on-disk entries before in-memory state
             let hex_hash: String = token_hash.iter().map(|b| format!("{b:02x}")).collect();
             for entry in &entries {
+                let Some(arr) = decode_hex_32(&entry.token_hash_hex) else {
+                    return false;
+                };
+                state.consumed_tokens.insert(arr);
+                state.consumed_nonces.insert(entry.nonce.clone());
                 if entry.token_hash_hex.eq_ignore_ascii_case(&hex_hash) || entry.nonce == nonce {
-                    if let Some(arr) = decode_hex_32(&entry.token_hash_hex) {
-                        state.consumed_tokens.insert(arr);
-                    }
-                    state.consumed_nonces.insert(entry.nonce.clone());
                     return false;
                 }
             }
@@ -527,24 +548,32 @@ impl SharedAuthorizationLedger {
         }
         if let Some(ref path) = state.durable_path {
             if path.exists() {
+                if crate::installation::is_reparse_point(path).unwrap_or(true) {
+                    return true;
+                }
                 let lock_path = path.with_extension("lock");
-                if let Ok(_lock) = ProcessFileLock::acquire(&lock_path) {
-                    if let Ok(b) = fs::read(path) {
-                        if let Ok(entries) = serde_json::from_slice::<Vec<DurableLedgerEntry>>(&b) {
-                            let hex_hash: String =
-                                token_hash.iter().map(|b| format!("{b:02x}")).collect();
-                            for entry in entries {
-                                if let Some(arr) = decode_hex_32(&entry.token_hash_hex) {
-                                    state.consumed_tokens.insert(arr);
-                                }
-                                state.consumed_nonces.insert(entry.nonce.clone());
-                                if entry.token_hash_hex.eq_ignore_ascii_case(&hex_hash)
-                                    || entry.nonce == nonce
-                                {
-                                    return true;
-                                }
-                            }
-                        }
+                let _lock = match ProcessFileLock::acquire(&lock_path) {
+                    Ok(l) => l,
+                    Err(_) => return true,
+                };
+                let bytes = match fs::read(path) {
+                    Ok(b) if !b.is_empty() => b,
+                    _ => return true,
+                };
+                let entries = match serde_json::from_slice::<Vec<DurableLedgerEntry>>(&bytes) {
+                    Ok(recs) => recs,
+                    Err(_) => return true,
+                };
+                let hex_hash: String = token_hash.iter().map(|b| format!("{b:02x}")).collect();
+                for entry in entries {
+                    let Some(arr) = decode_hex_32(&entry.token_hash_hex) else {
+                        return true;
+                    };
+                    state.consumed_tokens.insert(arr);
+                    state.consumed_nonces.insert(entry.nonce.clone());
+                    if entry.token_hash_hex.eq_ignore_ascii_case(&hex_hash) || entry.nonce == nonce
+                    {
+                        return true;
                     }
                 }
             }

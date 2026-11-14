@@ -574,7 +574,7 @@ pub enum RegistrationScope {
 }
 
 impl RegistrationScope {
-    fn validate(&self) -> bool {
+    pub fn validate(&self) -> bool {
         match self {
             Self::Organization { organization } => valid_path_component(organization),
             Self::Repository { owner, repository } => {
