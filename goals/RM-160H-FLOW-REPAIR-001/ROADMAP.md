@@ -1,6 +1,6 @@
 # RM-160H-FLOW-REPAIR-001 — 临时流程修复路线图
 
-日期：2026-11-14。状态：OWNER_APPROVED_PLAN / IMPLEMENTATION_NOT_STARTED。
+日期：2026-11-14。状态：FLOW_REPAIR_ACCEPTED / RETURNED_TO_160H。
 配套：[开发与验收清单](CHECKLIST.md)。
 依据：[AGENTS](../../AGENTS.md)、[Quality Gates](../../dev_governance_files/QUALITY_GATES.md)、[Fast Lane](../../dev_governance_files/FAST_LANE.md)。
 

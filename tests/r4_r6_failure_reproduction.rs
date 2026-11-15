@@ -2947,7 +2947,7 @@ fn make_f_runner_record(
 #[test]
 fn regression_finding1_session_gate_cannot_be_opened_without_authority_and_binding() {
     use runnermesh::{
-        GatedUserSessionProcessTransport, LiveSessionExecutionGate, UserSessionProcessTransport,
+        GatedUserSessionProcessTransport, SyntheticSessionTestGrant, UserSessionProcessTransport,
     };
 
     let record_a = make_f_runner_record(
@@ -2977,17 +2977,24 @@ fn regression_finding1_session_gate_cannot_be_opened_without_authority_and_bindi
     );
 
     // 2. Bound gate rejects runner mismatch
-    let gate_a = LiveSessionExecutionGate::open_for_test("runner-a");
-    let transport_a = GatedUserSessionProcessTransport::with_test_gate(gate_a);
+    let grant_a = SyntheticSessionTestGrant::new("runner-a", "test-key", "test-tx", u64::MAX);
+    let transport_a = GatedUserSessionProcessTransport::from_synthetic_test_grant(&grant_a);
     let mismatch_err = transport_a.launch_listener(&record_b).unwrap_err();
     assert!(mismatch_err.contains("session.target-runner-mismatch"));
 
     // 3. Expired gate rejects
-    let gate_expired =
-        LiveSessionExecutionGate::mint_trusted_live_for_test("runner-a", "test-key", "tx-1", 100);
-    let transport_expired = GatedUserSessionProcessTransport::with_test_gate(gate_expired);
+    let grant_expired = SyntheticSessionTestGrant::new("runner-a", "test-key", "tx-1", 100);
+    let transport_expired =
+        GatedUserSessionProcessTransport::from_synthetic_test_grant(&grant_expired);
     let expired_err = transport_expired.launch_listener(&record_a).unwrap_err();
     assert!(expired_err.contains("session.gate-expired"));
+
+    // 4. Synthetic gate strictly refuses live process mutation
+    let refusal_launch = transport_a.launch_listener(&record_a).unwrap_err();
+    assert!(refusal_launch.contains("session.synthetic-gate-refuses-live-mutation"));
+
+    let refusal_stop = transport_a.request_graceful_stop(&record_a).unwrap_err();
+    assert!(refusal_stop.contains("session.synthetic-gate-refuses-live-mutation"));
 }
 
 #[test]
@@ -3222,4 +3229,160 @@ fn regression_finding6_scm_stop_secondary_verification_refuses_busy_worker() {
         ServiceControlPhase::Refused { reason } => assert_eq!(reason, "service.busy-worker"),
         other => panic!("Expected Refused with service.busy-worker, got {other:?}"),
     }
+}
+
+#[test]
+fn regression_finding7_strict_post_action_readback_unknown_fails_closed() {
+    use runnermesh::{
+        DiscoveredLifecycle, MultiRunnerSessionCoordinator, PreparedSessionAction, RunnerRecord,
+        StandardSessionCoordinator, UserSessionProcessTransport,
+    };
+
+    let record = make_f_runner_record(
+        "runner-test-f7",
+        std::env::temp_dir().join("runnermesh-f7-home"),
+        std::env::temp_dir().join("runnermesh-f7-work"),
+    );
+    let _ = std::fs::create_dir_all(&record.runner_home);
+    let _ = std::fs::create_dir_all(&record.work_root);
+    let _ = std::fs::write(record.runner_home.join("run.cmd"), b"@echo off\r\n");
+
+    // 1. Post-stop readback of Unknown must fail closed with session.stop-readback-unconfirmed
+    struct TransitionToUnknownStopTransport {
+        stopped_called: std::sync::atomic::AtomicBool,
+    }
+    impl UserSessionProcessTransport for TransitionToUnknownStopTransport {
+        fn launch_listener(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            self.stopped_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+        fn observe_session(&self, _record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+            if self
+                .stopped_called
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Some(DiscoveredLifecycle::Unknown)
+            } else {
+                Some(DiscoveredLifecycle::Listening)
+            }
+        }
+    }
+    let coord_unknown_stop =
+        StandardSessionCoordinator::new(std::sync::Arc::new(TransitionToUnknownStopTransport {
+            stopped_called: std::sync::atomic::AtomicBool::new(false),
+        }));
+    let stop_err = coord_unknown_stop
+        .dispatch_session(&record, PreparedSessionAction::RequestGracefulStop)
+        .unwrap_err();
+    assert_eq!(stop_err, "session.stop-readback-unconfirmed");
+
+    // 2. Post-launch readback of Unknown must fail closed with session.launch-readback-unconfirmed
+    struct TransitionToUnknownLaunchTransport {
+        launched_called: std::sync::atomic::AtomicBool,
+    }
+    impl UserSessionProcessTransport for TransitionToUnknownLaunchTransport {
+        fn launch_listener(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            self.launched_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+        fn request_graceful_stop(&self, _record: &RunnerRecord) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn observe_session(&self, _record: &RunnerRecord) -> Option<DiscoveredLifecycle> {
+            if self
+                .launched_called
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Some(DiscoveredLifecycle::Unknown)
+            } else {
+                Some(DiscoveredLifecycle::Stopped)
+            }
+        }
+    }
+    let coord_unknown_launch =
+        StandardSessionCoordinator::new(std::sync::Arc::new(TransitionToUnknownLaunchTransport {
+            launched_called: std::sync::atomic::AtomicBool::new(false),
+        }));
+    let launch_err = coord_unknown_launch
+        .dispatch_session(&record, PreparedSessionAction::LaunchOwnedListener)
+        .unwrap_err();
+    assert_eq!(launch_err, "session.launch-readback-unconfirmed");
+
+    let _ = std::fs::remove_dir_all(&record.runner_home);
+    let _ = std::fs::remove_dir_all(&record.work_root);
+}
+
+#[test]
+fn regression_finding8_scm_helper_dispatch_refuses_when_worker_is_busy() {
+    use runnermesh::{
+        DiscoveredLifecycle, LiveScmExecutionGate, MockScmBackend, MockServiceRecord,
+        PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmRequest, ServiceObservation,
+        ServiceStartMode, SyntheticScmTestGrant,
+    };
+
+    let mock_scm = MockScmBackend::new();
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.guard".to_string(),
+            state: DiscoveredLifecycle::Busy,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: true,
+        image_token: "test-image".to_string(),
+        execution_identity_token: "test-id".to_string(),
+    });
+
+    let gate = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        "actions.runner.guard",
+        "test-image",
+        true,
+        true,
+        false,
+    ))
+    .unwrap();
+
+    let helper = PrivilegedScmHelper::new(mock_scm.clone(), gate);
+
+    // 1. StopService when worker is busy must be refused with scm.busy-worker
+    let req_stop = PrivilegedScmRequest {
+        action: PrivilegedScmAction::StopService,
+        service_name: "actions.runner.guard".to_string(),
+        expected_image_token: "test-image".to_string(),
+        expected_execution_identity_token: "test-id".to_string(),
+        target_host_token: String::new(),
+        candidate_commit: String::new(),
+        transaction_id: "tx-guard-stop".to_string(),
+    };
+    let report_stop = helper.dispatch(&req_stop);
+    assert!(!report_stop.applied);
+    assert_eq!(
+        report_stop.refusal_reason.as_deref(),
+        Some("scm.busy-worker")
+    );
+    assert_eq!(mock_scm.stop_calls(), 0);
+
+    // 2. StartService when worker is busy must be refused with scm.busy-worker
+    let req_start = PrivilegedScmRequest {
+        action: PrivilegedScmAction::StartService,
+        service_name: "actions.runner.guard".to_string(),
+        expected_image_token: "test-image".to_string(),
+        expected_execution_identity_token: "test-id".to_string(),
+        target_host_token: String::new(),
+        candidate_commit: String::new(),
+        transaction_id: "tx-guard-start".to_string(),
+    };
+    let report_start = helper.dispatch(&req_start);
+    assert!(!report_start.applied);
+    assert_eq!(
+        report_start.refusal_reason.as_deref(),
+        Some("scm.busy-worker")
+    );
+    assert_eq!(mock_scm.start_calls(), 0);
 }

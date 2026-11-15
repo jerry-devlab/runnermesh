@@ -65,8 +65,8 @@ pub use agent::{
     InProcessAdmissionCoordinator, InertUserSessionProcessTransport, LiveSessionExecutionGate,
     MemoryConfigStore, MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend,
     MultiRunnerSessionCoordinator, SandboxMultiRunnerLifecycleBackend,
-    SimulatedUserSessionProcessTransport, StandardSessionCoordinator, UserSessionProcessTransport,
-    CONFIG_SCHEMA_VERSION,
+    SimulatedUserSessionProcessTransport, StandardSessionCoordinator, SyntheticSessionTestGrant,
+    UserSessionProcessTransport, CONFIG_SCHEMA_VERSION,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]

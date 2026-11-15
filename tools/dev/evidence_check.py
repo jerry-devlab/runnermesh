@@ -216,31 +216,35 @@ def check_evidence_index(
         report_rel = r2.get("report")
         if not report_rel or not isinstance(report_rel, str):
             errors.append("r2_audit.report path is missing or not a string")
-        elif base_dir:
+        elif "AUDITOR-PREFLIGHT" in report_rel and r2_disposition == "PASS":
+            errors.append(
+                "preflight log cannot be substituted for an independent audit report"
+            )
+
+        report_content = r2.get("raw_report_text") or r2.get("report_content")
+        if report_content is None and base_dir and report_rel:
             report_path = (base_dir / report_rel).resolve()
             if not report_path.is_file():
                 errors.append(f"r2_audit report file does not exist: {report_rel}")
             else:
                 try:
                     report_content = report_path.read_text(encoding="utf-8", errors="replace")
-                    if not report_content.strip():
-                        errors.append(f"r2_audit report file is empty: {report_rel}")
-                    else:
-                        # Check report contents against disposition claims
-                        if "DISPOSITION=BLOCKED" in report_content and r2_disposition == "PASS":
-                            errors.append(
-                                "r2_audit.disposition declared PASS but raw report specifies DISPOSITION=BLOCKED"
-                            )
-                        if "DISPOSITION=FAIL" in report_content and r2_disposition == "PASS":
-                            errors.append(
-                                "r2_audit.disposition declared PASS but raw report specifies DISPOSITION=FAIL"
-                            )
-                        if "AUDITOR-PREFLIGHT" in report_rel and r2_disposition == "PASS":
-                            errors.append(
-                                "preflight log cannot be substituted for an independent audit report"
-                            )
                 except OSError as error:
                     errors.append(f"unable to read r2_audit report file {report_rel}: {error}")
+
+        if report_content is not None:
+            if not report_content.strip():
+                errors.append(f"r2_audit report file is empty: {report_rel}")
+            else:
+                # Check report contents against disposition claims
+                if "DISPOSITION=BLOCKED" in report_content and r2_disposition == "PASS":
+                    errors.append(
+                        "r2_audit.disposition declared PASS but raw report specifies DISPOSITION=BLOCKED"
+                    )
+                if "DISPOSITION=FAIL" in report_content and r2_disposition == "PASS":
+                    errors.append(
+                        "r2_audit.disposition declared PASS but raw report specifies DISPOSITION=FAIL"
+                    )
 
         if findings_count > 0 and r2_disposition == "PASS":
             errors.append(

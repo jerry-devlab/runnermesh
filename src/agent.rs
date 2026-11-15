@@ -524,8 +524,44 @@ impl UserSessionProcessTransport for InertUserSessionProcessTransport {
 ///
 /// Sealed closed by default in production; only explicit Owner authorization
 /// opens the gate for bounded session process management.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionGrantKind {
+    Closed,
+    /// Forgeable; valid only for mock/synthetic qualification; refuses live OS process mutation.
+    SyntheticTestOnly,
+    /// Reserved for verified trusted Owner authorization (pub(crate) only).
+    TrustedLive,
+}
+
+/// Explicitly forgeable synthetic session test grant.
+/// Valid only for mock/synthetic qualification; NEVER authorizes live process execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntheticSessionTestGrant {
+    pub runner_key: String,
+    pub execution_identity_token: String,
+    pub transaction_id: String,
+    pub expires_at_epoch_seconds: u64,
+}
+
+impl SyntheticSessionTestGrant {
+    pub fn new(
+        runner_key: impl Into<String>,
+        execution_identity_token: impl Into<String>,
+        transaction_id: impl Into<String>,
+        expires_at_epoch_seconds: u64,
+    ) -> Self {
+        Self {
+            runner_key: runner_key.into(),
+            execution_identity_token: execution_identity_token.into(),
+            transaction_id: transaction_id.into(),
+            expires_at_epoch_seconds,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveSessionExecutionGate {
+    grant_kind: SessionGrantKind,
     bound_runner_key: Option<String>,
     bound_execution_identity_token: Option<String>,
     bound_transaction_id: Option<String>,
@@ -541,12 +577,25 @@ impl Default for LiveSessionExecutionGate {
 
 impl LiveSessionExecutionGate {
     pub const CLOSED: Self = Self {
+        grant_kind: SessionGrantKind::Closed,
         bound_runner_key: None,
         bound_execution_identity_token: None,
         bound_transaction_id: None,
         expires_at_epoch_seconds: 0,
         is_open: None,
     };
+
+    /// Opens a synthetic test gate. Never authorizes live process execution.
+    pub fn from_synthetic_test_grant(grant: &SyntheticSessionTestGrant) -> Self {
+        Self {
+            grant_kind: SessionGrantKind::SyntheticTestOnly,
+            bound_runner_key: Some(grant.runner_key.clone()),
+            bound_execution_identity_token: Some(grant.execution_identity_token.clone()),
+            bound_transaction_id: Some(grant.transaction_id.clone()),
+            expires_at_epoch_seconds: grant.expires_at_epoch_seconds,
+            is_open: Some(Arc::new(AtomicBool::new(true))),
+        }
+    }
 
     #[allow(dead_code)]
     pub(crate) fn mint_trusted_live(
@@ -556,6 +605,7 @@ impl LiveSessionExecutionGate {
         expires_at_epoch_seconds: u64,
     ) -> Self {
         Self {
+            grant_kind: SessionGrantKind::TrustedLive,
             bound_runner_key: Some(runner_key.to_string()),
             bound_execution_identity_token: Some(execution_identity_token.to_string()),
             bound_transaction_id: Some(transaction_id.to_string()),
@@ -568,24 +618,8 @@ impl LiveSessionExecutionGate {
         self.bound_transaction_id.as_deref()
     }
 
-    #[doc(hidden)]
-    pub fn open_for_test(runner_key: &str) -> Self {
-        Self::mint_trusted_live(runner_key, "test-identity", "test-tx", u64::MAX)
-    }
-
-    #[doc(hidden)]
-    pub fn mint_trusted_live_for_test(
-        runner_key: &str,
-        execution_identity_token: &str,
-        transaction_id: &str,
-        expires_at_epoch_seconds: u64,
-    ) -> Self {
-        Self::mint_trusted_live(
-            runner_key,
-            execution_identity_token,
-            transaction_id,
-            expires_at_epoch_seconds,
-        )
+    pub fn is_trusted_live(&self) -> bool {
+        self.grant_kind == SessionGrantKind::TrustedLive && self.is_open()
     }
 
     pub fn is_open(&self) -> bool {
@@ -617,6 +651,11 @@ impl LiveSessionExecutionGate {
             if bound_id != &record.execution_identity_ref.key {
                 return Err("session.identity-mismatch");
             }
+        } else {
+            return Err("session.identity-unbound");
+        }
+        if self.bound_transaction_id.is_none() || self.bound_transaction_id.as_deref() == Some("") {
+            return Err("session.transaction-unbound");
         }
         Ok(())
     }
@@ -631,7 +670,7 @@ impl LiveSessionExecutionGate {
 /// Gated authentic user-session process transport.
 ///
 /// Sealed closed by default (`LiveSessionExecutionGate::CLOSED`).
-/// When closed, all process mutation requests return an explicit error without
+/// When closed or synthetic, all live process mutation requests return an explicit error without
 /// spawning processes or modifying workstation state.
 #[derive(Clone, Debug, Default)]
 pub struct GatedUserSessionProcessTransport {
@@ -645,13 +684,14 @@ impl GatedUserSessionProcessTransport {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn with_gate(gate: LiveSessionExecutionGate) -> Self {
-        Self { gate }
+    pub fn from_synthetic_test_grant(grant: &SyntheticSessionTestGrant) -> Self {
+        Self {
+            gate: LiveSessionExecutionGate::from_synthetic_test_grant(grant),
+        }
     }
 
-    #[doc(hidden)]
-    pub fn with_test_gate(gate: LiveSessionExecutionGate) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_gate(gate: LiveSessionExecutionGate) -> Self {
         Self { gate }
     }
 
@@ -670,6 +710,10 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             .authorizes_runner(record, now)
             .map_err(|e| format!("session.transport-refused: {e}"))?;
 
+        if !self.gate.is_trusted_live() {
+            return Err("session.synthetic-gate-refuses-live-mutation".to_owned());
+        }
+
         let entrypoint = record.runner_home.join("run.cmd");
         if !entrypoint.is_file() {
             return Err("session.entrypoint-missing".to_owned());
@@ -677,6 +721,21 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
         if !crate::runner_observer::verify_path_and_ancestor_ownership(&record.runner_home) {
             return Err("session.runner-home-unverified".to_owned());
         }
+
+        // Pre-side-effect: observe session state and verify worker is not busy
+        let pre_obs = crate::windows_runner_discovery::observe_runner_processes_with_pids(
+            &record.runner_home,
+        );
+        if !pre_obs.evidence_complete {
+            return Err("session.incomplete-process-evidence".to_owned());
+        }
+        if pre_obs.worker_pid.is_some() || pre_obs.worker_present {
+            return Err("session.worker-busy".to_owned());
+        }
+        if pre_obs.listener_pid.is_some() || pre_obs.listener_present {
+            return Ok(true);
+        }
+
         #[cfg(windows)]
         {
             let mut cmd = std::process::Command::new("cmd.exe");
@@ -703,34 +762,63 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             .authorizes_runner(record, now)
             .map_err(|e| format!("session.transport-refused: {e}"))?;
 
+        if !self.gate.is_trusted_live() {
+            return Err("session.synthetic-gate-refuses-live-mutation".to_owned());
+        }
+
+        if !crate::runner_observer::verify_path_and_ancestor_ownership(&record.runner_home) {
+            return Err("session.runner-home-unverified".to_owned());
+        }
+
+        // Pre-side-effect: observe session state and verify worker is not busy
+        let pre_obs = crate::windows_runner_discovery::observe_runner_processes_with_pids(
+            &record.runner_home,
+        );
+        if !pre_obs.evidence_complete {
+            return Err("session.incomplete-process-evidence".to_owned());
+        }
+        if pre_obs.worker_pid.is_some() || pre_obs.worker_present {
+            return Err("session.worker-busy".to_owned());
+        }
+        let Some(pid) = pre_obs.listener_pid else {
+            return Ok(true);
+        };
+
         #[cfg(windows)]
         {
-            let discovered = crate::windows_runner_discovery::observe_runner_processes_with_pids(
-                &record.runner_home,
-            );
-            if let Some(pid) = discovered.listener_pid {
-                unsafe {
-                    use windows_sys::Win32::Foundation::CloseHandle;
-                    use windows_sys::Win32::System::Threading::{
-                        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-                    };
-                    let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-                    if !handle.is_null()
-                        && handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
-                    {
-                        let res = TerminateProcess(handle, 0);
-                        CloseHandle(handle);
-                        if res == 0 {
-                            return Err(format!("session.terminate-pid-{pid}-failed"));
-                        }
-                    }
+            unsafe {
+                use windows_sys::Win32::Foundation::{
+                    CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+                };
+                use windows_sys::Win32::System::Threading::{
+                    OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
+                };
+                const SYNCHRONIZE: u32 = 0x0010_0000;
+                let handle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, pid);
+                if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                    return Err(format!("session.open-pid-{pid}-failed"));
                 }
+                let res = TerminateProcess(handle, 0);
+                if res == 0 {
+                    CloseHandle(handle);
+                    return Err(format!("session.terminate-pid-{pid}-failed"));
+                }
+                let wait_res = WaitForSingleObject(handle, 5000);
+                CloseHandle(handle);
+                if wait_res != WAIT_OBJECT_0 {
+                    return Err(format!("session.terminate-pid-{pid}-timeout"));
+                }
+            }
+            // Strict post-action readback inside transport:
+            let post_obs = self.observe_session(record);
+            if post_obs != Some(DiscoveredLifecycle::Stopped) {
+                return Err("session.stop-readback-unconfirmed".to_owned());
             }
             Ok(true)
         }
         #[cfg(not(windows))]
         {
-            let _ = record;
+            let _ = pid;
             Ok(true)
         }
     }
@@ -905,13 +993,9 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
                 }
                 let stopped = self.transport.request_graceful_stop(record)?;
                 if stopped {
-                    if let Some(after) = self.transport.observe_session(record) {
-                        if matches!(
-                            after,
-                            DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
-                        ) {
-                            return Err("session.stop-readback-unconfirmed".to_owned());
-                        }
+                    let after = self.transport.observe_session(record);
+                    if after != Some(DiscoveredLifecycle::Stopped) {
+                        return Err("session.stop-readback-unconfirmed".to_owned());
                     }
                 }
                 Ok(stopped)
@@ -934,13 +1018,12 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
                 }
                 let launched = self.transport.launch_listener(record)?;
                 if launched {
-                    if let Some(after) = self.transport.observe_session(record) {
-                        if !matches!(
-                            after,
-                            DiscoveredLifecycle::Listening | DiscoveredLifecycle::Busy
-                        ) {
-                            return Err("session.launch-readback-unconfirmed".to_owned());
-                        }
+                    let after = self.transport.observe_session(record);
+                    if !matches!(
+                        after,
+                        Some(DiscoveredLifecycle::Listening) | Some(DiscoveredLifecycle::Busy)
+                    ) {
+                        return Err("session.launch-readback-unconfirmed".to_owned());
                     }
                 }
                 Ok(launched)

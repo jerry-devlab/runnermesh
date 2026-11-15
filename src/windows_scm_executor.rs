@@ -3248,10 +3248,12 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             };
         }
 
-        // 3. Worker Busy / Unknown check for StopService (fail-closed on active or ambiguous worker)
-        if matches!(request.action, PrivilegedScmAction::StopService)
+        // 3. Worker Busy / Unknown check (fail-closed on active or ambiguous worker)
+        if (matches!(request.action, PrivilegedScmAction::StopService)
             && (matches!(snapshot.observation.state, DiscoveredLifecycle::Busy)
-                || matches!(snapshot.observation.state, DiscoveredLifecycle::Unknown))
+                || matches!(snapshot.observation.state, DiscoveredLifecycle::Unknown)))
+            || (matches!(request.action, PrivilegedScmAction::StartService)
+                && matches!(snapshot.observation.state, DiscoveredLifecycle::Busy))
         {
             let reason = if matches!(snapshot.observation.state, DiscoveredLifecycle::Busy) {
                 ScmApiError::BusyWorker

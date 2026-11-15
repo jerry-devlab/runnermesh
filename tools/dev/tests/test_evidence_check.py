@@ -182,6 +182,109 @@ class TestEvidenceCheck(unittest.TestCase):
         self.assertFalse(result.is_pass())
         self.assertTrue(any("missing risk_diff=EMPTY or rationale" in e for e in result.errors))
 
+    def test_pure_memory_counterexample_1_truncated_or_mismatched_sha(self):
+        """Pure-memory counterexample 1: invalid, 39-character or mismatched SHA rejected without disk access."""
+        valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
+        data = {
+            "candidate_head": valid_head[:39],  # Truncated 39-char SHA
+            "package_artifacts": {
+                "archive": "archive.zip",
+                "archive_sha256": "0" * 64,
+                "archive_bytes": 1000,
+                "helper": "helper.exe",
+                "helper_sha256": "1" * 64,
+                "helper_bytes": 2000,
+            },
+            "r2_audit": {
+                "bound_head": valid_head,
+                "report": "report.md",
+                "disposition": "BLOCKED",
+            },
+        }
+        res = check_evidence_index(data, base_dir=None)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("must be a full 40-character" in e for e in res.errors))
+
+        # Also test candidate/bound head mismatch
+        data["candidate_head"] = valid_head
+        data["r2_audit"]["bound_head"] = "f" * 40
+        res = check_evidence_index(data, base_dir=None)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("does not match candidate_head" in e for e in res.errors))
+
+    def test_pure_memory_counterexample_2_blocked_report_falsely_claimed_as_pass(self):
+        """Pure-memory counterexample 2: report with DISPOSITION=BLOCKED claiming PASS rejected in memory."""
+        valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
+        data = {
+            "candidate_head": valid_head,
+            "r2_audit": {
+                "bound_head": valid_head,
+                "report": "report.md",
+                "raw_report_text": "DISPOSITION=BLOCKED\nFindings 1-6 open\n",
+                "disposition": "PASS",
+                "findings_count": 0,
+            },
+        }
+        res = check_evidence_index(data, base_dir=None)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("raw report specifies DISPOSITION=BLOCKED" in e for e in res.errors))
+
+    def test_pure_memory_counterexample_3_open_findings_falsely_declaring_prepared(self):
+        """Pure-memory counterexample 3: open findings falsely declaring SOURCE_SANDBOX_PREPARED rejected."""
+        valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
+        data = {
+            "candidate_head": valid_head,
+            "r2_audit": {
+                "bound_head": valid_head,
+                "report": "report.md",
+                "disposition": "BLOCKED",
+                "findings_count": 6,
+                "blocker_latched": True,
+            },
+            "source_and_sandbox_disposition": "SOURCE_SANDBOX_PREPARED",
+        }
+        res = check_evidence_index(data, base_dir=None)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("cannot declare SOURCE_SANDBOX_PREPARED" in e for e in res.errors))
+
+    def test_pure_memory_counterexample_4_preflight_substituted_for_audit_report(self):
+        """Pure-memory counterexample 4: preflight log substituted for independent audit report rejected."""
+        valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
+        data = {
+            "candidate_head": valid_head,
+            "r2_audit": {
+                "bound_head": valid_head,
+                "report": "evidence/R2-AUDITOR-PREFLIGHT-7107b0d.json",
+                "disposition": "PASS",
+                "findings_count": 0,
+            },
+        }
+        res = check_evidence_index(data, base_dir=None)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("preflight log cannot be substituted" in e for e in res.errors))
+
+    def test_pure_memory_positive_truthful_remediation_required(self):
+        """Pure-memory positive: truthful index with REMEDIATION_REQUIRED passes mechanical validation."""
+        valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
+        data = {
+            "candidate_head": valid_head,
+            "r2_audit": {
+                "bound_head": valid_head,
+                "report": "report.md",
+                "raw_report_text": "DISPOSITION=BLOCKED\n6 findings open\n",
+                "disposition": "BLOCKED",
+                "findings_count": 6,
+                "blocker_latched": True,
+            },
+            "source_and_sandbox_disposition": "REMEDIATION_REQUIRED",
+        }
+        res = check_evidence_index(data, base_dir=None)
+        self.assertTrue(res.is_pass(), msg=f"Errors: {res.errors}")
+        self.assertEqual(res.disposition, "PASS")
+        self.assertEqual(res.product_source_status, "REMEDIATION_REQUIRED")
+        self.assertEqual(res.product_security_review, "BLOCKED")
+        self.assertTrue(res.blocker_latched)
+
     def test_validate_sha_helpers(self):
         sha, err = validate_sha("a" * 40, "test")
         self.assertIsNone(err)
