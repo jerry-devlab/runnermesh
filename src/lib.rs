@@ -232,10 +232,12 @@ pub use windows_github::{
 };
 pub use windows_runner_discovery::{
     discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
-    observe_runner_processes_for_home, observe_runner_processes_from_images,
-    observe_runner_processes_with_pids, observe_runner_processes_with_pids_from_images,
-    runner_home_from_image, service_image_path_token, ConfiguredSessionDiscoverySource,
-    DiscoveredRunnerProcesses, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
+    observe_runner_processes_for_home, observe_runner_processes_for_service,
+    observe_runner_processes_from_images, observe_runner_processes_with_pids,
+    observe_runner_processes_with_pids_for_service, observe_runner_processes_with_pids_from_images,
+    observe_runner_processes_with_pids_from_images_with_identity, runner_home_from_image,
+    service_image_path_token, ConfiguredSessionDiscoverySource, DiscoveredRunnerProcesses,
+    PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
     opaque_image_token, reconcile_interrupted_scm_journal, runner_service_binary_path,

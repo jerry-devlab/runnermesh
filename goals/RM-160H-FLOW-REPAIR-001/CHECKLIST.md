@@ -28,15 +28,15 @@ AGY是唯一实现/Git写入者。目标3–5有效工时、上限6h。默认PRO
 ## F2 — 证据契约与负例
 - [x] F2-01 只读evidence_check模块完成，无CI/审查启动、Git写入或权限授予能力。
 - [x] F2-02 正确样本通过机械校验；输出明确不代表产品安全认证。
-- [x] F2-03 截短/不存在SHA、错误expected head、实际审查根不符均拒绝。
-- [x] F2-04 缺包、错摘要/字节数、错provenance或缺原始日志均拒绝。
-- [x] F2-05 exit 0但无有效报告，或报告FAIL/BLOCKED/PENDING，均不能提升为接受。
-- [x] F2-06 Findings 1–3局部PASS不能提升为C0–C6；范围不明记UNPROVEN。
+- [x] F2-03 截短/不存在SHA、错误expected head、实际审查根不符均拒绝（覆盖旧候选与expected head不符反例）。
+- [x] F2-04 缺包（ZIP缺失反例）、错摘要/字节数、错provenance（包内PACKAGE-MANIFEST.json commit比对）或缺原始日志均拒绝。
+- [x] F2-05 exit 0但无有效报告，或报告FAIL/BLOCKED/PENDING/DIAGNOSTIC_ONLY，均不能提升为接受。
+- [x] F2-06 Findings 1–3局部PASS或旧局部报告不能提升为C0–C6；范围不明记UNPROVEN。
 - [x] F2-07 OPEN活动缺口存在时，SOURCE_SANDBOX_PREPARED声明被拒绝。
 - [x] F2-08 REUSED缺来源/范围/空风险差异依据时拒绝；诊断不能冒充独立接受。
 - [x] F2-09 仅角色标签/预检PASS不能作为独立R2凭证；工具不对元数据真实性或代码安全作认证。
 - [x] F2-10 当前真实产品索引仍显示未就绪；预期拒绝演练本身可通过，但不能把产品改成PASS。
-- [x] F2-11 工具及错误样本测试通过（13/13 passing in test_evidence_check.py）；无空测试。
+- [x] F2-11 工具及4个原反例测试通过（21/21 passing in test_evidence_check.py, 102/102 tools/dev）；无空测试。
 
 ## F3 — 执行、预检与有界等待
 - [x] F3-01 复用现有runner、wait和计时功能；任务有身份、命令、日志、起止、退出状态及总截止。

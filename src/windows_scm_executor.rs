@@ -2821,14 +2821,22 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
                 .or_else(|| Path::new(p).parent().map(Path::to_path_buf))
         });
         if let Some(home) = runner_home {
+            let service_sid = resolve_service_sid(&start_name, status.dwProcessId);
             let (listener_present, worker_present, obs_ok) =
-                crate::windows_runner_discovery::observe_runner_processes_for_home(&home);
+                crate::windows_runner_discovery::observe_runner_processes_for_service(
+                    &home,
+                    service_sid.as_deref(),
+                );
             if worker_present {
                 state = DiscoveredLifecycle::Busy;
             } else if !obs_ok {
                 state = DiscoveredLifecycle::Unknown;
             } else if !listener_present && status.dwProcessId == 0 {
                 state = DiscoveredLifecycle::Stopped;
+            } else if listener_present
+                || status.dwCurrentState == windows_sys::Win32::System::Services::SERVICE_RUNNING
+            {
+                state = DiscoveredLifecycle::Listening;
             }
         }
 
@@ -3002,6 +3010,135 @@ fn map_start_type(start_type: u32) -> ServiceStartMode {
         SERVICE_DISABLED => ServiceStartMode::Disabled,
         _ => ServiceStartMode::Unknown,
     }
+}
+
+#[cfg(windows)]
+fn resolve_service_sid(start_name: &str, service_pid: u32) -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, LocalFree, HANDLE},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, LookupAccountNameW,
+            TokenUser, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+        },
+        System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    struct OwnedHandle(HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    // 1. If service process is actively running, query its live token directly for exact SID
+    if service_pid != 0 {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, service_pid) };
+        if !process.is_null() {
+            let process = OwnedHandle(process);
+            let mut token = std::ptr::null_mut();
+            if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } != 0 {
+                let token = OwnedHandle(token);
+                let mut required = 0u32;
+                unsafe {
+                    GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut required);
+                }
+                if required > 0 {
+                    let unit = std::mem::size_of::<usize>();
+                    let mut buffer = vec![0_usize; (required as usize).div_ceil(unit)];
+                    if unsafe {
+                        GetTokenInformation(
+                            token.0,
+                            TokenUser,
+                            buffer.as_mut_ptr().cast(),
+                            required,
+                            &mut required,
+                        )
+                    } != 0
+                    {
+                        let sid = unsafe { (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+                        let mut sid_text = std::ptr::null_mut();
+                        if unsafe { ConvertSidToStringSidW(sid, &mut sid_text) } != 0 {
+                            let text = unsafe {
+                                let mut len = 0;
+                                while *sid_text.add(len) != 0 {
+                                    len += 1;
+                                }
+                                String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, len))
+                            };
+                            unsafe { LocalFree(sid_text.cast()) };
+                            return Some(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Resolve configured start_name
+    let trimmed = start_name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.is_empty()
+        || lower == "localsystem"
+        || lower == ".\\localsystem"
+        || lower == "nt authority\\system"
+    {
+        return Some("S-1-5-18".to_string());
+    }
+    if lower == "localservice" || lower == "nt authority\\localservice" {
+        return Some("S-1-5-19".to_string());
+    }
+    if lower == "networkservice" || lower == "nt authority\\networkservice" {
+        return Some("S-1-5-20".to_string());
+    }
+
+    // 3. Fallback: LookupAccountNameW for domain or local user account
+    let wide_name: Vec<u16> = trimmed.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sid_len = 0u32;
+    let mut domain_len = 0u32;
+    let mut use_type: SID_NAME_USE = 0;
+    unsafe {
+        LookupAccountNameW(
+            std::ptr::null(),
+            wide_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut sid_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut use_type,
+        );
+    }
+    if sid_len == 0 {
+        return None;
+    }
+    let mut sid_buf = vec![0u8; sid_len as usize];
+    let mut domain_buf = vec![0u16; domain_len as usize];
+    let ok = unsafe {
+        LookupAccountNameW(
+            std::ptr::null(),
+            wide_name.as_ptr(),
+            sid_buf.as_mut_ptr().cast(),
+            &mut sid_len,
+            domain_buf.as_mut_ptr(),
+            &mut domain_len,
+            &mut use_type,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let mut sid_text = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid_buf.as_mut_ptr().cast(), &mut sid_text) } == 0 {
+        return None;
+    }
+    let text = unsafe {
+        let mut len = 0;
+        while *sid_text.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, len))
+    };
+    unsafe { LocalFree(sid_text.cast()) };
+    Some(text)
 }
 
 #[cfg(windows)]

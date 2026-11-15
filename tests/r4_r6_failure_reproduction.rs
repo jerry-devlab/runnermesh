@@ -1959,6 +1959,7 @@ fn regression_f01_inaccessible_worker_process_evidence_fails_closed() {
         executable_name: "Runner.Worker.exe".to_string(),
         executable_path: None,
         user_matches_current: None,
+        user_sid: None,
     }];
 
     // 2. observe_runner_processes_from_images must NOT silently drop it!
@@ -2049,19 +2050,21 @@ fn regression_finding1_runner_ownership_verification_fails_closed() {
     std::fs::write(&worker_exe, b"worker").unwrap();
 
     // 1. Process images where user_matches_current is None or Some(false)
-    // user_matches_current == Some(false) is foreign: must be ignored
+    // Foreign worker under runner_home must fail closed: worker_present = true, evidence_complete = false
     let images_foreign = vec![
         runnermesh::ProcessImage {
             process_id: 111,
             executable_name: "Runner.Listener.exe".to_string(),
             executable_path: Some(listener_exe.clone()),
             user_matches_current: Some(false),
+            user_sid: None,
         },
         runnermesh::ProcessImage {
             process_id: 112,
             executable_name: "Runner.Worker.exe".to_string(),
             executable_path: Some(worker_exe.clone()),
             user_matches_current: Some(false),
+            user_sid: None,
         },
     ];
     let (listener_f, worker_f, complete_f) =
@@ -2071,12 +2074,12 @@ fn regression_finding1_runner_ownership_verification_fails_closed() {
         "Foreign listener must not be attributed to session"
     );
     assert!(
-        !worker_f,
-        "Foreign worker must not be attributed to session"
+        worker_f,
+        "Foreign worker under runner home must fail closed as worker present"
     );
     assert!(
-        complete_f,
-        "Complete inspection of foreign processes succeeds"
+        !complete_f,
+        "Foreign process under runner home must mark evidence as incomplete"
     );
 
     // user_matches_current == None is ambiguous: must fail closed (worker = true, evidence_complete = false)
@@ -2085,6 +2088,7 @@ fn regression_finding1_runner_ownership_verification_fails_closed() {
         executable_name: "Runner.Worker.exe".to_string(),
         executable_path: Some(worker_exe.clone()),
         user_matches_current: None,
+        user_sid: None,
     }];
     let (listener_a, worker_a, complete_a) =
         runnermesh::observe_runner_processes_from_images(&runner_home, &images_ambiguous);
@@ -2114,6 +2118,178 @@ fn regression_finding1_runner_ownership_verification_fails_closed() {
         runnermesh::paths_have_matching_owner(&runner_home, &work_root),
         Ok(true),
         "runner_home and work_root created by same user must have matching owners"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn regression_finding_r2_a_01_service_account_worker_prevents_stop_with_zero_calls() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "runnermesh-repro-r2a01-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let runner_home = temp_dir.join("r2a01-home");
+    std::fs::create_dir_all(&runner_home).unwrap();
+    let bin_dir = runner_home.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let worker_exe = bin_dir.join("Runner.Worker.exe");
+    std::fs::write(&worker_exe, b"worker").unwrap();
+
+    let service_name = "actions.runner.r2a01-test";
+    let service_sid = "S-1-5-18"; // Well-known LocalSystem SID
+    let image_token = "r2a01-img".to_string();
+    let ident_token = "r2a01-id".to_string();
+
+    // 1. Worker process running under the service account (user_sid = S-1-5-18, user_matches_current = Some(false))
+    let images_svc_worker = vec![runnermesh::ProcessImage {
+        process_id: 202,
+        executable_name: "Runner.Worker.exe".to_string(),
+        executable_path: Some(worker_exe.clone()),
+        user_matches_current: Some(false),
+        user_sid: Some(service_sid.to_string()),
+    }];
+
+    // Discovery with service identity must detect the active worker
+    let proc_result = runnermesh::observe_runner_processes_with_pids_from_images_with_identity(
+        &runner_home,
+        &images_svc_worker,
+        Some(service_sid),
+    );
+    assert!(
+        proc_result.worker_present,
+        "Worker running under service account must be attributed as worker_present"
+    );
+    assert_eq!(
+        proc_result.worker_pid,
+        Some(202),
+        "Worker PID must be tracked"
+    );
+    assert!(
+        proc_result.evidence_complete,
+        "Evidence under matching service account identity must be complete"
+    );
+
+    // 2. Mock SCM service configured with Busy worker lifecycle state
+    let mock_scm = MockScmBackend::new();
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: service_name.to_string(),
+            state: DiscoveredLifecycle::Busy,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: true,
+        image_token: image_token.clone(),
+        execution_identity_token: ident_token.clone(),
+    });
+
+    let gate = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        service_name,
+        &image_token,
+        false,
+        true, // allow_stop
+        false,
+    ))
+    .unwrap();
+    let helper = PrivilegedScmHelper::new(mock_scm.clone(), gate);
+
+    let stop_req = runnermesh::PrivilegedScmRequest {
+        action: runnermesh::PrivilegedScmAction::StopService,
+        service_name: service_name.to_string(),
+        expected_image_token: image_token.clone(),
+        expected_execution_identity_token: ident_token.clone(),
+        target_host_token: String::new(),
+        candidate_commit: String::new(),
+        transaction_id: "tx-r2a01-1".to_string(),
+    };
+
+    let report = helper.dispatch(&stop_req);
+    assert!(
+        !report.applied,
+        "StopService must be refused when service has active worker"
+    );
+    assert_eq!(
+        report.refusal_reason,
+        Some(ScmApiError::BusyWorker.as_str().to_string()),
+        "Refusal reason must be BusyWorker"
+    );
+    assert_eq!(
+        mock_scm.stop_calls(),
+        0,
+        "Refused StopService must have strictly ZERO stop calls on SCM backend"
+    );
+
+    // 3. Worker process running under a different / foreign service account (e.g. S-1-5-99)
+    let images_foreign_worker = vec![runnermesh::ProcessImage {
+        process_id: 303,
+        executable_name: "Runner.Worker.exe".to_string(),
+        executable_path: Some(worker_exe.clone()),
+        user_matches_current: Some(false),
+        user_sid: Some("S-1-5-99".to_string()),
+    }];
+
+    // Discovery with different service identity must NOT degrade to idle:
+    // it must fail closed (worker_present = true, evidence_complete = false)
+    let foreign_proc_result =
+        runnermesh::observe_runner_processes_with_pids_from_images_with_identity(
+            &runner_home,
+            &images_foreign_worker,
+            Some(service_sid),
+        );
+    assert!(
+        foreign_proc_result.worker_present,
+        "Foreign worker under runner home must fail closed as worker_present"
+    );
+    assert!(
+        !foreign_proc_result.evidence_complete,
+        "Foreign worker must mark evidence as incomplete"
+    );
+
+    // When SCM observation receives incomplete/foreign evidence, state is Unknown
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: service_name.to_string(),
+            state: DiscoveredLifecycle::Unknown,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: image_token.clone(),
+        execution_identity_token: ident_token.clone(),
+    });
+
+    let stop_req2 = runnermesh::PrivilegedScmRequest {
+        action: runnermesh::PrivilegedScmAction::StopService,
+        service_name: service_name.to_string(),
+        expected_image_token: image_token,
+        expected_execution_identity_token: ident_token,
+        target_host_token: String::new(),
+        candidate_commit: String::new(),
+        transaction_id: "tx-r2a01-2".to_string(),
+    };
+
+    let report2 = helper.dispatch(&stop_req2);
+    assert!(
+        !report2.applied,
+        "StopService must be refused when service lifecycle state is Unknown"
+    );
+    assert_eq!(
+        report2.refusal_reason,
+        Some(ScmApiError::StateUnknown.as_str().to_string()),
+        "Refusal reason must be StateUnknown"
+    );
+    assert_eq!(
+        mock_scm.stop_calls(),
+        0,
+        "Stop calls must remain strictly ZERO after foreign worker refusal"
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);

@@ -113,6 +113,7 @@ def check_evidence_index(
     *,
     base_dir: Path | None = None,
     repo_root: Path | None = None,
+    expected_head: str | None = None,
 ) -> EvidenceCheckResult:
     """Mechanically validates an evidence index mapping.
 
@@ -132,6 +133,16 @@ def check_evidence_index(
         if not check_git_commit_exists(candidate_head, repo_root):
             errors.append(f"candidate_head {candidate_head} does not exist in local git repository")
 
+    # Expected head validation
+    if expected_head is not None:
+        expected_clean, exp_err = validate_sha(expected_head, "expected_head")
+        if exp_err:
+            errors.append(exp_err)
+        elif candidate_head and candidate_head != expected_clean:
+            errors.append(
+                f"candidate_head {candidate_head} does not match expected_head {expected_clean}"
+            )
+
     # Other required coordinate SHAs if present
     for sha_field in ("goal_start_main", "remote_main", "pr_base_head", "g15r_rc"):
         if sha_field in data:
@@ -150,6 +161,7 @@ def check_evidence_index(
         if not isinstance(archive_bytes, int) or archive_bytes <= 0:
             errors.append(f"package_artifacts.archive_bytes must be a positive integer (got: {archive_bytes!r})")
 
+        helper_name = pkg.get("helper")
         helper_sha, err = validate_sha256(pkg.get("helper_sha256"), "package_artifacts.helper_sha256")
         if err:
             errors.append(err)
@@ -172,14 +184,16 @@ def check_evidence_index(
         elif provenance is not None:
             errors.append("package_artifacts.provenance must be a mapping")
 
-        # Verify physical files if base_dir is given
+        # Verify physical archive file if base_dir is given
         if base_dir and archive_name:
             candidates_to_check = [
                 base_dir / str(archive_name),
                 base_dir / "artifacts" / "lrm-rc" / str(archive_name),
             ]
             found_archive = next((p for p in candidates_to_check if p.is_file()), None)
-            if found_archive:
+            if not found_archive:
+                errors.append(f"archive file does not exist: {archive_name}")
+            else:
                 actual_bytes = found_archive.stat().st_size
                 if isinstance(archive_bytes, int) and actual_bytes != archive_bytes:
                     errors.append(
@@ -189,6 +203,58 @@ def check_evidence_index(
                 if archive_sha and actual_hash != archive_sha:
                     errors.append(
                         f"archive SHA256 mismatch: declared {archive_sha}, actual file is {actual_hash}"
+                    )
+
+                # Verify provenance inside package archive (antitampering against reused old ZIP)
+                try:
+                    import zipfile
+                    if zipfile.is_zipfile(found_archive):
+                        with zipfile.ZipFile(found_archive, "r") as zf:
+                            manifest_name = "PACKAGE-MANIFEST.json"
+                            if manifest_name in zf.namelist():
+                                manifest_bytes = zf.read(manifest_name)
+                                manifest_data = json.loads(manifest_bytes.decode("utf-8"))
+                                inner_prov = manifest_data.get("provenance", {})
+                                inner_commit = inner_prov.get("commit")
+                                if inner_commit:
+                                    inner_commit_clean, prov_err = validate_sha(
+                                        inner_commit, f"{manifest_name}.provenance.commit"
+                                    )
+                                    if prov_err:
+                                        errors.append(prov_err)
+                                    elif candidate_head and inner_commit_clean != candidate_head:
+                                        errors.append(
+                                            f"archive PACKAGE-MANIFEST.json commit {inner_commit_clean} does not match candidate_head {candidate_head}"
+                                        )
+                            else:
+                                errors.append(f"archive {archive_name} missing {manifest_name}")
+                except Exception as ex:
+                    errors.append(f"unable to inspect archive {archive_name}: {ex}")
+
+        # Verify physical helper executable if base_dir is given
+        if base_dir and helper_name:
+            helper_candidates = [
+                base_dir / str(helper_name),
+                base_dir / "artifacts" / "lrm-rc" / str(helper_name),
+            ]
+            if repo_root:
+                helper_candidates.extend([
+                    repo_root / "target" / "x86_64-pc-windows-msvc" / "release" / str(helper_name),
+                    repo_root / "target" / "release" / str(helper_name),
+                ])
+            found_helper = next((p for p in helper_candidates if p.is_file()), None)
+            if not found_helper:
+                errors.append(f"helper file does not exist: {helper_name}")
+            else:
+                actual_helper_bytes = found_helper.stat().st_size
+                if isinstance(helper_bytes, int) and actual_helper_bytes != helper_bytes:
+                    errors.append(
+                        f"helper byte size mismatch: declared {helper_bytes}, actual file is {actual_helper_bytes}"
+                    )
+                actual_helper_hash = compute_file_sha256(found_helper)
+                if helper_sha and actual_helper_hash != helper_sha:
+                    errors.append(
+                        f"helper SHA256 mismatch: declared {helper_sha}, actual file is {actual_helper_hash}"
                     )
 
     elif pkg is not None:
@@ -236,6 +302,24 @@ def check_evidence_index(
             if not report_content.strip():
                 errors.append(f"r2_audit report file is empty: {report_rel}")
             else:
+                # Check candidate_head is mentioned in report
+                if candidate_head and candidate_head not in report_content:
+                    errors.append(
+                        f"r2_audit report does not reference candidate_head {candidate_head}"
+                    )
+
+                # Check report target/candidate SHA if explicitly emitted
+                report_head_match = re.search(
+                    r"(?:CANDIDATE_HEAD|Audit Target|EXACT_HEAD)[^0-9a-fA-F\n]*([0-9a-fA-F]{40})",
+                    report_content,
+                )
+                if report_head_match:
+                    report_head = report_head_match.group(1).lower()
+                    if candidate_head and report_head != candidate_head:
+                        errors.append(
+                            f"r2_audit report targets commit {report_head} but candidate_head is {candidate_head}"
+                        )
+
                 # Check report contents against disposition claims
                 if "DISPOSITION=BLOCKED" in report_content and r2_disposition == "PASS":
                     errors.append(
@@ -244,6 +328,10 @@ def check_evidence_index(
                 if "DISPOSITION=FAIL" in report_content and r2_disposition == "PASS":
                     errors.append(
                         "r2_audit.disposition declared PASS but raw report specifies DISPOSITION=FAIL"
+                    )
+                if "EVIDENCE_SCOPE=DIAGNOSTIC_ONLY" in report_content and r2_disposition == "PASS":
+                    errors.append(
+                        "r2_audit report is diagnostic-only and cannot substantiate formal PASS"
                     )
 
         if findings_count > 0 and r2_disposition == "PASS":
@@ -313,6 +401,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path(".").resolve(),
         help="Path to repository root.",
     )
+    parser.add_argument(
+        "--expected-head",
+        type=str,
+        default=None,
+        help="Expected candidate HEAD commit SHA.",
+    )
     args = parser.parse_args(argv)
 
     index_path = args.index
@@ -335,7 +429,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     base_dir = index_path.parent.parent if index_path.parent.name == "evidence" else index_path.parent
-    result = check_evidence_index(data, base_dir=base_dir, repo_root=args.repo_root)
+    result = check_evidence_index(
+        data,
+        base_dir=base_dir,
+        repo_root=args.repo_root,
+        expected_head=args.expected_head,
+    )
     result.emit_summary()
     return 0 if result.is_pass() else 1
 

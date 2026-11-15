@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from tools.dev.evidence_check import (
@@ -15,11 +16,23 @@ class TestEvidenceCheck(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        self.valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
 
-        # Create dummy package artifacts
+        # Create authentic ZIP package artifact containing PACKAGE-MANIFEST.json
         self.archive_path = self.root / "runnermesh-0.2.0-rc.1-windows-x64.zip"
-        self.archive_path.write_bytes(b"dummy archive contents for testing 12345")
-        self.archive_bytes = len(self.archive_path.read_bytes())
+        with zipfile.ZipFile(self.archive_path, "w") as zf:
+            manifest_json = json.dumps({
+                "schema_version": 1,
+                "provenance": {
+                    "version": "0.2.0-rc.1",
+                    "commit": self.valid_head,
+                    "channel": "rc",
+                    "target": "x86_64-pc-windows-msvc",
+                },
+                "files": {},
+            })
+            zf.writestr("PACKAGE-MANIFEST.json", manifest_json)
+        self.archive_bytes = self.archive_path.stat().st_size
         self.archive_sha256 = compute_file_sha256(self.archive_path)
 
         self.helper_path = self.root / "runnermesh-package.exe"
@@ -27,11 +40,12 @@ class TestEvidenceCheck(unittest.TestCase):
         self.helper_bytes = len(self.helper_path.read_bytes())
         self.helper_sha256 = compute_file_sha256(self.helper_path)
 
-        self.valid_head = "7107b0df19f89e02574a2ecfa84118cab03d7f07"
-
-        # Create valid audit report with BLOCKED status (truthful current state)
+        # Create valid audit report referencing candidate_head with BLOCKED status (truthful current state)
         self.report_path = self.root / "report.md"
-        self.report_path.write_text("DISPOSITION=BLOCKED\n6 findings open\n", encoding="utf-8")
+        self.report_path.write_text(
+            f"DISPOSITION=BLOCKED\nCANDIDATE_HEAD={self.valid_head}\n6 findings open\n",
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -81,7 +95,10 @@ class TestEvidenceCheck(unittest.TestCase):
     def test_positive_fully_cleared_prepared_index(self):
         # Create passing report
         pass_report = self.root / "pass_report.md"
-        pass_report.write_text("DISPOSITION=PASS\n0 findings open\n", encoding="utf-8")
+        pass_report.write_text(
+            f"DISPOSITION=PASS\nCANDIDATE_HEAD={self.valid_head}\n0 findings open\n",
+            encoding="utf-8",
+        )
 
         index_data = self._base_valid_index()
         index_data["r2_audit"]["report"] = "pass_report.md"
@@ -271,7 +288,7 @@ class TestEvidenceCheck(unittest.TestCase):
             "r2_audit": {
                 "bound_head": valid_head,
                 "report": "report.md",
-                "raw_report_text": "DISPOSITION=BLOCKED\n6 findings open\n",
+                "raw_report_text": f"DISPOSITION=BLOCKED\nCANDIDATE_HEAD={valid_head}\n6 findings open\n",
                 "disposition": "BLOCKED",
                 "findings_count": 6,
                 "blocker_latched": True,
@@ -284,6 +301,122 @@ class TestEvidenceCheck(unittest.TestCase):
         self.assertEqual(res.product_source_status, "REMEDIATION_REQUIRED")
         self.assertEqual(res.product_security_review, "BLOCKED")
         self.assertTrue(res.blocker_latched)
+
+    def test_reproduction_counterexample_1_old_candidate_differs_from_expected_head(self):
+        """Counterexample 1: Old candidate SHA differing from expected head fails closed."""
+        index_data = self._base_valid_index()
+        # Declare candidate as old head, but specify expected_head as current head
+        expected_head = "a7354d888aa135da88b122b8d74dbc8591813f12"
+        res = check_evidence_index(index_data, base_dir=self.root, expected_head=expected_head)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("does not match expected_head" in e for e in res.errors),
+            msg=f"Expected expected_head mismatch error, got: {res.errors}",
+        )
+
+    def test_reproduction_counterexample_2_zip_missing_on_disk_fails_closed(self):
+        """Counterexample 2: Physical ZIP archive missing on disk fails closed."""
+        index_data = self._base_valid_index()
+        index_data["package_artifacts"]["archive"] = "missing-package-archive.zip"
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("archive file does not exist: missing-package-archive.zip" in e for e in res.errors),
+            msg=f"Expected missing archive error, got: {res.errors}",
+        )
+
+    def test_reproduction_counterexample_3_helper_digest_or_size_mismatch_fails_closed(self):
+        """Counterexample 3: Helper executable missing, byte size mismatch, or SHA256 digest error fails closed."""
+        # 3a: Helper file missing on disk
+        index_data = self._base_valid_index()
+        index_data["package_artifacts"]["helper"] = "nonexistent-helper.exe"
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("helper file does not exist: nonexistent-helper.exe" in e for e in res.errors),
+            msg=f"Expected missing helper error, got: {res.errors}",
+        )
+
+        # 3b: Helper file byte size mismatch
+        index_data = self._base_valid_index()
+        index_data["package_artifacts"]["helper_bytes"] = self.helper_bytes + 500
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("helper byte size mismatch" in e for e in res.errors),
+            msg=f"Expected helper byte mismatch, got: {res.errors}",
+        )
+
+        # 3c: Helper file SHA256 digest mismatch
+        index_data = self._base_valid_index()
+        index_data["package_artifacts"]["helper_sha256"] = "f" * 64
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("helper SHA256 mismatch" in e for e in res.errors),
+            msg=f"Expected helper SHA mismatch, got: {res.errors}",
+        )
+
+    def test_reproduction_counterexample_4_spoofed_package_provenance_and_old_partial_report_fails_closed(self):
+        """Counterexample 4: Spoofed provenance inside package archive or old partial report fails closed."""
+        # 4a: Archive contains PACKAGE-MANIFEST.json with old commit SHA
+        spoofed_archive = self.root / "spoofed-runnermesh.zip"
+        old_commit = "fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab"
+        with zipfile.ZipFile(spoofed_archive, "w") as zf:
+            zf.writestr(
+                "PACKAGE-MANIFEST.json",
+                json.dumps({
+                    "schema_version": 1,
+                    "provenance": {
+                        "version": "0.2.0-rc.1",
+                        "commit": old_commit,
+                        "channel": "rc",
+                        "target": "x86_64-pc-windows-msvc",
+                    },
+                }),
+            )
+        index_data = self._base_valid_index()
+        index_data["package_artifacts"]["archive"] = spoofed_archive.name
+        index_data["package_artifacts"]["archive_bytes"] = spoofed_archive.stat().st_size
+        index_data["package_artifacts"]["archive_sha256"] = compute_file_sha256(spoofed_archive)
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any(f"archive PACKAGE-MANIFEST.json commit {old_commit} does not match candidate_head" in e for e in res.errors),
+            msg=f"Expected inner archive provenance commit mismatch, got: {res.errors}",
+        )
+
+        # 4b: Old partial report targeting different commit SHA
+        old_report = self.root / "old_report.md"
+        old_report.write_text(
+            f"DISPOSITION=BLOCKED\nCANDIDATE_HEAD={old_commit}\nFindings 1-3 only\n",
+            encoding="utf-8",
+        )
+        index_data = self._base_valid_index()
+        index_data["r2_audit"]["report"] = old_report.name
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("targets commit" in e and "does not reference candidate_head" in e or "targets commit" in e for e in res.errors),
+            msg=f"Expected report target commit mismatch, got: {res.errors}",
+        )
+
+        # 4c: Diagnostic-only report claiming formal PASS
+        diag_report = self.root / "diag_report.md"
+        diag_report.write_text(
+            f"DISPOSITION=PASS\nCANDIDATE_HEAD={self.valid_head}\nEVIDENCE_SCOPE=DIAGNOSTIC_ONLY\n",
+            encoding="utf-8",
+        )
+        index_data = self._base_valid_index()
+        index_data["r2_audit"]["report"] = diag_report.name
+        index_data["r2_audit"]["disposition"] = "PASS"
+        index_data["r2_audit"]["findings_count"] = 0
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("diagnostic-only and cannot substantiate formal PASS" in e for e in res.errors),
+            msg=f"Expected diagnostic report claiming PASS error, got: {res.errors}",
+        )
 
     def test_validate_sha_helpers(self):
         sha, err = validate_sha("a" * 40, "test")

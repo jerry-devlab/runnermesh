@@ -22,6 +22,8 @@ pub struct ProcessImage {
     /// Collected from the same stable process handle as `executable_path` so
     /// PID reuse cannot splice path and identity evidence.
     pub user_matches_current: Option<bool>,
+    /// Process user SID string (e.g. "S-1-5-18") when accessible.
+    pub user_sid: Option<String>,
 }
 
 /// Returns executable names from one local process snapshot without launching
@@ -89,8 +91,8 @@ pub(crate) fn executable_images() -> Result<Vec<ProcessImage>, ProcessSnapshotEr
             let executable_name = String::from_utf16_lossy(&entry.szExeFile[..name_end]);
             let raw_process =
                 unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID) };
-            let (executable_path, user_matches_current) = if raw_process.is_null() {
-                (None, None)
+            let (executable_path, user_matches_current, user_sid) = if raw_process.is_null() {
+                (None, None, None)
             } else {
                 let process = SnapshotHandle(raw_process);
                 let mut buffer = vec![0u16; 32_768];
@@ -110,14 +112,15 @@ pub(crate) fn executable_images() -> Result<Vec<ProcessImage>, ProcessSnapshotEr
                         &buffer[..length as usize],
                     )))
                 };
-                let user_matches_current = process_handle_user_matches_current(process.0).ok();
-                (executable_path, user_matches_current)
+                let (user_matches_current, user_sid) = process_handle_user_info(process.0);
+                (executable_path, user_matches_current, user_sid)
             };
             images.push(ProcessImage {
                 process_id: entry.th32ProcessID,
                 executable_name,
                 executable_path,
                 user_matches_current,
+                user_sid,
             });
         }
 
@@ -159,12 +162,15 @@ pub(crate) fn process_user_matches_current(process_id: u32) -> Result<bool, Proc
 }
 
 #[cfg(windows)]
-fn process_handle_user_matches_current(
+fn process_handle_user_info(
     process: windows_sys::Win32::Foundation::HANDLE,
-) -> Result<bool, ProcessSnapshotError> {
+) -> (Option<bool>, Option<String>) {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
+        Foundation::{CloseHandle, LocalFree, HANDLE},
+        Security::{
+            Authorization::ConvertSidToStringSidW, EqualSid, GetTokenInformation, TokenUser,
+            TOKEN_QUERY, TOKEN_USER,
+        },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
@@ -202,19 +208,53 @@ fn process_handle_user_matches_current(
 
     let mut process_token = std::ptr::null_mut();
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut process_token) } == 0 {
-        return Err(ProcessSnapshotError::Unavailable);
+        return (None, None);
     }
     let process_token = OwnedHandle(process_token);
-    let mut current_token = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current_token) } == 0 {
-        return Err(ProcessSnapshotError::Failed);
-    }
-    let current_token = OwnedHandle(current_token);
-    let process_user = token_user_buffer(process_token.0)?;
-    let current_user = token_user_buffer(current_token.0)?;
+    let Ok(process_user) = token_user_buffer(process_token.0) else {
+        return (None, None);
+    };
     let process_sid = unsafe { (*(process_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
-    let current_sid = unsafe { (*(current_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
-    Ok(unsafe { EqualSid(process_sid, current_sid) } != 0)
+
+    let mut sid_text = std::ptr::null_mut();
+    let user_sid = if unsafe { ConvertSidToStringSidW(process_sid, &mut sid_text) } != 0 {
+        let text = unsafe {
+            let mut len = 0;
+            while *sid_text.add(len) != 0 {
+                len += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, len))
+        };
+        unsafe { LocalFree(sid_text.cast()) };
+        Some(text)
+    } else {
+        None
+    };
+
+    let mut current_token = std::ptr::null_mut();
+    let user_matches_current =
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current_token) } != 0 {
+            let current_token = OwnedHandle(current_token);
+            if let Ok(current_user) = token_user_buffer(current_token.0) {
+                let current_sid =
+                    unsafe { (*(current_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+                Some(unsafe { EqualSid(process_sid, current_sid) } != 0)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    (user_matches_current, user_sid)
+}
+
+#[cfg(all(windows, test))]
+fn process_handle_user_matches_current(
+    process: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<bool, ProcessSnapshotError> {
+    let (matches, _) = process_handle_user_info(process);
+    matches.ok_or(ProcessSnapshotError::Unavailable)
 }
 
 /// Resolves the installed binding's opaque execution-identity reference

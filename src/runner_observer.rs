@@ -791,12 +791,14 @@ mod tests {
                 executable_name: "Runner.Listener.exe".to_owned(),
                 executable_path: Some(unrelated.join("bin").join("Runner.Listener.exe")),
                 user_matches_current: Some(true),
+                user_sid: None,
             },
             crate::process_snapshot::ProcessImage {
                 process_id: 11,
                 executable_name: "Runner.Worker.exe".to_owned(),
                 executable_path: Some(unrelated.join("bin").join("Runner.Worker.exe")),
                 user_matches_current: Some(true),
+                user_sid: None,
             },
         ];
 

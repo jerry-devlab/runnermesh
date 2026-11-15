@@ -281,6 +281,14 @@ pub fn observe_runner_processes_with_pids_from_images(
     runner_home: &Path,
     images: &[crate::process_snapshot::ProcessImage],
 ) -> DiscoveredRunnerProcesses {
+    observe_runner_processes_with_pids_from_images_with_identity(runner_home, images, None)
+}
+
+pub fn observe_runner_processes_with_pids_from_images_with_identity(
+    runner_home: &Path,
+    images: &[crate::process_snapshot::ProcessImage],
+    expected_service_sid: Option<&str>,
+) -> DiscoveredRunnerProcesses {
     if !runner_home.is_dir() {
         return DiscoveredRunnerProcesses {
             listener_present: false,
@@ -326,14 +334,26 @@ pub fn observe_runner_processes_with_pids_from_images(
         if !path_is_under_home_key(&path_key, &home) {
             continue;
         }
-        // Require affirmative current-user ownership evidence: reject foreign or ambiguous process identity
-        if image.user_matches_current != Some(true) {
-            if image.user_matches_current.is_none() {
-                evidence_complete = false;
-                if is_worker {
-                    worker = true;
-                    worker_pid = Some(image.process_id);
-                }
+
+        // Identity attribution:
+        // A process affirmatively matches if:
+        // 1. It matches the interactive Agent user (user_matches_current == Some(true)), OR
+        // 2. It matches the configured SCM service SID (image.user_sid matches expected_service_sid).
+        let matches_service = match (&image.user_sid, expected_service_sid) {
+            (Some(proc_sid), Some(exp_sid)) => proc_sid.eq_ignore_ascii_case(exp_sid),
+            _ => false,
+        };
+        let matches_current = image.user_matches_current == Some(true);
+
+        if !matches_current && !matches_service {
+            // Process identity is foreign or ambiguous (e.g. running under a different account).
+            // INVARIANT: Ambiguous or foreign identity under runner_home must NEVER be treated
+            // as complete idle evidence. If a worker executable exists under runner_home,
+            // worker MUST be marked true, worker_pid recorded, and evidence_complete marked false.
+            evidence_complete = false;
+            if is_worker {
+                worker = true;
+                worker_pid = Some(image.process_id);
             }
             continue;
         }
@@ -406,6 +426,57 @@ pub fn observe_runner_processes_with_pids(runner_home: &Path) -> DiscoveredRunne
 
 pub fn observe_runner_processes_for_home(runner_home: &Path) -> (bool, bool, bool) {
     let p = observe_runner_processes_with_pids(runner_home);
+    (p.listener_present, p.worker_present, p.evidence_complete)
+}
+
+pub fn observe_runner_processes_with_pids_for_service(
+    runner_home: &Path,
+    expected_service_sid: Option<&str>,
+) -> DiscoveredRunnerProcesses {
+    #[cfg(windows)]
+    {
+        if !runner_home.is_dir() {
+            return DiscoveredRunnerProcesses {
+                listener_present: false,
+                worker_present: false,
+                evidence_complete: false,
+                listener_pid: None,
+                worker_pid: None,
+            };
+        }
+        match crate::process_snapshot::executable_images() {
+            Ok(images) => observe_runner_processes_with_pids_from_images_with_identity(
+                runner_home,
+                &images,
+                expected_service_sid,
+            ),
+            Err(_) => DiscoveredRunnerProcesses {
+                listener_present: false,
+                worker_present: false,
+                evidence_complete: false,
+                listener_pid: None,
+                worker_pid: None,
+            },
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (runner_home, expected_service_sid);
+        DiscoveredRunnerProcesses {
+            listener_present: false,
+            worker_present: false,
+            evidence_complete: true,
+            listener_pid: None,
+            worker_pid: None,
+        }
+    }
+}
+
+pub fn observe_runner_processes_for_service(
+    runner_home: &Path,
+    expected_service_sid: Option<&str>,
+) -> (bool, bool, bool) {
+    let p = observe_runner_processes_with_pids_for_service(runner_home, expected_service_sid);
     (p.listener_present, p.worker_present, p.evidence_complete)
 }
 
