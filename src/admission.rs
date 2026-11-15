@@ -204,6 +204,22 @@ pub trait AdmissionControlBackend {
     fn withdraw_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError>;
 }
 
+impl<T: ?Sized + AdmissionControlBackend> AdmissionControlBackend for Box<T> {
+    fn observe_admission_selector(
+        &mut self,
+    ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        (**self).observe_admission_selector()
+    }
+
+    fn advertise_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        (**self).advertise_capacity()
+    }
+
+    fn withdraw_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        (**self).withdraw_capacity()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RetryPolicy {
     pub max_attempts: u8,

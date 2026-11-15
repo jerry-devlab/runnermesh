@@ -292,6 +292,74 @@ impl std::fmt::Display for ShutdownError {
 
 impl std::error::Error for ShutdownError {}
 
+/// Owned session holding background runtime thread handles for the installed production agent.
+///
+/// Ensures callers retain recovery ownership of background thread handles even when shutdown
+/// exceeds the configured deadline, preventing silent thread leakage, detached workers, or false
+/// clean-shutdown reports.
+pub struct InstalledAgentRuntimeSession {
+    state_root: PathBuf,
+    exit: Arc<RuntimeExitState>,
+    endpoint: IpcEndpoint,
+    pub pipe_thread: Option<thread::JoinHandle<()>>,
+    pub periodic_thread: Option<thread::JoinHandle<()>>,
+    #[cfg(windows)]
+    pub pipe_native_handle: Arc<AtomicIsize>,
+}
+
+impl InstalledAgentRuntimeSession {
+    pub fn new(
+        state_root: PathBuf,
+        exit: Arc<RuntimeExitState>,
+        endpoint: IpcEndpoint,
+        pipe_thread: thread::JoinHandle<()>,
+        periodic_thread: thread::JoinHandle<()>,
+        #[cfg(windows)] pipe_native_handle: Arc<AtomicIsize>,
+    ) -> Self {
+        Self {
+            state_root,
+            exit,
+            endpoint,
+            pipe_thread: Some(pipe_thread),
+            periodic_thread: Some(periodic_thread),
+            #[cfg(windows)]
+            pipe_native_handle,
+        }
+    }
+
+    /// Performs graceful shutdown with bounded deadline, preserving thread handles on timeout.
+    pub fn shutdown(&mut self, timeout: Duration) -> Result<(), ShutdownError> {
+        shutdown_runtime_threads(
+            &self.state_root,
+            &self.exit,
+            &self.endpoint,
+            &mut self.pipe_thread,
+            &mut self.periodic_thread,
+            #[cfg(windows)]
+            &self.pipe_native_handle,
+            timeout,
+        )
+    }
+
+    /// Inspects whether all background threads have been safely joined.
+    pub fn is_completely_shutdown(&self) -> bool {
+        self.pipe_thread.is_none() && self.periodic_thread.is_none()
+    }
+
+    /// Inspects whether any background threads remain unjoined.
+    pub fn has_unjoined_threads(&self) -> bool {
+        !self.is_completely_shutdown()
+    }
+
+    /// Reads the current recorded runtime stage if present.
+    pub fn stage(&self) -> Option<String> {
+        let stage_file = self.state_root.join("runtime-stage.txt");
+        fs::read_to_string(stage_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+}
+
 /// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
 pub struct RunningInstalledAgentSandbox {
     core: Arc<Mutex<RuntimeCore>>,
@@ -656,6 +724,16 @@ fn run_agent(
         Some(snapshot_sender),
     );
 
+    let mut session = InstalledAgentRuntimeSession::new(
+        runtime_state_root.clone(),
+        Arc::clone(&exit),
+        endpoint.clone(),
+        pipe_thread,
+        periodic_thread,
+        #[cfg(windows)]
+        pipe_native_handle,
+    );
+
     let result = run_native_tray_loop(
         &runtime_state_root,
         initial_snapshot,
@@ -664,18 +742,10 @@ fn run_agent(
         readiness,
         development_controls,
     );
-    let shutdown_res = shutdown_runtime_threads(
-        &runtime_state_root,
-        &exit,
-        &endpoint,
-        &mut Some(pipe_thread),
-        &mut Some(periodic_thread),
-        #[cfg(windows)]
-        &pipe_native_handle,
-        Duration::from_secs(5),
-    );
+    let shutdown_res = session.shutdown(Duration::from_secs(5));
     if let Err(ref e) = shutdown_res {
-        eprintln!("[installed_agent] warning: shutdown incomplete: {e}");
+        eprintln!("[installed_agent] ERROR: shutdown incomplete: {e}");
+        return Err(format!("installed_agent shutdown incomplete: {e}"));
     }
     result
 }

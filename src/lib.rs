@@ -59,15 +59,17 @@ pub use admission::{
     ReservedLabelOwnershipState, RetryDirective, RetryPolicy, RESERVED_ADMISSION_LABEL,
 };
 pub use agent::{
-    AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
-    AuthoritativeMultiRunnerLifecycleBackend, BoundRunnerAdmissionCoordinator, ConfigStore,
-    ConfigStoreError, FileConfigStore, GatedUserSessionProcessTransport,
-    InProcessAdmissionCoordinator, InertUserSessionProcessTransport, LiveSessionExecutionGate,
-    MemoryConfigStore, MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend,
-    MultiRunnerSessionCoordinator, SandboxMultiRunnerLifecycleBackend,
-    SimulatedUserSessionProcessTransport, StandardSessionCoordinator, SyntheticSessionTestGrant,
-    UserSessionProcessTransport, CONFIG_SCHEMA_VERSION,
+    AdmissionBackendFactory, AdmissionCoordinatorFactory, AgentConfig, AgentCore, AgentCoreError,
+    AgentObservation, AgentObserver, AgentReconciler, AuthoritativeMultiRunnerLifecycleBackend,
+    BoundRunnerAdmissionCoordinator, ConfigStore, ConfigStoreError, FileConfigStore,
+    GatedUserSessionProcessTransport, InProcessAdmissionCoordinator,
+    InertUserSessionProcessTransport, LiveSessionExecutionGate, MemoryConfigStore,
+    MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend, MultiRunnerSessionCoordinator,
+    SandboxMultiRunnerLifecycleBackend, SimulatedUserSessionProcessTransport,
+    StandardSessionCoordinator, SyntheticSessionTestGrant, UserSessionProcessTransport,
+    CONFIG_SCHEMA_VERSION,
 };
+pub use agent_runtime::InstalledAgentRuntimeSession;
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]
 pub(crate) use credential::WindowsCredentialManagerProvider;
@@ -246,11 +248,12 @@ pub use windows_scm_executor::{
     AdmissionSelectorObserver, DurableLedgerEntry, FakeGithubAdmissionBackend,
     GatedWindowsScmBackend, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
     OwnerAuthorizationScope, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
-    PrivilegedScmRequest, ScmApiError, ScmControlBackend, ScmControlExecutor, ScmExactSnapshot,
-    ScmTransactionJournal, ScmTransactionReceipt, ScmTransactionStage, SharedAuthorizationLedger,
-    SyntheticScmTestGrant, SystemClock, TokenValidatingOwnerVerifier, TrustedClock,
-    TrustedOwnerAuthorizationRequest, TrustedOwnerAuthorizationVerifier,
-    UnissuedOwnerAuthorizationVerifier, WindowsScmBackend, SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
+    PrivilegedScmRequest, ScmActionKind, ScmApiError, ScmControlBackend, ScmControlExecutor,
+    ScmExactSnapshot, ScmMutationArm, ScmTransactionJournal, ScmTransactionReceipt,
+    ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant, SystemClock,
+    TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
+    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
+    SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{

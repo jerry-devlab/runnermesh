@@ -607,7 +607,10 @@ impl LiveSessionExecutionGate {
         verifier: &V,
         request: &crate::windows_scm_executor::TrustedOwnerAuthorizationRequest,
     ) -> Result<Self, crate::windows_scm_executor::ScmApiError> {
-        let _scm_gate = verifier.verify(request)?;
+        let scm_gate = verifier.verify(request)?;
+        if !scm_gate.is_trusted_live() || !scm_gate.allows_mutation() {
+            return Err(crate::windows_scm_executor::ScmApiError::GateClosed);
+        }
         Ok(Self::mint_trusted_live(
             &request.service_name,
             &request.execution_identity_token,
@@ -616,7 +619,7 @@ impl LiveSessionExecutionGate {
         ))
     }
 
-    pub fn mint_trusted_live(
+    pub(crate) fn mint_trusted_live(
         runner_key: &str,
         execution_identity_token: &str,
         transaction_id: &str,
@@ -1234,6 +1237,14 @@ type RunnerAdmissionMap =
 pub type AdmissionCoordinatorFactory =
     Arc<dyn Fn(&RunnerRecord) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> + Send + Sync>;
 
+pub type AdmissionBackendFactory = Arc<
+    dyn Fn(
+            &crate::AdmissionBinding,
+        ) -> Result<Box<dyn crate::AdmissionControlBackend + Send + Sync>, String>
+        + Send
+        + Sync,
+>;
+
 /// Builds the authentic exact BoundRunnerAdmissionCoordinator for an active enrolled record
 /// that requests managed admission and has a valid credential reference.
 #[cfg(windows)]
@@ -1284,6 +1295,7 @@ pub struct AuthoritativeMultiRunnerLifecycleBackend<B> {
     session: Option<Arc<dyn MultiRunnerSessionCoordinator>>,
     runner_targets: Arc<Mutex<BTreeMap<String, RunnerTargetRegistration>>>,
     coordinator_factory: Option<AdmissionCoordinatorFactory>,
+    admission_backend_factory: Option<AdmissionBackendFactory>,
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifecycleBackend<B> {
@@ -1295,11 +1307,17 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
             session: None,
             runner_targets: Arc::new(Mutex::new(BTreeMap::new())),
             coordinator_factory: None,
+            admission_backend_factory: None,
         }
     }
 
     pub fn with_coordinator_factory(mut self, factory: AdmissionCoordinatorFactory) -> Self {
         self.coordinator_factory = Some(factory);
+        self
+    }
+
+    pub fn with_admission_backend_factory(mut self, factory: AdmissionBackendFactory) -> Self {
+        self.admission_backend_factory = Some(factory);
         self
     }
 
@@ -1321,6 +1339,14 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert((scope, runner_id), coordinator);
+    }
+
+    pub fn get_runner_admission_coordinator(
+        &self,
+        scope: &crate::RegistrationScope,
+        runner_id: u64,
+    ) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> {
+        self.get_admission_coordinator(scope, runner_id)
     }
 
     fn get_admission_coordinator(
@@ -1423,6 +1449,36 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         if record.managed_admission {
             let coord = if let Some(ref factory) = self.coordinator_factory {
                 factory(record)
+            } else if let Some(ref backend_factory) = self.admission_backend_factory {
+                if let Some(cred_ref) = record.credential_ref.as_ref() {
+                    let ownership = Some(crate::ReservedLabelOwnership {
+                        scope: record.registration_scope.clone(),
+                        runner_id: record.runner_id,
+                        label: crate::RESERVED_ADMISSION_LABEL.to_owned(),
+                    });
+                    if let Ok(binding) = crate::AdmissionBinding::new(
+                        record.registration_scope.clone(),
+                        record.runner_id,
+                        record.expected_runner_name.clone(),
+                        cred_ref.clone(),
+                        ownership,
+                    ) {
+                        if let Ok(backend) = backend_factory(&binding) {
+                            Some(Arc::new(crate::BoundRunnerAdmissionCoordinator::new(
+                                record.registration_scope.clone(),
+                                record.runner_id,
+                                backend,
+                            ))
+                                as Arc<dyn MultiRunnerAdmissionCoordinator>)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
                 default_runner_admission_coordinator(record)
             };

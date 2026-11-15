@@ -100,6 +100,18 @@ impl OwnerAuthorizationScope {
             allow_change_config: false,
         }
     }
+
+    /// Issues a cryptographically signed authorization request for synthetic testing and qualification suites.
+    pub fn issue_synthetic_request(
+        &self,
+        authority_secret: &[u8],
+        validity_seconds: u64,
+        nonce: &str,
+        clock: Arc<dyn TrustedClock>,
+    ) -> (TrustedOwnerAuthorizationRequest, Vec<u8>) {
+        let issuer = OwnerAuthorizationIssuer::with_clock(authority_secret, clock);
+        issuer.issue_for_scope(self, validity_seconds, nonce)
+    }
 }
 
 /// Request presented to a trusted Owner authorization verifier.
@@ -837,6 +849,22 @@ impl TokenValidatingOwnerVerifier {
         )
     }
 
+    /// Constructs a verifier with an in-memory authority secret for synthetic testing / qualification suites.
+    /// Never used in production deployment without explicit Owner provisioning.
+    pub fn for_synthetic_test(
+        authority_secret: &[u8],
+        scope: OwnerAuthorizationScope,
+        clock: Arc<dyn TrustedClock>,
+    ) -> Self {
+        Self::with_clock_and_ledger(
+            &[],
+            scope,
+            Some(authority_secret.to_vec()),
+            clock,
+            SharedAuthorizationLedger::global().clone(),
+        )
+    }
+
     /// Internal test constructor bound to an authority secret.
     #[cfg(test)]
     #[allow(dead_code)]
@@ -1260,7 +1288,19 @@ impl LiveScmExecutionGate {
     /// SyntheticTestOnly and Closed gates strictly refuse to mint a mutation arm.
     pub fn mint_mutation_arm(&self) -> Result<ScmMutationArm, ScmApiError> {
         if self.grant_kind == ScmGrantKind::TrustedLive && self.allows_mutation() {
-            Ok(ScmMutationArm { _private: () })
+            Ok(ScmMutationArm {
+                bound_service_name: self.bound_service_name.clone(),
+                bound_image_token: self.bound_image_token.clone(),
+                bound_execution_identity_token: self.bound_execution_identity_token.clone(),
+                bound_target_host_token: self.bound_target_host_token.clone(),
+                bound_candidate_commit: self.bound_candidate_commit.clone(),
+                bound_transaction_id: self.bound_transaction_id.clone(),
+                allow_start: self.allow_start,
+                allow_stop: self.allow_stop,
+                allow_change_config: self.allow_change_config,
+                not_before_epoch_seconds: self.not_before_epoch_seconds,
+                expires_at_epoch_seconds: self.expires_at_epoch_seconds,
+            })
         } else {
             Err(ScmApiError::GateClosed)
         }
@@ -2632,19 +2672,84 @@ pub fn runner_service_image_token(runner_home: &std::path::Path) -> String {
     opaque_image_token(&runner_service_binary_path(runner_home).to_string_lossy())
 }
 
-/// Unconstructable mutation arm. Public API never produces a live arm this Train.
+/// Specific mutation action kind checked against authorized arm permissions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScmActionKind {
+    Start,
+    Stop,
+    ChangeConfig,
+}
+
+/// Verified SCM mutation arm carrying exact context, permissions, and validity bounds.
+/// Public API never produces a live arm this Train without trusted verification.
 #[derive(Clone, Debug)]
 pub struct ScmMutationArm {
-    _private: (),
+    pub(crate) bound_service_name: String,
+    pub(crate) bound_image_token: String,
+    pub(crate) bound_execution_identity_token: String,
+    pub(crate) bound_target_host_token: String,
+    pub(crate) bound_candidate_commit: String,
+    pub(crate) bound_transaction_id: String,
+    pub(crate) allow_start: bool,
+    pub(crate) allow_stop: bool,
+    pub(crate) allow_change_config: bool,
+    pub(crate) not_before_epoch_seconds: u64,
+    pub(crate) expires_at_epoch_seconds: u64,
+}
+
+impl ScmMutationArm {
+    pub fn bound_service_name(&self) -> &str {
+        &self.bound_service_name
+    }
+
+    pub fn bound_image_token(&self) -> &str {
+        &self.bound_image_token
+    }
+
+    pub fn bound_execution_identity_token(&self) -> &str {
+        &self.bound_execution_identity_token
+    }
+
+    pub fn bound_target_host_token(&self) -> &str {
+        &self.bound_target_host_token
+    }
+
+    pub fn bound_candidate_commit(&self) -> &str {
+        &self.bound_candidate_commit
+    }
+
+    pub fn bound_transaction_id(&self) -> &str {
+        &self.bound_transaction_id
+    }
+
+    pub fn allow_start(&self) -> bool {
+        self.allow_start
+    }
+
+    pub fn allow_stop(&self) -> bool {
+        self.allow_stop
+    }
+
+    pub fn allow_change_config(&self) -> bool {
+        self.allow_change_config
+    }
+
+    pub fn not_before_epoch_seconds(&self) -> u64 {
+        self.not_before_epoch_seconds
+    }
+
+    pub fn expires_at_epoch_seconds(&self) -> u64 {
+        self.expires_at_epoch_seconds
+    }
 }
 
 /// Windows SCM backend with real query source and sealed write paths.
 #[derive(Clone, Debug)]
 pub struct WindowsScmBackend {
     allow_read_only_query: bool,
-    /// Always `None` via [`WindowsScmBackend::mutation_inert`]. Write APIs exist
-    /// in source for review but refuse without an arm.
+    /// Verified mutation authority; `None` when mutation-inert.
     mutation_arm: Option<ScmMutationArm>,
+    clock: Option<Arc<dyn TrustedClock>>,
 }
 
 impl Default for WindowsScmBackend {
@@ -2658,6 +2763,7 @@ impl WindowsScmBackend {
         Self {
             allow_read_only_query: true,
             mutation_arm: None,
+            clock: None,
         }
     }
 
@@ -2666,7 +2772,19 @@ impl WindowsScmBackend {
         Self {
             allow_read_only_query: true,
             mutation_arm: Some(arm),
+            clock: None,
         }
+    }
+
+    /// Attaches a trusted boundary clock for expiry validation.
+    pub fn with_clock(mut self, clock: Arc<dyn TrustedClock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Returns the currently attached mutation arm, if any.
+    pub fn mutation_arm(&self) -> Option<&ScmMutationArm> {
+        self.mutation_arm.as_ref()
     }
 
     /// Arms the mutation arm from a verified TrustedLive gate.
@@ -2692,6 +2810,57 @@ impl WindowsScmBackend {
         }
         Ok(())
     }
+
+    /// Enforces exact target match, specific action permission, and temporal bounds
+    /// before any native Windows SCM API is reached.
+    pub fn authorize_mutation(
+        &self,
+        service_name: &str,
+        action: ScmActionKind,
+    ) -> Result<(), ScmApiError> {
+        let arm = self.mutation_arm.as_ref().ok_or(ScmApiError::GateClosed)?;
+
+        // 1. Exact target match (case-insensitive)
+        if !arm.bound_service_name.is_empty()
+            && !arm.bound_service_name.eq_ignore_ascii_case(service_name)
+        {
+            return Err(ScmApiError::NameDrift);
+        }
+
+        // 2. Action permission check
+        match action {
+            ScmActionKind::Start => {
+                if !arm.allow_start {
+                    return Err(ScmApiError::GateClosed);
+                }
+            }
+            ScmActionKind::Stop => {
+                if !arm.allow_stop {
+                    return Err(ScmApiError::GateClosed);
+                }
+            }
+            ScmActionKind::ChangeConfig => {
+                if !arm.allow_change_config {
+                    return Err(ScmApiError::GateClosed);
+                }
+            }
+        }
+
+        // 3. Temporal validity check against trusted boundary clock
+        let now = if let Some(ref clock) = self.clock {
+            clock.now_epoch_seconds()
+        } else {
+            SystemClock.now_epoch_seconds()
+        };
+
+        if now < arm.not_before_epoch_seconds
+            || (arm.expires_at_epoch_seconds > 0 && now >= arm.expires_at_epoch_seconds)
+        {
+            return Err(ScmApiError::AccessDenied);
+        }
+
+        Ok(())
+    }
 }
 
 impl ScmControlBackend for WindowsScmBackend {
@@ -2713,9 +2882,7 @@ impl ScmControlBackend for WindowsScmBackend {
 
     fn start(&self, service_name: &str) -> Result<(), ScmApiError> {
         Self::require_exact_name(service_name)?;
-        if self.mutation_arm.is_none() {
-            return Err(ScmApiError::GateClosed);
-        }
+        self.authorize_mutation(service_name, ScmActionKind::Start)?;
         #[cfg(windows)]
         {
             windows_start_service(service_name)
@@ -2729,9 +2896,7 @@ impl ScmControlBackend for WindowsScmBackend {
 
     fn stop(&self, service_name: &str) -> Result<(), ScmApiError> {
         Self::require_exact_name(service_name)?;
-        if self.mutation_arm.is_none() {
-            return Err(ScmApiError::GateClosed);
-        }
+        self.authorize_mutation(service_name, ScmActionKind::Stop)?;
         #[cfg(windows)]
         {
             windows_stop_service(service_name)
@@ -2749,9 +2914,7 @@ impl ScmControlBackend for WindowsScmBackend {
         mode: ServiceStartMode,
     ) -> Result<(), ScmApiError> {
         Self::require_exact_name(service_name)?;
-        if self.mutation_arm.is_none() {
-            return Err(ScmApiError::GateClosed);
-        }
+        self.authorize_mutation(service_name, ScmActionKind::ChangeConfig)?;
         #[cfg(windows)]
         {
             windows_change_start_mode(service_name, mode)

@@ -3690,17 +3690,14 @@ fn regression_s1_installed_assembly_distinct_scopes_and_single_control_path() {
         session_transport.clone(),
     ));
 
-    // Backend uses coordinator factory replacing only the HTTP/cred boundary
+    // Backend uses authentic admission backend factory replacing only HTTP/cred boundary,
+    // constructing authentic BoundRunnerAdmissionCoordinator instances for each distinct scope.
     let authoritative_backend = Arc::new(
         AuthoritativeMultiRunnerLifecycleBackend::new(helper)
             .with_session_coordinator(session_coord)
-            .with_coordinator_factory(Arc::new(move |record| {
-                Some(Arc::new(
-                    InProcessAdmissionCoordinator::new().with_selector(
-                        record.registration_scope.clone(),
-                        record.runner_id,
-                        true,
-                    ),
+            .with_admission_backend_factory(Arc::new(|_binding| {
+                Ok(Box::new(
+                    runnermesh::FakeGithubAdmissionBackend::new_with_selector_present(true),
                 ))
             })),
     );
@@ -3709,7 +3706,7 @@ fn regression_s1_installed_assembly_distinct_scopes_and_single_control_path() {
     let sandbox_config = InstalledAgentSandboxConfig {
         install_root: install_root.clone(),
         ipc_endpoint: ipc_endpoint.clone(),
-        multi_runner_backend: Some(authoritative_backend),
+        multi_runner_backend: Some(authoritative_backend.clone()),
         discovery_report: None,
         poll_interval: Duration::from_millis(25),
         enable_periodic_scheduler: true,
@@ -3717,6 +3714,39 @@ fn regression_s1_installed_assembly_distinct_scopes_and_single_control_path() {
 
     let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    // Verify authentic BoundRunnerAdmissionCoordinator is assembled for both distinct scopes
+    let coord_a = authoritative_backend
+        .get_runner_admission_coordinator(&scope_a, 201)
+        .expect("Scope A admission coordinator must be registered");
+    let mismatch_err = coord_a.observe_selector(&scope_b, 201).unwrap_err();
+    assert!(
+        mismatch_err.contains("admission.scope-or-runner-id-mismatch"),
+        "Scope mismatch must be rejected by BoundRunnerAdmissionCoordinator"
+    );
+
+    let coord_b = authoritative_backend
+        .get_runner_admission_coordinator(&scope_b, 202)
+        .expect("Scope B admission coordinator must be registered");
+    let mismatch_b_err = coord_b.observe_selector(&scope_a, 202).unwrap_err();
+    assert!(
+        mismatch_b_err.contains("admission.scope-or-runner-id-mismatch"),
+        "Scope mismatch must be rejected by BoundRunnerAdmissionCoordinator"
+    );
+
+    // Verify admission advertisement and withdrawal through authentic coordinator A
+    coord_a.advertise_selector(&scope_a, 201).unwrap();
+    assert_eq!(
+        coord_a.observe_selector(&scope_a, 201).unwrap(),
+        Some(true),
+        "Authentic coordinator A must observe present selector after advertisement"
+    );
+    coord_a.withdraw_selector(&scope_a, 201).unwrap();
+    assert_eq!(
+        coord_a.observe_selector(&scope_a, 201).unwrap(),
+        Some(false),
+        "Authentic coordinator A must observe absent selector after withdrawal"
+    );
 
     // B1: Both distinct scopes are present and managed
     let list_resp = ipc_client
@@ -3766,6 +3796,30 @@ fn regression_s1_installed_assembly_distinct_scopes_and_single_control_path() {
         "Runner B must receive zero control actions when Runner A is disabled"
     );
 
+    // B2: Forget Runner A: unregisters target and admission coordinator cleanly while keeping Runner B
+    let resp_forget_a = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersForget {
+            local_runner_key: "runner-a".to_string(),
+            prepare_only: false,
+        }))
+        .expect("IPC forget runner-a");
+    assert!(matches!(
+        resp_forget_a.body,
+        runnermesh::IpcResponseBody::Success(_)
+    ));
+    assert!(
+        authoritative_backend
+            .get_runner_admission_coordinator(&scope_a, 201)
+            .is_none(),
+        "Scope A coordinator must be unregistered after forget"
+    );
+    assert!(
+        authoritative_backend
+            .get_runner_admission_coordinator(&scope_b, 202)
+            .is_some(),
+        "Scope B coordinator must remain registered after forget of A"
+    );
+
     let _ = runtime.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -3808,7 +3862,8 @@ fn regression_s2_gated_session_trusted_authorization_and_close() {
     let synth_err = synth_transport.launch_listener(&record).unwrap_err();
     assert_eq!(synth_err, "session.synthetic-gate-refuses-live-mutation");
 
-    // 2. Unissued verifier strictly refuses authorization
+    use runnermesh::TrustedOwnerAuthorizationVerifier;
+
     let unissued_scope = OwnerAuthorizationScope::new(
         "runner-sess",
         "tok-1",
@@ -3837,6 +3892,28 @@ fn regression_s2_gated_session_trusted_authorization_and_close() {
         nonce: "nonce-1".to_string(),
         owner_material: Vec::new(),
     };
+
+    // 2. Rogue verifier returning Closed gate is strictly rejected (no privilege elevation)
+    struct RogueClosedVerifier;
+    impl runnermesh::TrustedOwnerAuthorizationVerifier for RogueClosedVerifier {
+        fn verify(
+            &self,
+            _request: &runnermesh::TrustedOwnerAuthorizationRequest,
+        ) -> Result<runnermesh::LiveScmExecutionGate, runnermesh::ScmApiError> {
+            Ok(runnermesh::LiveScmExecutionGate::CLOSED)
+        }
+    }
+    let rogue_res = runnermesh::LiveSessionExecutionGate::from_trusted_owner_authorization(
+        &RogueClosedVerifier,
+        &unissued_req,
+    );
+    assert_eq!(
+        rogue_res.unwrap_err(),
+        runnermesh::ScmApiError::GateClosed,
+        "Rogue verifier returning Closed gate must not produce TrustedLive session gate"
+    );
+
+    // 3. Unissued verifier strictly refuses authorization
     let unissued_res = runnermesh::LiveSessionExecutionGate::from_trusted_owner_authorization(
         &unissued_verifier,
         &unissued_req,
@@ -3846,26 +3923,92 @@ fn regression_s2_gated_session_trusted_authorization_and_close() {
         runnermesh::ScmApiError::AuthorizationNotIssued
     );
 
-    // 3. Trusted live gate connects to execution transport
-    let live_gate = runnermesh::LiveSessionExecutionGate::mint_trusted_live(
-        "runner-sess",
+    // 4. Valid cryptographic HMAC verification with 9-dimension scope
+    let authority_secret = b"s2-trusted-authority-secret-key-42";
+    let clock = std::sync::Arc::new(runnermesh::MockClock::new(now));
+    let valid_scope = OwnerAuthorizationScope::new(
+        "actions.runner.svcA",
+        "img-tok",
         "tok-1",
-        "tx-live",
-        now + 100,
+        "host-1",
+        "commit-1",
+        "tx-s2-live",
+        false, // allow_start = false
+        true,  // allow_stop = true
+        false, // allow_change_config = false
     );
+    let valid_verifier = runnermesh::TokenValidatingOwnerVerifier::for_synthetic_test(
+        authority_secret,
+        valid_scope.clone(),
+        clock.clone(),
+    );
+    let (valid_req, _voucher) =
+        valid_scope.issue_synthetic_request(authority_secret, 300, "nonce-s2-valid", clock.clone());
+
+    let live_gate = runnermesh::LiveSessionExecutionGate::from_trusted_owner_authorization(
+        &valid_verifier,
+        &valid_req,
+    )
+    .expect("Valid Owner authorization must mint TrustedLive gate");
+
     let live_transport = runnermesh::GatedUserSessionProcessTransport::with_gate(live_gate);
     assert!(live_transport.gate().is_trusted_live());
     assert!(live_transport.gate().is_open());
     assert_eq!(
         live_transport.gate().bound_transaction_id(),
-        Some("tx-live")
+        Some("tx-s2-live")
     );
 
-    // 4. Revocation / Recovery immediately closes gate
+    // 5. Revocation / Recovery immediately closes session gate
     live_transport.close();
     assert!(!live_transport.gate().is_open());
     let closed_err = live_transport.launch_listener(&record).unwrap_err();
     assert_eq!(closed_err, "session.transport-refused: session.gate-closed");
+
+    // 6. SCM Mutation Arm and WindowsScmBackend side-effect boundary enforcement
+    let mut scm_backend = runnermesh::WindowsScmBackend::mutation_inert().with_clock(clock.clone());
+    // Disarmed / mutation-inert backend strictly fails closed before any I/O
+    assert_eq!(
+        scm_backend.stop("actions.runner.svcA").unwrap_err(),
+        runnermesh::ScmApiError::GateClosed
+    );
+
+    // Arm with verified SCM gate
+    let (valid_scm_req, _) =
+        valid_scope.issue_synthetic_request(authority_secret, 300, "nonce-s2-scm", clock.clone());
+    let verified_scm_gate = valid_verifier.verify(&valid_scm_req).unwrap();
+    scm_backend.arm_with_gate(&verified_scm_gate).unwrap();
+    assert!(scm_backend.is_armed());
+
+    // Target drift rejection (case-insensitive mismatch)
+    assert_eq!(
+        scm_backend.stop("actions.runner.drift").unwrap_err(),
+        runnermesh::ScmApiError::NameDrift,
+        "Target name drift must be rejected with NameDrift before native I/O"
+    );
+
+    // Unauthorized action rejection: scope only permitted stop, so start must be refused
+    assert_eq!(
+        scm_backend.start("actions.runner.svcA").unwrap_err(),
+        runnermesh::ScmApiError::GateClosed,
+        "Unauthorized action (start) must be rejected with GateClosed before native I/O"
+    );
+
+    // Expiry check: fast-forward clock past validity window
+    clock.set_time(now + 400);
+    assert_eq!(
+        scm_backend.stop("actions.runner.svcA").unwrap_err(),
+        runnermesh::ScmApiError::AccessDenied,
+        "Expired mutation arm must be rejected with AccessDenied before native I/O"
+    );
+
+    // Disarm immediately closes mutation authority
+    scm_backend.disarm();
+    assert!(!scm_backend.is_armed());
+    assert_eq!(
+        scm_backend.stop("actions.runner.svcA").unwrap_err(),
+        runnermesh::ScmApiError::GateClosed
+    );
 }
 
 #[test]
@@ -3932,14 +4075,62 @@ fn regression_s3_shared_shutdown_bounded_incomplete_recovery() {
         "All threads must be safely joined"
     );
 
+    // 5. B7/B8: Production caller ownership: InstalledAgentRuntimeSession retains thread on timeout
+    let session_dir = temp_dir.join("session-test");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let exit_state = std::sync::Arc::new(runnermesh::agent_runtime::RuntimeExitState::default());
+    let session_endpoint = IpcEndpoint::for_test_scope(format!("s3-sess-{}", std::process::id()));
+    let (sess_tx, sess_rx) = std::sync::mpsc::channel();
+    let dummy_pipe = std::thread::spawn(|| {});
+    let dummy_poll = std::thread::spawn(move || {
+        let _ = sess_rx.recv_timeout(Duration::from_secs(5));
+    });
+
+    let mut session = runnermesh::InstalledAgentRuntimeSession::new(
+        session_dir.clone(),
+        exit_state,
+        session_endpoint,
+        dummy_pipe,
+        dummy_poll,
+        std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0)),
+    );
+
+    // Timeout returns Incomplete, preserving unjoined thread in session
+    let sess_inc = session.shutdown(Duration::from_millis(50));
+    assert!(matches!(
+        sess_inc,
+        Err(runnermesh::agent_runtime::ShutdownError::Incomplete {
+            poll_timed_out: true,
+            ..
+        })
+    ));
+    assert!(
+        session.has_unjoined_threads(),
+        "Session must retain thread handle on Incomplete"
+    );
+    assert!(!session.is_completely_shutdown());
+    assert_eq!(session.stage().as_deref(), Some("shutdown-incomplete"));
+
+    // Unblock and retry: joins cleanly and writes shutdown-complete
+    let _ = sess_tx.send(());
+    let sess_ok = session.shutdown(Duration::from_secs(3));
+    assert!(
+        sess_ok.is_ok(),
+        "Second session shutdown must succeed cleanly"
+    );
+    assert!(!session.has_unjoined_threads());
+    assert!(session.is_completely_shutdown());
+    assert_eq!(session.stage().as_deref(), Some("shutdown-complete"));
+
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 #[cfg(windows)]
 fn regression_s4_distinct_payload_upgrade_rollback_and_p08_invariants() {
-    let candidate_paths = [
-        std::env::var("RUNNERMESH_RC_PACKAGE_PATH")
+    // 1. Explicitly bind authentic old RC package (rc.1) from baseline/1e7123b
+    let old_candidate_paths = [
+        std::env::var("RUNNERMESH_OLD_RC_PACKAGE_PATH")
             .map(std::path::PathBuf::from)
             .ok(),
         Some(std::path::PathBuf::from(
@@ -3953,13 +4144,13 @@ fn regression_s4_distinct_payload_upgrade_rollback_and_p08_invariants() {
         )),
     ];
 
-    let rc_archive_source = candidate_paths
+    let old_rc_source = old_candidate_paths
         .into_iter()
         .flatten()
         .find(|p| p.is_file())
-        .expect("Authentic RC package must exist in baseline/1e7123b");
-    let rc_archive_source = std::fs::canonicalize(rc_archive_source)
-        .expect("Authentic RC package must be canonicalizable");
+        .expect("Authentic old RC package (rc.1) must exist in baseline/1e7123b or target");
+    let old_rc_source = std::fs::canonicalize(old_rc_source)
+        .expect("Authentic old RC package must be canonicalizable");
 
     let temp_root = std::env::temp_dir().join(format!(
         "rm-s4-sandbox-{}",
@@ -3971,13 +4162,13 @@ fn regression_s4_distinct_payload_upgrade_rollback_and_p08_invariants() {
     std::fs::create_dir_all(&temp_root).unwrap();
 
     let staging_1 = temp_root.join("staging-1");
-    runnermesh::PackageVerifier::extract_runtime(&rc_archive_source, &staging_1)
-        .expect("extract authentic rc archive");
+    runnermesh::PackageVerifier::extract_runtime(&old_rc_source, &staging_1)
+        .expect("extract authentic rc.1 archive");
 
     let install_root = temp_root.join("installed");
     let installation = runnermesh::Installation::new(&install_root);
 
-    // Install v0.2.0-rc.1
+    // Install base v0.2.0-rc.1
     let manifest_1 = runnermesh::manifest_for_payload(&staging_1).expect("manifest 1");
     let receipt_1 = installation
         .install_with_manifest("0.2.0-rc.1", &staging_1, &manifest_1)
@@ -3985,58 +4176,118 @@ fn regression_s4_distinct_payload_upgrade_rollback_and_p08_invariants() {
     assert_eq!(receipt_1.version, "0.2.0-rc.1");
     assert!(receipt_1.activated, "First slot should be active");
 
-    // Create genuinely distinct staging-2 payload with different version and commit provenance
+    // 2. Build authentic distinct candidate package v0.2.0-rc.2 using PackageVerifier::create
+    let new_pkg_out = temp_root.join("new-package-out");
+    std::fs::create_dir_all(&new_pkg_out).unwrap();
+
+    let new_pkg_out = std::fs::canonicalize(&new_pkg_out).unwrap();
+    let manifest_path = staging_1.join("runnermesh-agent.manifest");
+    let cli_binary = std::fs::canonicalize(staging_1.join("runnermesh.exe")).unwrap();
+    let agent_binary = std::fs::canonicalize(staging_1.join("runnermesh-agent.exe")).unwrap();
+    let agent_manifest = std::fs::canonicalize(manifest_path).unwrap();
+
+    let build_commit = std::env::var("RUNNERMESH_BUILD_COMMIT")
+        .ok()
+        .filter(|c| c.len() == 40 && c.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .unwrap_or_else(|| "cbe75ed1ddd8fd9523733e13eae48d6fae4bfba3".to_string());
+
+    let new_pkg_input = runnermesh::PackageInput {
+        provenance: runnermesh::PackageProvenance {
+            version: "0.2.0-rc.2".to_string(),
+            commit: build_commit,
+            channel: "rc".to_string(),
+            target: env!("RUNNERMESH_BUILD_TARGET").to_string(),
+        },
+        cli_binary,
+        agent_binary,
+        agent_manifest,
+    };
+
+    let new_pkg_receipt = runnermesh::PackageVerifier::create(&new_pkg_input, &new_pkg_out)
+        .expect("Authentic creation of candidate v0.2.0-rc.2 package");
+    let (new_manifest, _new_hash) =
+        runnermesh::PackageVerifier::verify_with_hash(&new_pkg_receipt.archive)
+            .expect("Candidate package verification");
+    assert_eq!(new_manifest.provenance.version, "0.2.0-rc.2");
+    assert_ne!(new_pkg_receipt.archive_sha256, receipt_1.version,);
+
     let staging_2 = temp_root.join("staging-2");
-    std::fs::create_dir_all(&staging_2).unwrap();
-    for name in ["runnermesh.exe", "runnermesh-agent.exe"] {
-        std::fs::copy(staging_1.join(name), staging_2.join(name)).unwrap();
-    }
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(staging_2.join("runnermesh-agent.exe"))
-        .unwrap();
-    file.write_all(b"\n// upgrade-candidate-bytes\n").unwrap();
-    drop(file);
+    runnermesh::PackageVerifier::extract_runtime(&new_pkg_receipt.archive, &staging_2)
+        .expect("extract candidate rc.2 archive");
+    let payload_2_hash = runnermesh::payload_sha256(&staging_2).expect("payload 2 sha256");
 
-    let manifest_2 = runnermesh::manifest_for_payload(&staging_2).expect("manifest 2");
-    assert_ne!(
-        manifest_1, manifest_2,
-        "Must be genuinely distinct payloads with different digests"
-    );
+    // 3. Exercise full UpdateCoordinator: staging -> safe point deferral -> safe point activation -> rollback
+    let update_coordinator = runnermesh::UpdateCoordinator::new(installation.clone());
+    let update_req = runnermesh::UpdateRequest {
+        version: "0.2.0-rc.2".to_string(),
+        payload: staging_2.clone(),
+        expected_payload_sha256: payload_2_hash,
+        compatible: true,
+    };
 
-    let receipt_2 = installation
-        .install_with_manifest("0.2.0-rc.2", &staging_2, &manifest_2)
-        .unwrap();
-    assert!(!receipt_2.activated, "Second slot must not auto-activate");
-    assert_eq!(receipt_2.version, "0.2.0-rc.2");
+    let tx = update_coordinator.stage(&update_req).expect("stage rc.2");
+    assert_eq!(tx.phase, runnermesh::UpdatePhase::ReadyToActivate);
+    assert_eq!(tx.requested_version, "0.2.0-rc.2");
+    assert_eq!(tx.previous_version, "0.2.0-rc.1");
 
-    // Upgrade to 0.2.0-rc.2
-    installation.select_active("0.2.0-rc.2").unwrap();
+    // Deferral when active bound work is present
+    let defer_receipt = update_coordinator
+        .activate(
+            runnermesh::SafePointObservation::ActiveBoundWork,
+            runnermesh::HealthObservation::Healthy,
+        )
+        .expect("activate deferral");
     assert_eq!(
-        installation.active_agent_path().unwrap(),
-        install_root
-            .join("versions")
-            .join("0.2.0-rc.2")
-            .join("runnermesh-agent.exe")
+        defer_receipt.outcome,
+        runnermesh::UpdateOutcome::DeferredForActiveJob
+    );
+    assert_eq!(
+        installation.state().unwrap().active_version.as_deref(),
+        Some("0.2.0-rc.1"),
+        "Active version must stay on rc.1 while active work defers"
     );
 
-    // Rollback to 0.2.0-rc.1
+    // Activation succeeds when idle safe point observed
+    let activate_receipt = update_coordinator
+        .activate(
+            runnermesh::SafePointObservation::Idle,
+            runnermesh::HealthObservation::Healthy,
+        )
+        .expect("activate when idle");
+    assert_eq!(
+        activate_receipt.outcome,
+        runnermesh::UpdateOutcome::Committed
+    );
+    assert_eq!(
+        installation.state().unwrap().active_version.as_deref(),
+        Some("0.2.0-rc.2"),
+        "Active version must advance to rc.2 upon idle activation"
+    );
+    assert!(installation
+        .active_agent_path()
+        .unwrap()
+        .to_string_lossy()
+        .contains("0.2.0-rc.2"));
+
+    // Rollback: return to 0.2.0-rc.1 cleanly restoring active version
     installation.select_active("0.2.0-rc.1").unwrap();
     assert_eq!(
-        installation.active_agent_path().unwrap(),
-        install_root
-            .join("versions")
-            .join("0.2.0-rc.1")
-            .join("runnermesh-agent.exe")
+        installation.state().unwrap().active_version.as_deref(),
+        Some("0.2.0-rc.1"),
+        "Active version must restore to rc.1 upon rollback"
     );
+    assert!(installation
+        .active_agent_path()
+        .unwrap()
+        .to_string_lossy()
+        .contains("0.2.0-rc.1"));
 
-    // B11: Use SandboxAutostartBackend (fake startup) for clean test isolation
+    // 4. B11: Use SandboxAutostartBackend (fake startup) for clean test isolation
     let fake_startup = runnermesh::SandboxAutostartBackend::new(temp_root.join("autostart.json"));
     let uninst = installation.uninstall(&fake_startup).unwrap();
     assert!(uninst.removed_versions >= 2);
 
-    // B12: P08 baseline invariants check
+    // 5. B12: P08 baseline invariants check
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
