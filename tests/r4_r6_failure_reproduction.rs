@@ -320,7 +320,7 @@ fn regression_r6_installed_agent_sandbox_ipc_and_sequential_stop() {
     };
 
     // 1. Start the installed Agent runtime with explicit sandbox configuration
-    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
 
     // 2. Connect via real Named Pipe IPC client
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
@@ -761,7 +761,7 @@ fn regression_r6_falsifiability_proves_disabled_scheduler_produces_zero_actions(
         enable_periodic_scheduler: false,
     };
 
-    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
 
     for key in ["runner-a", "runner-b"] {
@@ -967,7 +967,7 @@ fn regression_c5_lrm_sandbox_package_and_installed_agent_verification() {
         enable_periodic_scheduler: true,
     };
 
-    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
 
     // 4. Enroll runner via IPC
@@ -1088,7 +1088,7 @@ fn setup_test_sandbox_runtime(
 #[cfg(windows)]
 fn regression_c5_shutdown_without_client_unblocks_cleanly() {
     println!("[test:c5_shutdown_without_client] START");
-    let (temp_dir, runtime, _endpoint) = setup_test_sandbox_runtime("no-client");
+    let (temp_dir, mut runtime, _endpoint) = setup_test_sandbox_runtime("no-client");
 
     // Give pipe thread a moment to enter ConnectNamedPipe
     std::thread::sleep(Duration::from_millis(50));
@@ -1110,7 +1110,7 @@ fn regression_c5_shutdown_without_client_unblocks_cleanly() {
 #[cfg(windows)]
 fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
     println!("[test:c5_exit_after_drain] START");
-    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("exit-drain");
+    let (temp_dir, mut runtime, endpoint) = setup_test_sandbox_runtime("exit-drain");
     let client = IpcClient::new(endpoint, Duration::from_secs(3));
 
     let resp = client
@@ -1135,7 +1135,7 @@ fn regression_c5_shutdown_after_exit_after_drain_unblocks_cleanly() {
 #[cfg(windows)]
 fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
     println!("[test:c5_connection_failure] START");
-    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("conn-fail");
+    let (temp_dir, mut runtime, endpoint) = setup_test_sandbox_runtime("conn-fail");
 
     // Client connects and abruptly sends partial garbage without completing IPC frame
     {
@@ -1189,7 +1189,7 @@ fn regression_c5_shutdown_after_connection_failure_unblocks_cleanly() {
 #[cfg(windows)]
 fn regression_c5_shutdown_race_under_concurrent_ipc_unblocks_cleanly() {
     println!("[test:c5_shutdown_race] START");
-    let (temp_dir, runtime, endpoint) = setup_test_sandbox_runtime("race");
+    let (temp_dir, mut runtime, endpoint) = setup_test_sandbox_runtime("race");
 
     let stop_worker = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_worker_clone = Arc::clone(&stop_worker);
@@ -1868,7 +1868,7 @@ fn regression_c4_runners_status_reflects_failures_and_resources() {
         enable_periodic_scheduler: true,
     };
 
-    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
 
     // Disable the runner via IPC to plan StopService
@@ -2828,53 +2828,17 @@ fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick()
 
     let authoritative_backend = Arc::new(
         AuthoritativeMultiRunnerLifecycleBackend::new(helper)
-            .with_session_coordinator(session_coord),
+            .with_session_coordinator(session_coord)
+            .with_coordinator_factory(Arc::new(move |record| {
+                Some(Arc::new(
+                    InProcessAdmissionCoordinator::new().with_selector(
+                        record.registration_scope.clone(),
+                        record.runner_id,
+                        true,
+                    ),
+                ))
+            })),
     );
-
-    let scope_1 = RegistrationScope::Repository {
-        owner: "org".to_string(),
-        repository: "repo1".to_string(),
-    };
-    let scope_2 = RegistrationScope::Repository {
-        owner: "org".to_string(),
-        repository: "repo2".to_string(),
-    };
-    let scope_3 = RegistrationScope::Repository {
-        owner: "org".to_string(),
-        repository: "repo3".to_string(),
-    };
-
-    authoritative_backend.register_runner_target_with_service(
-        "runner-1",
-        scope_1.clone(),
-        101,
-        Some("actions.runner.svc1"),
-    );
-    authoritative_backend.register_runner_target_with_service(
-        "runner-2",
-        scope_2.clone(),
-        102,
-        Some("actions.runner.svc2"),
-    );
-    authoritative_backend.register_runner_target_detailed(
-        "runner-3",
-        scope_3.clone(),
-        103,
-        None,
-        Some(&home_3),
-        true,
-    );
-
-    let coord_1 =
-        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_1.clone(), 101, true));
-    let coord_2 =
-        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_2.clone(), 102, true));
-    let coord_3 =
-        Arc::new(InProcessAdmissionCoordinator::new().with_selector(scope_3.clone(), 103, true));
-
-    authoritative_backend.register_runner_admission_coordinator(scope_1, 101, coord_1);
-    authoritative_backend.register_runner_admission_coordinator(scope_2, 102, coord_2);
-    authoritative_backend.register_runner_admission_coordinator(scope_3, 103, coord_3);
 
     let ipc_endpoint = IpcEndpoint::for_test_scope(format!("c2c3-test-{}", std::process::id()));
     let sandbox_config = InstalledAgentSandboxConfig {
@@ -2886,7 +2850,7 @@ fn regression_c2_c3_multirunner_assembly_service_and_session_real_ipc_and_tick()
         enable_periodic_scheduler: true,
     };
 
-    let runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
 
     // Set baseline mode to Idle via IPC so Agent Core permits capacity
@@ -3127,7 +3091,7 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
     std::fs::create_dir_all(install_root.join("logs")).unwrap();
     std::fs::write(&user_log, b"preserve me").unwrap();
 
-    let startup = runnermesh::WindowsUserStartupBackend::for_current_user().unwrap();
+    let startup = runnermesh::SandboxAutostartBackend::new(temp_root.join("autostart.json"));
     let uninst = installation.uninstall(&startup).unwrap();
     assert!(uninst.removed_versions >= 2);
     assert!(uninst.foreign_content_preserved);
@@ -3608,4 +3572,489 @@ fn regression_finding8_scm_helper_dispatch_refuses_when_worker_is_busy() {
         Some("scm.busy-worker")
     );
     assert_eq!(mock_scm.start_calls(), 0);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_s1_installed_assembly_distinct_scopes_and_single_control_path() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-s1-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let home_a = temp_dir.join("runner-a");
+    let work_a = temp_dir.join("work-a");
+    std::fs::create_dir_all(&home_a).unwrap();
+    std::fs::create_dir_all(&work_a).unwrap();
+
+    let home_b = temp_dir.join("runner-b");
+    let work_b = temp_dir.join("work-b");
+    std::fs::create_dir_all(&home_b).unwrap();
+    std::fs::create_dir_all(&work_b).unwrap();
+
+    let mut reg = runnermesh::RunnerRegistry::default();
+    let scope_a = RegistrationScope::Repository {
+        owner: "org-alpha".to_string(),
+        repository: "repo-alpha".to_string(),
+    };
+    let scope_b = RegistrationScope::Repository {
+        owner: "org-beta".to_string(),
+        repository: "repo-beta".to_string(),
+    };
+
+    let r_a = runnermesh::RunnerRecord {
+        local_runner_key: "runner-a".to_string(),
+        registration_scope: scope_a.clone(),
+        runner_id: 201,
+        expected_runner_name: "runner-a-node".to_string(),
+        runner_home: home_a.clone(),
+        work_root: work_a.clone(),
+        execution_identity_ref: OpaqueIdentityReference {
+            provider: WINDOWS_SID_SHA256_IDENTITY_PROVIDER.to_string(),
+            key: "id-a".to_string(),
+        },
+        backend: runnermesh::RegistryBackendBinding::WindowsService {
+            service_name: "actions.runner.svcA".to_string(),
+        },
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: Some(runnermesh::CredentialReference {
+            provider: "cred-mgr".to_string(),
+            key: "cred-key-a".to_string(),
+        }),
+        managed_admission: true,
+    };
+
+    let r_b = runnermesh::RunnerRecord {
+        local_runner_key: "runner-b".to_string(),
+        registration_scope: scope_b.clone(),
+        runner_id: 202,
+        expected_runner_name: "runner-b-node".to_string(),
+        runner_home: home_b.clone(),
+        work_root: work_b.clone(),
+        execution_identity_ref: OpaqueIdentityReference {
+            provider: WINDOWS_SID_SHA256_IDENTITY_PROVIDER.to_string(),
+            key: "id-b".to_string(),
+        },
+        backend: runnermesh::RegistryBackendBinding::UserSession,
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: Some(runnermesh::CredentialReference {
+            provider: "cred-mgr".to_string(),
+            key: "cred-key-b".to_string(),
+        }),
+        managed_admission: true,
+    };
+
+    reg.records.push(r_a);
+    reg.records.push(r_b);
+
+    let install_root = temp_dir.join("installed");
+    std::fs::create_dir_all(&install_root).unwrap();
+    let registry_file = install_root.join("runners-registry.json");
+    std::fs::write(&registry_file, serde_json::to_string_pretty(&reg).unwrap()).unwrap();
+
+    let mock_scm = MockScmBackend::new();
+    let img_a = runner_service_image_token(&home_a);
+    mock_scm.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: "actions.runner.svcA".to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: img_a.clone(),
+        execution_identity_token: "id-a".to_string(),
+    });
+
+    let gate_a = LiveScmExecutionGate::from_synthetic_test_grant(&SyntheticScmTestGrant::new(
+        "actions.runner.svcA",
+        img_a.clone(),
+        false,
+        true,
+        false,
+    ))
+    .unwrap();
+    let helper = PrivilegedScmHelper::new(mock_scm.clone(), gate_a);
+    let session_transport = Arc::new(
+        runnermesh::SimulatedUserSessionProcessTransport::new()
+            .with_active_session("runner-b", DiscoveredLifecycle::Listening),
+    );
+    let session_coord = Arc::new(runnermesh::StandardSessionCoordinator::new(
+        session_transport.clone(),
+    ));
+
+    // Backend uses coordinator factory replacing only the HTTP/cred boundary
+    let authoritative_backend = Arc::new(
+        AuthoritativeMultiRunnerLifecycleBackend::new(helper)
+            .with_session_coordinator(session_coord)
+            .with_coordinator_factory(Arc::new(move |record| {
+                Some(Arc::new(
+                    InProcessAdmissionCoordinator::new().with_selector(
+                        record.registration_scope.clone(),
+                        record.runner_id,
+                        true,
+                    ),
+                ))
+            })),
+    );
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("s1-test-{}", std::process::id()));
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: install_root.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(authoritative_backend),
+        discovery_report: None,
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
+    };
+
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    // B1: Both distinct scopes are present and managed
+    let list_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersList))
+        .expect("RunnersList");
+    if let runnermesh::IpcResponseBody::Success(boxed) = list_resp.body {
+        if let runnermesh::AgentResponse::Runners(report) = *boxed {
+            assert_eq!(report.records.len(), 2);
+            assert!(report
+                .records
+                .iter()
+                .any(|r| r.local_runner_key == "runner-a"));
+            assert!(report
+                .records
+                .iter()
+                .any(|r| r.local_runner_key == "runner-b"));
+        } else {
+            panic!("Expected Runners response");
+        }
+    } else {
+        panic!("Expected Success");
+    }
+
+    // B3: Disabling Runner A dispatches Stop only for Runner A; Runner B receives zero control actions
+    let resp_dis_a = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-a".to_string(),
+            prepare_only: false,
+            when_idle: false,
+        }))
+        .expect("IPC disable runner-a");
+    assert!(matches!(
+        resp_dis_a.body,
+        runnermesh::IpcResponseBody::Success(_)
+    ));
+
+    let deadline_stop = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline_stop {
+        if mock_scm.service_stop_calls("actions.runner.svcA") > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(mock_scm.service_stop_calls("actions.runner.svcA") >= 1);
+    assert!(
+        session_transport.stopped.lock().unwrap().is_empty(),
+        "Runner B must receive zero control actions when Runner A is disabled"
+    );
+
+    let _ = runtime.shutdown();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_s2_gated_session_trusted_authorization_and_close() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 1. Synthetic test grant strictly refuses live execution
+    let synth_grant =
+        runnermesh::SyntheticSessionTestGrant::new("runner-sess", "tok-1", "tx-synth", now + 100);
+    let synth_transport =
+        runnermesh::GatedUserSessionProcessTransport::from_synthetic_test_grant(&synth_grant);
+    let record = runnermesh::RunnerRecord {
+        local_runner_key: "runner-sess".to_string(),
+        registration_scope: RegistrationScope::Repository {
+            owner: "o".to_string(),
+            repository: "r".to_string(),
+        },
+        runner_id: 501,
+        expected_runner_name: "sess-node".to_string(),
+        runner_home: std::path::PathBuf::from(r"C:\fake\runner"),
+        work_root: std::path::PathBuf::from(r"C:\fake\work"),
+        execution_identity_ref: OpaqueIdentityReference {
+            provider: WINDOWS_SID_SHA256_IDENTITY_PROVIDER.to_string(),
+            key: "tok-1".to_string(),
+        },
+        backend: runnermesh::RegistryBackendBinding::UserSession,
+        desired_enabled: true,
+        enrollment_state: runnermesh::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: false,
+    };
+
+    use runnermesh::UserSessionProcessTransport;
+    let synth_err = synth_transport.launch_listener(&record).unwrap_err();
+    assert_eq!(synth_err, "session.synthetic-gate-refuses-live-mutation");
+
+    // 2. Unissued verifier strictly refuses authorization
+    let unissued_scope = OwnerAuthorizationScope::new(
+        "runner-sess",
+        "tok-1",
+        "tok-1",
+        "host",
+        "commit",
+        "tx-unissued",
+        true,
+        false,
+        false,
+    );
+    let unissued_verifier =
+        runnermesh::TokenValidatingOwnerVerifier::new(b"secret", unissued_scope);
+    let unissued_req = runnermesh::TrustedOwnerAuthorizationRequest {
+        service_name: "runner-sess".to_string(),
+        image_token: "tok-1".to_string(),
+        execution_identity_token: "tok-1".to_string(),
+        target_host_token: "host".to_string(),
+        candidate_commit: "commit".to_string(),
+        transaction_id: "tx-unissued".to_string(),
+        allow_start: true,
+        allow_stop: false,
+        allow_change_config: false,
+        not_before_epoch_seconds: now - 10,
+        expires_at_epoch_seconds: now + 100,
+        nonce: "nonce-1".to_string(),
+        owner_material: Vec::new(),
+    };
+    let unissued_res = runnermesh::LiveSessionExecutionGate::from_trusted_owner_authorization(
+        &unissued_verifier,
+        &unissued_req,
+    );
+    assert_eq!(
+        unissued_res.unwrap_err(),
+        runnermesh::ScmApiError::AuthorizationNotIssued
+    );
+
+    // 3. Trusted live gate connects to execution transport
+    let live_gate = runnermesh::LiveSessionExecutionGate::mint_trusted_live(
+        "runner-sess",
+        "tok-1",
+        "tx-live",
+        now + 100,
+    );
+    let live_transport = runnermesh::GatedUserSessionProcessTransport::with_gate(live_gate);
+    assert!(live_transport.gate().is_trusted_live());
+    assert!(live_transport.gate().is_open());
+    assert_eq!(
+        live_transport.gate().bound_transaction_id(),
+        Some("tx-live")
+    );
+
+    // 4. Revocation / Recovery immediately closes gate
+    live_transport.close();
+    assert!(!live_transport.gate().is_open());
+    let closed_err = live_transport.launch_listener(&record).unwrap_err();
+    assert_eq!(closed_err, "session.transport-refused: session.gate-closed");
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_s3_shared_shutdown_bounded_incomplete_recovery() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-s3-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let install_root = temp_dir.join("installed");
+    std::fs::create_dir_all(&install_root).unwrap();
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("s3-test-{}", std::process::id()));
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: install_root.clone(),
+        ipc_endpoint,
+        multi_runner_backend: None,
+        discovery_report: None,
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: true,
+    };
+
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+
+    // 1. Inject a slow worker that holds background polling for 5 seconds
+    let release_tx = runtime.attach_slow_worker_for_test(Duration::from_secs(5));
+
+    // 2. Short timeout must return Incomplete while preserving handle and writing shutdown-incomplete
+    let start = std::time::Instant::now();
+    let incomplete_res = runtime.shutdown_with_timeout(Duration::from_millis(50));
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(2));
+
+    match incomplete_res {
+        Err(runnermesh::agent_runtime::ShutdownError::Incomplete { poll_timed_out, .. }) => {
+            assert!(poll_timed_out, "poll thread must be reported timed out");
+        }
+        other => panic!("Expected ShutdownError::Incomplete, got {other:?}"),
+    }
+
+    assert_eq!(runtime.stage().as_deref(), Some("shutdown-incomplete"));
+    assert!(
+        !runtime.is_completely_shutdown(),
+        "Handle must be preserved for recovery"
+    );
+
+    // 3. Release slow worker simulating completed drain / unblock
+    let _ = release_tx.send(());
+
+    // 4. Retry shutdown: completes cleanly and writes shutdown-complete
+    let second_res = runtime.shutdown_with_timeout(Duration::from_secs(3));
+    assert!(
+        second_res.is_ok(),
+        "Second shutdown attempt must complete cleanly"
+    );
+    assert_eq!(runtime.stage().as_deref(), Some("shutdown-complete"));
+    assert!(
+        runtime.is_completely_shutdown(),
+        "All threads must be safely joined"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn regression_s4_distinct_payload_upgrade_rollback_and_p08_invariants() {
+    let candidate_paths = [
+        std::env::var("RUNNERMESH_RC_PACKAGE_PATH")
+            .map(std::path::PathBuf::from)
+            .ok(),
+        Some(std::path::PathBuf::from(
+            r"baseline\1e7123b\runnermesh-0.2.0-rc.1-windows-x64.zip",
+        )),
+        Some(std::path::PathBuf::from(
+            r"..\..\runnermesh-160h-audit\2026-11-15\160H-REMAINING-CLOSEOUT-1e7123b\baseline\1e7123b\runnermesh-0.2.0-rc.1-windows-x64.zip",
+        )),
+        Some(std::path::PathBuf::from(
+            r"target\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
+        )),
+    ];
+
+    let rc_archive_source = candidate_paths
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+        .expect("Authentic RC package must exist in baseline/1e7123b");
+    let rc_archive_source = std::fs::canonicalize(rc_archive_source)
+        .expect("Authentic RC package must be canonicalizable");
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "rm-s4-sandbox-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_root).unwrap();
+
+    let staging_1 = temp_root.join("staging-1");
+    runnermesh::PackageVerifier::extract_runtime(&rc_archive_source, &staging_1)
+        .expect("extract authentic rc archive");
+
+    let install_root = temp_root.join("installed");
+    let installation = runnermesh::Installation::new(&install_root);
+
+    // Install v0.2.0-rc.1
+    let manifest_1 = runnermesh::manifest_for_payload(&staging_1).expect("manifest 1");
+    let receipt_1 = installation
+        .install_with_manifest("0.2.0-rc.1", &staging_1, &manifest_1)
+        .unwrap();
+    assert_eq!(receipt_1.version, "0.2.0-rc.1");
+    assert!(receipt_1.activated, "First slot should be active");
+
+    // Create genuinely distinct staging-2 payload with different version and commit provenance
+    let staging_2 = temp_root.join("staging-2");
+    std::fs::create_dir_all(&staging_2).unwrap();
+    for name in ["runnermesh.exe", "runnermesh-agent.exe"] {
+        std::fs::copy(staging_1.join(name), staging_2.join(name)).unwrap();
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(staging_2.join("runnermesh-agent.exe"))
+        .unwrap();
+    file.write_all(b"\n// upgrade-candidate-bytes\n").unwrap();
+    drop(file);
+
+    let manifest_2 = runnermesh::manifest_for_payload(&staging_2).expect("manifest 2");
+    assert_ne!(
+        manifest_1, manifest_2,
+        "Must be genuinely distinct payloads with different digests"
+    );
+
+    let receipt_2 = installation
+        .install_with_manifest("0.2.0-rc.2", &staging_2, &manifest_2)
+        .unwrap();
+    assert!(!receipt_2.activated, "Second slot must not auto-activate");
+    assert_eq!(receipt_2.version, "0.2.0-rc.2");
+
+    // Upgrade to 0.2.0-rc.2
+    installation.select_active("0.2.0-rc.2").unwrap();
+    assert_eq!(
+        installation.active_agent_path().unwrap(),
+        install_root
+            .join("versions")
+            .join("0.2.0-rc.2")
+            .join("runnermesh-agent.exe")
+    );
+
+    // Rollback to 0.2.0-rc.1
+    installation.select_active("0.2.0-rc.1").unwrap();
+    assert_eq!(
+        installation.active_agent_path().unwrap(),
+        install_root
+            .join("versions")
+            .join("0.2.0-rc.1")
+            .join("runnermesh-agent.exe")
+    );
+
+    // B11: Use SandboxAutostartBackend (fake startup) for clean test isolation
+    let fake_startup = runnermesh::SandboxAutostartBackend::new(temp_root.join("autostart.json"));
+    let uninst = installation.uninstall(&fake_startup).unwrap();
+    assert!(uninst.removed_versions >= 2);
+
+    // B12: P08 baseline invariants check
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let sample = runnermesh::RunnerResourceSample::new_uncertain(
+        "runner-x",
+        runnermesh::RunnerResourceRole::Listener,
+        now_ms,
+    );
+    assert_eq!(
+        sample.cpu, None,
+        "P08 baseline: CPU must not be sampled in live workstation readings"
+    );
+    assert_eq!(
+        sample.confidence,
+        runnermesh::ResourceSampleConfidence::Unknown,
+        "P08 baseline: Missing evidence must stay Unknown, never 0 or inactive"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
 }

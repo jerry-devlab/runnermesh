@@ -347,6 +347,9 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
         _is_user_session: bool,
     ) {
     }
+
+    /// Unregisters a runner target when forgotten.
+    fn unregister_runner_target(&self, _local_runner_key: &str) {}
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -597,8 +600,23 @@ impl LiveSessionExecutionGate {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn mint_trusted_live(
+    /// Live path: verifies an Owner authorization request using HMAC-SHA256 and mints a TrustedLive gate.
+    pub fn from_trusted_owner_authorization<
+        V: crate::windows_scm_executor::TrustedOwnerAuthorizationVerifier,
+    >(
+        verifier: &V,
+        request: &crate::windows_scm_executor::TrustedOwnerAuthorizationRequest,
+    ) -> Result<Self, crate::windows_scm_executor::ScmApiError> {
+        let _scm_gate = verifier.verify(request)?;
+        Ok(Self::mint_trusted_live(
+            &request.service_name,
+            &request.execution_identity_token,
+            &request.transaction_id,
+            request.expires_at_epoch_seconds,
+        ))
+    }
+
+    pub fn mint_trusted_live(
         runner_key: &str,
         execution_identity_token: &str,
         transaction_id: &str,
@@ -690,9 +708,12 @@ impl GatedUserSessionProcessTransport {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn with_gate(gate: LiveSessionExecutionGate) -> Self {
+    pub fn with_gate(gate: LiveSessionExecutionGate) -> Self {
         Self { gate }
+    }
+
+    pub fn close(&self) {
+        self.gate.close();
     }
 
     pub fn gate(&self) -> &LiveSessionExecutionGate {
@@ -1210,6 +1231,39 @@ pub struct RunnerTargetRegistration {
 type RunnerAdmissionMap =
     BTreeMap<(crate::RegistrationScope, u64), Arc<dyn MultiRunnerAdmissionCoordinator>>;
 
+pub type AdmissionCoordinatorFactory =
+    Arc<dyn Fn(&RunnerRecord) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> + Send + Sync>;
+
+/// Builds the authentic exact BoundRunnerAdmissionCoordinator for an active enrolled record
+/// that requests managed admission and has a valid credential reference.
+pub fn default_runner_admission_coordinator(
+    record: &RunnerRecord,
+) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> {
+    if !record.managed_admission || !record.is_active_enrollment() {
+        return None;
+    }
+    let cred_ref = record.credential_ref.as_ref()?;
+    let ownership = Some(crate::ReservedLabelOwnership {
+        scope: record.registration_scope.clone(),
+        runner_id: record.runner_id,
+        label: crate::RESERVED_ADMISSION_LABEL.to_owned(),
+    });
+    let binding = crate::AdmissionBinding::new(
+        record.registration_scope.clone(),
+        record.runner_id,
+        record.expected_runner_name.clone(),
+        cred_ref.clone(),
+        ownership,
+    )
+    .ok()?;
+    let backend = crate::windows_github_admission_backend(binding).ok()?;
+    Some(Arc::new(crate::BoundRunnerAdmissionCoordinator::new(
+        record.registration_scope.clone(),
+        record.runner_id,
+        backend,
+    )))
+}
+
 /// Authoritative multi-runner lifecycle backend for installed production runtime.
 ///
 /// Obtains fresh observations from the Windows SCM and runner processes for each enrolled runner key,
@@ -1221,6 +1275,7 @@ pub struct AuthoritativeMultiRunnerLifecycleBackend<B> {
     admission_coordinators: Arc<Mutex<RunnerAdmissionMap>>,
     session: Option<Arc<dyn MultiRunnerSessionCoordinator>>,
     runner_targets: Arc<Mutex<BTreeMap<String, RunnerTargetRegistration>>>,
+    coordinator_factory: Option<AdmissionCoordinatorFactory>,
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifecycleBackend<B> {
@@ -1231,7 +1286,13 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
             admission_coordinators: Arc::new(Mutex::new(BTreeMap::new())),
             session: None,
             runner_targets: Arc::new(Mutex::new(BTreeMap::new())),
+            coordinator_factory: None,
         }
+    }
+
+    pub fn with_coordinator_factory(mut self, factory: AdmissionCoordinatorFactory) -> Self {
+        self.coordinator_factory = Some(factory);
+        self
     }
 
     pub fn with_admission_coordinator(
@@ -1332,6 +1393,53 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
                     is_user_session,
                 },
             );
+    }
+
+    fn register_runner_record(&self, record: &RunnerRecord) {
+        if !record.is_active_enrollment() {
+            return;
+        }
+        let service_name = match &record.backend {
+            RegistryBackendBinding::WindowsService { service_name } => Some(service_name.as_str()),
+            _ => None,
+        };
+        let is_user_session = matches!(&record.backend, RegistryBackendBinding::UserSession);
+        self.register_runner_target_detailed(
+            &record.local_runner_key,
+            record.registration_scope.clone(),
+            record.runner_id,
+            service_name,
+            Some(&record.runner_home),
+            is_user_session,
+        );
+        if record.managed_admission {
+            let coord = if let Some(ref factory) = self.coordinator_factory {
+                factory(record)
+            } else {
+                default_runner_admission_coordinator(record)
+            };
+            if let Some(coord) = coord {
+                self.register_runner_admission_coordinator(
+                    record.registration_scope.clone(),
+                    record.runner_id,
+                    coord,
+                );
+            }
+        }
+    }
+
+    fn unregister_runner_target(&self, local_runner_key: &str) {
+        let removed = self
+            .runner_targets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(local_runner_key);
+        if let Some(reg) = removed {
+            self.admission_coordinators
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&(reg.scope, reg.runner_id));
+        }
     }
 
     fn observe_runners(&self, local_runner_keys: &[String]) -> Vec<PerRunnerObservation> {
@@ -1876,9 +1984,13 @@ where
         let record = self
             .runner_registry
             .migrate_v01_binding(binding, service_name)
-            .map_err(AgentCoreError::Registry)?;
+            .map_err(AgentCoreError::Registry)?
+            .clone();
         let key = record.local_runner_key.clone();
         self.persist_registry()?;
+        if let Some(backend) = &self.multi_runner_backend {
+            backend.register_runner_record(&record);
+        }
         Ok(Some(key))
     }
 
@@ -1933,10 +2045,18 @@ where
     pub fn observe_decide_reconcile(&mut self) -> Result<AgentSnapshot, AgentCoreError> {
         let observation = self.observer.observe().map_err(AgentCoreError::Observer)?;
         let decision = decide(&self.config, &observation);
-        let admission_control = self
-            .reconciler
-            .reconcile(&decision, &observation)
-            .map_err(AgentCoreError::Reconciler)?;
+        let admission_control = if self.multi_runner_backend.is_some() {
+            // When multi-runner lifecycle backend is active, sole admission control authority belongs
+            // to it. The legacy single reconciler must not perform duplicate remote control actions.
+            observation
+                .admission_control
+                .clone()
+                .with_desired(DesiredAdmissionState::from_decision(&decision))
+        } else {
+            self.reconciler
+                .reconcile(&decision, &observation)
+                .map_err(AgentCoreError::Reconciler)?
+        };
         self.observation = observation;
         self.decision = decision;
         self.admission_control = admission_control;
@@ -2050,6 +2170,14 @@ where
                             if let Some(backend) = &self.multi_runner_backend {
                                 backend.register_runner_record(record);
                             }
+                        }
+                    }
+                    if let AgentCommand::RunnersForget {
+                        local_runner_key, ..
+                    } = &command
+                    {
+                        if let Some(backend) = &self.multi_runner_backend {
+                            backend.unregister_runner_target(local_runner_key);
                         }
                     }
                 }

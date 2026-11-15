@@ -3,6 +3,12 @@
 //! Samples are estimates with explicit timestamps and freshness TTLs. Missing,
 //! stale, or unattributable evidence stays `Unknown` and must never be presented
 //! as zero savings.
+//!
+//! P08 Read-Only Baseline Declarations:
+//! - CPU consumption is currently not sampled in live workstation readings (`RunnerResourceSample.cpu == None`).
+//! - Capabilities are inferred from platform/version metadata, not live enforcement.
+//! - Unknown or unavailable evidence is never treated as zero or inactive.
+//! - No Job Objects, process tree capping, or EcoQoS enforcement is performed in v0.1.
 
 use serde::{Deserialize, Serialize};
 

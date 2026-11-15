@@ -32,10 +32,10 @@ use crate::{
     HostSnapshot, HostSource, Installation, IpcEndpoint, IpcServer, LanguagePreference, LinkKind,
     LinkSnapshot, LinkState, LiveScmExecutionGate, LocalAgentTransport,
     MultiRunnerLifecycleBackend, NativeTrayEventLoop, OfficialRunnerObserver, OwnershipEvidence,
-    PrivilegedScmHelper, ProcessListProbe, ReasonCode, RegistryStore, RunnerPhase, ThemePreference,
-    TrayIconGlyph, TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate,
-    UserActivityProbe, WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource,
-    WindowsRunnerSource, WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
+    PrivilegedScmHelper, ProcessListProbe, ReasonCode, RunnerPhase, ThemePreference, TrayIconGlyph,
+    TrayMenuEntry, TrayMenuId, TrayMenuItem, TrayRender, TrayUiUpdate, UserActivityProbe,
+    WindowsGithubAdmissionBackend, WindowsHostSource, WindowsProcessSource, WindowsRunnerSource,
+    WindowsScmBackend, WindowsSteamAppIdSource, WindowsUserActivitySource,
     WindowsUserSessionSupervisorAdapter,
 };
 
@@ -150,7 +150,7 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     let binding = installation
         .runtime_binding()
         .map_err(|error| error.to_string())?;
-    let (observer, reconciler, admission_coord) = match binding {
+    let (observer, reconciler, _admission_coord) = match binding {
         Some(ref binding) => {
             let backend = crate::windows_github_admission_backend(binding.admission.clone())
                 .map_err(|error| error.to_string())?;
@@ -189,65 +189,22 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
         return Err("installed Agent state root is a reparse point".to_owned());
     }
-    let mut authoritative_backend =
+    let authoritative_backend = Arc::new(
         AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
             WindowsScmBackend::mutation_inert(),
             LiveScmExecutionGate::CLOSED,
         ))
         .with_session_coordinator(Arc::new(crate::StandardSessionCoordinator::new(
             Arc::new(crate::GatedUserSessionProcessTransport::closed()),
-        )));
+        ))),
+    );
 
-    let config_path = installation.agent_config_path();
-    let registry_path = config_path
-        .parent()
-        .map(|parent| parent.join("runners-registry.json"))
-        .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
-
-    if registry_path.is_file() {
-        if let Ok(Some(registry)) = crate::FileRegistryStore::new(&registry_path).load() {
-            for record in registry.records {
-                let service_name = match record.backend {
-                    crate::RegistryBackendBinding::WindowsService { ref service_name } => {
-                        Some(service_name.clone())
-                    }
-                    _ => None,
-                };
-                authoritative_backend.register_runner_target_with_service(
-                    &record.local_runner_key,
-                    record.registration_scope.clone(),
-                    record.runner_id,
-                    service_name.as_deref(),
-                );
-                if record.managed_admission {
-                    if let Some(ref binding) = binding {
-                        if binding.admission.scope == record.registration_scope
-                            && binding.admission.runner_id == record.runner_id
-                        {
-                            if let Some(ref coord) = admission_coord {
-                                authoritative_backend.register_runner_admission_coordinator(
-                                    record.registration_scope.clone(),
-                                    record.runner_id,
-                                    Arc::clone(coord),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if let Some(coord) = admission_coord {
-        authoritative_backend = authoritative_backend.with_admission_coordinator(coord);
-    }
-    let multi_runner_backend: Arc<dyn MultiRunnerLifecycleBackend> =
-        Arc::new(authoritative_backend);
     run_agent(
         installation.agent_config_path(),
         state_root,
         observer,
         reconciler,
-        Some(multi_runner_backend),
+        Some(authoritative_backend),
         false,
         binding.as_ref(),
     )
@@ -347,6 +304,120 @@ pub struct RunningInstalledAgentSandbox {
     pipe_thread_native_handle: Arc<AtomicIsize>,
 }
 
+/// Bounded graceful shutdown of background IPC listener and polling loops.
+///
+/// Shared between installed production runtime (`run_agent`) and qualification sandbox.
+/// Cancels synchronous pipe I/O, probes named pipe listener to wake it, and joins threads
+/// within `timeout`. If any thread exceeds the deadline, leaves the remaining handle intact
+/// and returns `Err(ShutdownError::Incomplete)` so the caller retains recoverable ownership.
+pub fn shutdown_runtime_threads(
+    state_root: &Path,
+    exit: &Arc<RuntimeExitState>,
+    endpoint: &IpcEndpoint,
+    pipe_thread: &mut Option<thread::JoinHandle<()>>,
+    poll_thread: &mut Option<thread::JoinHandle<()>>,
+    #[cfg(windows)] pipe_thread_native_handle: &Arc<AtomicIsize>,
+    timeout: std::time::Duration,
+) -> Result<(), ShutdownError> {
+    println!("[runtime:shutdown] stage=shutdown-started");
+    let _ = write_runtime_stage(state_root, "shutdown-started");
+    exit.requested.store(true, Ordering::Release);
+
+    #[cfg(windows)]
+    let native_handle = pipe_thread_native_handle.load(Ordering::Acquire);
+
+    // Phase 1: Cancel any synchronous I/O on pipe thread (ConnectNamedPipe)
+    #[cfg(windows)]
+    if native_handle != 0 {
+        let cancelled = cancel_thread_io(native_handle);
+        println!("[runtime:shutdown] stage=pipe-io-cancelled cancelled={cancelled}");
+        let _ = write_runtime_stage(state_root, "pipe-io-cancelled");
+    }
+
+    // Phase 2: Wake listener via named pipe connection probe
+    #[cfg(windows)]
+    {
+        let woken = crate::ipc::wake_listener(endpoint);
+        println!(
+            "[runtime:shutdown] stage=pipe-listener-woken ok={}",
+            woken.is_ok()
+        );
+        let _ = write_runtime_stage(state_root, "pipe-listener-woken");
+    }
+
+    let start = std::time::Instant::now();
+
+    // Phase 3: Bounded reclamation of pipe thread
+    let mut pipe_joined = true;
+    if let Some(ref handle) = pipe_thread {
+        while !handle.is_finished() && start.elapsed() < timeout {
+            #[cfg(windows)]
+            {
+                let nh = pipe_thread_native_handle.load(Ordering::Acquire);
+                if nh != 0 {
+                    let _ = cancel_thread_io(nh);
+                }
+                let _ = crate::ipc::wake_listener(endpoint);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        if handle.is_finished() {
+            let handle = pipe_thread.take().unwrap();
+            let _ = handle.join();
+            println!(
+                "[runtime:shutdown] stage=pipe-thread-joined elapsed_ms={}",
+                start.elapsed().as_millis()
+            );
+            let _ = write_runtime_stage(state_root, "pipe-thread-joined");
+        } else {
+            eprintln!("[runtime:shutdown] ERROR: pipe_thread failed to exit within timeout; preserving handle for recovery");
+            let _ = write_runtime_stage(state_root, "pipe-thread-deadline-exceeded");
+            pipe_joined = false;
+        }
+    }
+
+    // Phase 4: Bounded reclamation of poll thread
+    let mut poll_joined = true;
+    if let Some(ref handle) = poll_thread {
+        let poll_start = std::time::Instant::now();
+        while !handle.is_finished() && start.elapsed() < timeout {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        if handle.is_finished() {
+            let handle = poll_thread.take().unwrap();
+            let _ = handle.join();
+            println!(
+                "[runtime:shutdown] stage=poll-thread-joined elapsed_ms={}",
+                poll_start.elapsed().as_millis()
+            );
+            let _ = write_runtime_stage(state_root, "poll-thread-joined");
+        } else {
+            eprintln!("[runtime:shutdown] ERROR: poll_thread failed to exit within timeout; preserving handle for recovery");
+            let _ = write_runtime_stage(state_root, "poll-thread-deadline-exceeded");
+            poll_joined = false;
+        }
+    }
+
+    if !pipe_joined || !poll_joined {
+        eprintln!("[runtime:shutdown] stage=shutdown-incomplete");
+        let _ = write_runtime_stage(state_root, "shutdown-incomplete");
+        return Err(ShutdownError::Incomplete {
+            pipe_timed_out: !pipe_joined,
+            poll_timed_out: !poll_joined,
+            elapsed_ms: start.elapsed().as_millis(),
+        });
+    }
+
+    println!(
+        "[runtime:shutdown] stage=shutdown-complete total_elapsed_ms={}",
+        start.elapsed().as_millis()
+    );
+    let _ = write_runtime_stage(state_root, "shutdown-complete");
+    Ok(())
+}
+
 impl RunningInstalledAgentSandbox {
     /// Returns the current snapshot from the running AgentCore.
     pub fn snapshot(&self) -> AgentSnapshot {
@@ -398,7 +469,8 @@ impl RunningInstalledAgentSandbox {
     ///
     /// Wakes up or cancels any blocking `ConnectNamedPipe` waiting on the pipe thread,
     /// marks exit requested, and reclaims all thread handles within a bounded duration.
-    pub fn shutdown(mut self) -> Result<(), ShutdownError> {
+    /// Retains recoverable ownership on incomplete shutdown.
+    pub fn shutdown(&mut self) -> Result<(), ShutdownError> {
         self.shutdown_with_timeout(std::time::Duration::from_secs(5))
     }
 
@@ -412,103 +484,16 @@ impl RunningInstalledAgentSandbox {
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<(), ShutdownError> {
-        println!("[sandbox:shutdown] stage=shutdown-started");
-        let _ = write_runtime_stage(&self.state_root, "shutdown-started");
-        self.exit.requested.store(true, Ordering::Release);
-
-        #[cfg(windows)]
-        let native_handle = self.pipe_thread_native_handle.load(Ordering::Acquire);
-
-        // Phase 1: Cancel any synchronous I/O on pipe thread (ConnectNamedPipe)
-        #[cfg(windows)]
-        if native_handle != 0 {
-            let cancelled = cancel_thread_io(native_handle);
-            println!("[sandbox:shutdown] stage=pipe-io-cancelled cancelled={cancelled}");
-            let _ = write_runtime_stage(&self.state_root, "pipe-io-cancelled");
-        }
-
-        // Phase 2: Wake listener via named pipe connection probe
-        #[cfg(windows)]
-        {
-            let woken = crate::ipc::wake_listener(&self.endpoint);
-            println!(
-                "[sandbox:shutdown] stage=pipe-listener-woken ok={}",
-                woken.is_ok()
-            );
-            let _ = write_runtime_stage(&self.state_root, "pipe-listener-woken");
-        }
-
-        let start = std::time::Instant::now();
-
-        // Phase 3: Bounded reclamation of pipe thread
-        let mut pipe_joined = true;
-        if let Some(ref handle) = self.pipe_thread {
-            while !handle.is_finished() && start.elapsed() < timeout {
-                #[cfg(windows)]
-                {
-                    let nh = self.pipe_thread_native_handle.load(Ordering::Acquire);
-                    if nh != 0 {
-                        let _ = cancel_thread_io(nh);
-                    }
-                    let _ = crate::ipc::wake_listener(&self.endpoint);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-
-            if handle.is_finished() {
-                let handle = self.pipe_thread.take().unwrap();
-                let _ = handle.join();
-                println!(
-                    "[sandbox:shutdown] stage=pipe-thread-joined elapsed_ms={}",
-                    start.elapsed().as_millis()
-                );
-                let _ = write_runtime_stage(&self.state_root, "pipe-thread-joined");
-            } else {
-                eprintln!("[sandbox:shutdown] ERROR: pipe_thread failed to exit within timeout; preserving handle for recovery");
-                let _ = write_runtime_stage(&self.state_root, "pipe-thread-deadline-exceeded");
-                pipe_joined = false;
-            }
-        }
-
-        // Phase 4: Bounded reclamation of poll thread
-        let mut poll_joined = true;
-        if let Some(ref handle) = self.poll_thread {
-            let poll_start = std::time::Instant::now();
-            while !handle.is_finished() && start.elapsed() < timeout {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-
-            if handle.is_finished() {
-                let handle = self.poll_thread.take().unwrap();
-                let _ = handle.join();
-                println!(
-                    "[sandbox:shutdown] stage=poll-thread-joined elapsed_ms={}",
-                    poll_start.elapsed().as_millis()
-                );
-                let _ = write_runtime_stage(&self.state_root, "poll-thread-joined");
-            } else {
-                eprintln!("[sandbox:shutdown] ERROR: poll_thread failed to exit within timeout; preserving handle for recovery");
-                let _ = write_runtime_stage(&self.state_root, "poll-thread-deadline-exceeded");
-                poll_joined = false;
-            }
-        }
-
-        if !pipe_joined || !poll_joined {
-            eprintln!("[sandbox:shutdown] stage=shutdown-incomplete");
-            let _ = write_runtime_stage(&self.state_root, "shutdown-incomplete");
-            return Err(ShutdownError::Incomplete {
-                pipe_timed_out: !pipe_joined,
-                poll_timed_out: !poll_joined,
-                elapsed_ms: start.elapsed().as_millis(),
-            });
-        }
-
-        println!(
-            "[sandbox:shutdown] stage=shutdown-complete total_elapsed_ms={}",
-            start.elapsed().as_millis()
-        );
-        let _ = write_runtime_stage(&self.state_root, "shutdown-complete");
-        Ok(())
+        shutdown_runtime_threads(
+            &self.state_root,
+            &self.exit,
+            &self.endpoint,
+            &mut self.pipe_thread,
+            &mut self.poll_thread,
+            #[cfg(windows)]
+            &self.pipe_thread_native_handle,
+            timeout,
+        )
     }
 }
 
@@ -679,26 +664,26 @@ fn run_agent(
         readiness,
         development_controls,
     );
-    exit.requested.store(true, Ordering::Release);
-    #[cfg(windows)]
-    {
-        let h = pipe_native_handle.load(Ordering::Acquire);
-        if h != 0 {
-            let _ = cancel_thread_io(h);
-        }
-        let _ = crate::ipc::wake_listener(&endpoint);
+    let shutdown_res = shutdown_runtime_threads(
+        &runtime_state_root,
+        &exit,
+        &endpoint,
+        &mut Some(pipe_thread),
+        &mut Some(periodic_thread),
+        #[cfg(windows)]
+        &pipe_native_handle,
+        Duration::from_secs(5),
+    );
+    if let Err(ref e) = shutdown_res {
+        eprintln!("[installed_agent] warning: shutdown incomplete: {e}");
     }
-    // Exit is requested through the same typed local IPC route. The pipe loop
-    // returns after that request; never force-terminate a thread or runner.
-    let _ = pipe_thread.join();
-    let _ = periodic_thread.join();
     result
 }
 
 #[derive(Default)]
-pub(crate) struct RuntimeExitState {
-    requested: AtomicBool,
-    after_drain: AtomicBool,
+pub struct RuntimeExitState {
+    pub requested: AtomicBool,
+    pub after_drain: AtomicBool,
 }
 
 fn build_provenance() -> BuildProvenance {

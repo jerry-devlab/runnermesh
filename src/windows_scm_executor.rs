@@ -1256,6 +1256,16 @@ impl LiveScmExecutionGate {
         matches!(self.grant_kind, ScmGrantKind::TrustedLive)
     }
 
+    /// Mints an ScmMutationArm if and only if this gate holds a verified TrustedLive grant.
+    /// SyntheticTestOnly and Closed gates strictly refuse to mint a mutation arm.
+    pub fn mint_mutation_arm(&self) -> Result<ScmMutationArm, ScmApiError> {
+        if self.grant_kind == ScmGrantKind::TrustedLive && self.allows_mutation() {
+            Ok(ScmMutationArm { _private: () })
+        } else {
+            Err(ScmApiError::GateClosed)
+        }
+    }
+
     pub fn bound_service_name(&self) -> &str {
         &self.bound_service_name
     }
@@ -2651,13 +2661,29 @@ impl WindowsScmBackend {
         }
     }
 
-    /// Future Owner-transaction entry. Not callable without a privately minted arm.
-    #[allow(dead_code)]
-    fn with_mutation_arm(arm: ScmMutationArm) -> Self {
+    /// Constructs a backend armed with a verified mutation arm.
+    pub fn with_mutation_arm(arm: ScmMutationArm) -> Self {
         Self {
             allow_read_only_query: true,
             mutation_arm: Some(arm),
         }
+    }
+
+    /// Arms the mutation arm from a verified TrustedLive gate.
+    pub fn arm_with_gate(&mut self, gate: &LiveScmExecutionGate) -> Result<(), ScmApiError> {
+        let arm = gate.mint_mutation_arm()?;
+        self.mutation_arm = Some(arm);
+        Ok(())
+    }
+
+    /// Disarms mutation authority, restoring mutation_inert state.
+    pub fn disarm(&mut self) {
+        self.mutation_arm = None;
+    }
+
+    /// Queries whether the mutation arm is currently armed.
+    pub fn is_armed(&self) -> bool {
+        self.mutation_arm.is_some()
     }
 
     fn require_exact_name(service_name: &str) -> Result<(), ScmApiError> {
@@ -6173,5 +6199,53 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_s2_mutation_arm_mint_and_backend_disarm() {
+        // 1. Closed gate strictly refuses to mint mutation arm
+        let gate_closed = LiveScmExecutionGate::CLOSED;
+        assert!(gate_closed.mint_mutation_arm().is_err());
+
+        // 2. Synthetic test gate strictly refuses to mint mutation arm
+        let synth_grant =
+            SyntheticScmTestGrant::new("actions.runner.svc", "img-tok", true, true, false);
+        let gate_synth = LiveScmExecutionGate::from_synthetic_test_grant(&synth_grant).unwrap();
+        assert_eq!(
+            gate_synth.mint_mutation_arm().unwrap_err(),
+            ScmApiError::GateClosed
+        );
+
+        // 3. Backend cannot be armed with synthetic gate
+        let mut backend = WindowsScmBackend::mutation_inert();
+        assert!(!backend.is_armed());
+        assert_eq!(
+            backend.arm_with_gate(&gate_synth).unwrap_err(),
+            ScmApiError::GateClosed
+        );
+        assert!(!backend.is_armed());
+
+        // 4. Trusted live gate successfully mints mutation arm and arms backend
+        let gate_trusted = LiveScmExecutionGate::mint_trusted_live(
+            "actions.runner.svc",
+            "img-tok",
+            "id-tok",
+            "host-tok",
+            "commit-tok",
+            "tx-123",
+            true,
+            true,
+            false,
+            100,
+            200,
+        )
+        .unwrap();
+        assert!(gate_trusted.is_trusted_live());
+        assert!(backend.arm_with_gate(&gate_trusted).is_ok());
+        assert!(backend.is_armed());
+
+        // 5. Disarming restores inert state
+        backend.disarm();
+        assert!(!backend.is_armed());
     }
 }

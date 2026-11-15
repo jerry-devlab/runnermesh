@@ -107,8 +107,9 @@ pub use hux_sandbox::{
 #[cfg(windows)]
 pub use installation::WindowsUserStartupBackend;
 pub use installation::{
-    AutostartBackend, AutostartChange, AutostartEntry, InstallError, InstallReceipt, Installation,
-    InstallationState, SandboxAutostartBackend, UninstallReceipt, VersionManifest,
+    manifest_for_payload, AutostartBackend, AutostartChange, AutostartEntry, InstallError,
+    InstallReceipt, Installation, InstallationState, SandboxAutostartBackend, UninstallReceipt,
+    VersionManifest,
 };
 pub use ipc::{
     wake_listener, IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse,

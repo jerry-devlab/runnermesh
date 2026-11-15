@@ -2015,7 +2015,7 @@ fn validate_version(version: &str) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn manifest_for_payload(payload: &Path) -> Result<VersionManifest, InstallError> {
+pub fn manifest_for_payload(payload: &Path) -> Result<VersionManifest, InstallError> {
     let mut files = BTreeMap::new();
     collect_manifest(payload, payload, &mut files)?;
     if files.is_empty() {
