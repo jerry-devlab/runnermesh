@@ -69,6 +69,7 @@ pub use agent::{
     StandardSessionCoordinator, SyntheticSessionTestGrant, UserSessionProcessTransport,
     CONFIG_SCHEMA_VERSION,
 };
+#[cfg(windows)]
 pub use agent_runtime::InstalledAgentRuntimeSession;
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]
