@@ -2827,17 +2827,13 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
                     &home,
                     service_sid.as_deref(),
                 );
-            if worker_present {
-                state = DiscoveredLifecycle::Busy;
-            } else if !obs_ok {
-                state = DiscoveredLifecycle::Unknown;
-            } else if !listener_present && status.dwProcessId == 0 {
-                state = DiscoveredLifecycle::Stopped;
-            } else if listener_present
-                || status.dwCurrentState == windows_sys::Win32::System::Services::SERVICE_RUNNING
-            {
-                state = DiscoveredLifecycle::Listening;
-            }
+            state = map_service_lifecycle_from_process_observation(
+                status.dwCurrentState == windows_sys::Win32::System::Services::SERVICE_RUNNING,
+                status.dwProcessId,
+                listener_present,
+                worker_present,
+                obs_ok,
+            );
         }
 
         let _ = ERROR_SERVICE_DOES_NOT_EXIST;
@@ -2852,6 +2848,31 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
             image_token,
             execution_identity_token,
         })
+    }
+}
+
+/// Derives the service lifecycle state from low-level SCM service process and discovery observation.
+///
+/// Shared across production SCM query path and regression verification tests to ensure
+/// synthetic tests do not hand-code `Busy` or `Unknown` states without connecting through
+/// actual process observation facts.
+pub fn map_service_lifecycle_from_process_observation(
+    service_is_running: bool,
+    service_process_id: u32,
+    listener_present: bool,
+    worker_present: bool,
+    evidence_complete: bool,
+) -> DiscoveredLifecycle {
+    if worker_present {
+        DiscoveredLifecycle::Busy
+    } else if !evidence_complete {
+        DiscoveredLifecycle::Unknown
+    } else if !listener_present && service_process_id == 0 {
+        DiscoveredLifecycle::Stopped
+    } else if listener_present || service_is_running {
+        DiscoveredLifecycle::Listening
+    } else {
+        DiscoveredLifecycle::Unknown
     }
 }
 

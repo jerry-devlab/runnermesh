@@ -154,6 +154,11 @@ def check_evidence_index(
     pkg = data.get("package_artifacts")
     if isinstance(pkg, Mapping):
         archive_name = pkg.get("archive")
+        if not archive_name or not isinstance(archive_name, str):
+            errors.append("package_artifacts.archive is missing or not a string")
+        elif not str(archive_name).lower().endswith(".zip"):
+            errors.append(f"package_artifacts.archive must have a .zip extension (got: {archive_name!r})")
+
         archive_sha, err = validate_sha256(pkg.get("archive_sha256"), "package_artifacts.archive_sha256")
         if err:
             errors.append(err)
@@ -170,7 +175,9 @@ def check_evidence_index(
             errors.append(f"package_artifacts.helper_bytes must be a positive integer (got: {helper_bytes!r})")
 
         provenance = pkg.get("provenance")
-        if isinstance(provenance, Mapping):
+        if provenance is None:
+            errors.append("package_artifacts.provenance is missing")
+        elif isinstance(provenance, Mapping):
             prov_commit, err = validate_sha(provenance.get("commit"), "provenance.commit")
             if err:
                 errors.append(err)
@@ -181,7 +188,7 @@ def check_evidence_index(
             for req_field in ("version", "channel", "target"):
                 if not provenance.get(req_field):
                     errors.append(f"provenance.{req_field} is missing or empty")
-        elif provenance is not None:
+        else:
             errors.append("package_artifacts.provenance must be a mapping")
 
         # Verify physical archive file if base_dir is given
@@ -205,31 +212,41 @@ def check_evidence_index(
                         f"archive SHA256 mismatch: declared {archive_sha}, actual file is {actual_hash}"
                     )
 
-                # Verify provenance inside package archive (antitampering against reused old ZIP)
-                try:
-                    import zipfile
-                    if zipfile.is_zipfile(found_archive):
+                # Verify file is a valid zip archive and check provenance inside
+                import zipfile
+                if not zipfile.is_zipfile(found_archive):
+                    errors.append(f"archive file {archive_name} is not a valid zip archive")
+                else:
+                    try:
                         with zipfile.ZipFile(found_archive, "r") as zf:
                             manifest_name = "PACKAGE-MANIFEST.json"
                             if manifest_name in zf.namelist():
                                 manifest_bytes = zf.read(manifest_name)
                                 manifest_data = json.loads(manifest_bytes.decode("utf-8"))
-                                inner_prov = manifest_data.get("provenance", {})
-                                inner_commit = inner_prov.get("commit")
-                                if inner_commit:
-                                    inner_commit_clean, prov_err = validate_sha(
-                                        inner_commit, f"{manifest_name}.provenance.commit"
-                                    )
-                                    if prov_err:
-                                        errors.append(prov_err)
-                                    elif candidate_head and inner_commit_clean != candidate_head:
-                                        errors.append(
-                                            f"archive PACKAGE-MANIFEST.json commit {inner_commit_clean} does not match candidate_head {candidate_head}"
+                                inner_prov = manifest_data.get("provenance")
+                                if not inner_prov or not isinstance(inner_prov, Mapping):
+                                    errors.append(f"archive {manifest_name} is missing provenance mapping")
+                                else:
+                                    inner_commit = inner_prov.get("commit")
+                                    if not inner_commit:
+                                        errors.append(f"archive {manifest_name} missing provenance.commit")
+                                    else:
+                                        inner_commit_clean, prov_err = validate_sha(
+                                            inner_commit, f"{manifest_name}.provenance.commit"
                                         )
+                                        if prov_err:
+                                            errors.append(prov_err)
+                                        elif candidate_head and inner_commit_clean != candidate_head:
+                                            errors.append(
+                                                f"archive PACKAGE-MANIFEST.json commit {inner_commit_clean} does not match candidate_head {candidate_head}"
+                                            )
+                                    for req_field in ("version", "channel", "target"):
+                                        if not inner_prov.get(req_field):
+                                            errors.append(f"archive {manifest_name} missing provenance.{req_field}")
                             else:
                                 errors.append(f"archive {archive_name} missing {manifest_name}")
-                except Exception as ex:
-                    errors.append(f"unable to inspect archive {archive_name}: {ex}")
+                    except Exception as ex:
+                        errors.append(f"unable to inspect archive {archive_name}: {ex}")
 
         # Verify physical helper executable if base_dir is given
         if base_dir and helper_name:
@@ -329,10 +346,35 @@ def check_evidence_index(
                     errors.append(
                         "r2_audit.disposition declared PASS but raw report specifies DISPOSITION=FAIL"
                     )
+                if (
+                    "DISPOSITION=PENDING" in report_content
+                    or "FORMAL_R2_STATUS=PENDING" in report_content
+                    or "FORMAL_R2=PENDING" in report_content
+                    or "STATUS=PENDING" in report_content
+                    or "R2_STATUS=PENDING" in report_content
+                ) and r2_disposition == "PASS":
+                    errors.append(
+                        "r2_audit.disposition declared PASS but report indicates review is PENDING"
+                    )
                 if "EVIDENCE_SCOPE=DIAGNOSTIC_ONLY" in report_content and r2_disposition == "PASS":
                     errors.append(
                         "r2_audit report is diagnostic-only and cannot substantiate formal PASS"
                     )
+
+                # Check for partial audit / slice masquerading as overall PASS (even with matching candidate SHA)
+                if r2_disposition == "PASS":
+                    partial_patterns = [
+                        r"\b(PARTIAL|PARTIAL_AUDIT|PARTIAL_REVIEW|AUDIT_SCOPE=PARTIAL|EVIDENCE_SCOPE=PARTIAL|SUBSYSTEM_ONLY)\b",
+                        r"\bFindings?\s+\d+[\s–-]+\d+\s+only\b",
+                        r"\bSCOPE:\s*PARTIAL\b",
+                        r"\b(LOCAL_ONLY|SLICE_ONLY|SINGLE_FINDING)\b",
+                    ]
+                    for pat in partial_patterns:
+                        if re.search(pat, report_content, re.IGNORECASE):
+                            errors.append(
+                                f"r2_audit report indicates a partial review ({pat}) and cannot substantiate overall PASS"
+                            )
+                            break
 
         if findings_count > 0 and r2_disposition == "PASS":
             errors.append(

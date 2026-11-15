@@ -418,6 +418,83 @@ class TestEvidenceCheck(unittest.TestCase):
             msg=f"Expected diagnostic report claiming PASS error, got: {res.errors}",
         )
 
+    def test_rejection_of_non_zip_extension_or_corrupt_zip(self):
+        """Checker must refuse non-.zip extension or corrupted/non-zip archive file."""
+        # Extension not .zip
+        index_data = self._base_valid_index()
+        index_data["package_artifacts"]["archive"] = "runnermesh.tar.gz"
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("must have a .zip extension" in e for e in res.errors))
+
+        # Physical file is not a valid zip
+        fake_zip = self.root / "fake.zip"
+        fake_zip.write_bytes(b"not a real zip file content")
+        index_data2 = self._base_valid_index()
+        index_data2["package_artifacts"]["archive"] = fake_zip.name
+        index_data2["package_artifacts"]["archive_bytes"] = fake_zip.stat().st_size
+        index_data2["package_artifacts"]["archive_sha256"] = compute_file_sha256(fake_zip)
+        res2 = check_evidence_index(index_data2, base_dir=self.root)
+        self.assertFalse(res2.is_pass())
+        self.assertTrue(any("not a valid zip archive" in e for e in res2.errors))
+
+    def test_rejection_of_missing_provenance_in_index_or_archive(self):
+        """Checker must refuse missing provenance in package_artifacts or in archive manifest."""
+        # Missing in index
+        index_data = self._base_valid_index()
+        del index_data["package_artifacts"]["provenance"]
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(any("package_artifacts.provenance is missing" in e for e in res.errors))
+
+        # Missing provenance mapping inside archive manifest
+        bad_archive = self.root / "bad_manifest.zip"
+        with zipfile.ZipFile(bad_archive, "w") as zf:
+            zf.writestr("PACKAGE-MANIFEST.json", json.dumps({"schema_version": 1}))
+        index_data2 = self._base_valid_index()
+        index_data2["package_artifacts"]["archive"] = bad_archive.name
+        index_data2["package_artifacts"]["archive_bytes"] = bad_archive.stat().st_size
+        index_data2["package_artifacts"]["archive_sha256"] = compute_file_sha256(bad_archive)
+        res2 = check_evidence_index(index_data2, base_dir=self.root)
+        self.assertFalse(res2.is_pass())
+        self.assertTrue(any("missing provenance" in e for e in res2.errors))
+
+    def test_rejection_of_pending_report_claiming_pass(self):
+        """Checker must refuse reports declaring PENDING when r2_audit claims PASS."""
+        pending_report = self.root / "pending_report.md"
+        pending_report.write_text(
+            f"DISPOSITION=PENDING\nCANDIDATE_HEAD={self.valid_head}\nFORMAL_R2_STATUS=PENDING\n",
+            encoding="utf-8",
+        )
+        index_data = self._base_valid_index()
+        index_data["r2_audit"]["report"] = pending_report.name
+        index_data["r2_audit"]["disposition"] = "PASS"
+        index_data["r2_audit"]["findings_count"] = 0
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("report indicates review is PENDING" in e for e in res.errors),
+            msg=f"Expected pending report claiming PASS error, got: {res.errors}",
+        )
+
+    def test_rejection_of_same_sha_partial_review_claiming_overall_pass(self):
+        """Checker must refuse partial reviews on the same SHA claiming overall PASS."""
+        partial_report = self.root / "partial_report.md"
+        partial_report.write_text(
+            f"DISPOSITION=PASS\nCANDIDATE_HEAD={self.valid_head}\nFindings 1-3 only\nAUDIT_SCOPE=PARTIAL\n",
+            encoding="utf-8",
+        )
+        index_data = self._base_valid_index()
+        index_data["r2_audit"]["report"] = partial_report.name
+        index_data["r2_audit"]["disposition"] = "PASS"
+        index_data["r2_audit"]["findings_count"] = 0
+        res = check_evidence_index(index_data, base_dir=self.root)
+        self.assertFalse(res.is_pass())
+        self.assertTrue(
+            any("indicates a partial review" in e for e in res.errors),
+            msg=f"Expected partial review claiming overall PASS error, got: {res.errors}",
+        )
+
     def test_validate_sha_helpers(self):
         sha, err = validate_sha("a" * 40, "test")
         self.assertIsNone(err)

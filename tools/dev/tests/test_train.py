@@ -776,6 +776,51 @@ class TimingAndAvailabilityTests(unittest.TestCase):
         self.assertIn("candidate_start", values)
         self.assertIn("candidate_ready", values)
 
+    def test_candidate_expected_head_matches_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            timing_path = Path(temporary) / "timing.json"
+            fake_repository = mock.Mock()
+            fake_repository.assert_identity = mock.Mock()
+            fake_repository.clean.return_value = True
+            fake_repository.head.return_value = HEAD
+            fake_repository.timing_path.return_value = timing_path
+            with (
+                mock.patch("tools.dev.train.Repository", return_value=fake_repository),
+                mock.patch("tools.dev.train.resolve_head", return_value=HEAD),
+                mock.patch("tools.dev.train.resolve_base", return_value=MAIN),
+                mock.patch(
+                    "tools.dev.train.git_changed_paths",
+                    return_value=["tools/dev/train.py"],
+                ),
+                mock.patch(
+                    "tools.dev.train.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ),
+                mock.patch("tools.dev.train.run_portability") as portability,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                portability.return_value.status = "N/A"
+                portability.return_value.detail = "test"
+                result = command_candidate(
+                    argparse.Namespace(base=MAIN, portability="off", expected_head=HEAD)
+                )
+        self.assertEqual(result, 0)
+
+    def test_candidate_expected_head_mismatch_refused(self) -> None:
+        fake_repository = mock.Mock()
+        fake_repository.assert_identity = mock.Mock()
+        fake_repository.clean.return_value = True
+        fake_repository.head.return_value = HEAD
+        with (
+            mock.patch("tools.dev.train.Repository", return_value=fake_repository),
+            mock.patch("tools.dev.train.resolve_head", return_value=HEAD),
+        ):
+            with self.assertRaises(ToolError) as ctx:
+                command_candidate(
+                    argparse.Namespace(base=MAIN, portability="off", expected_head="1" * 40)
+                )
+        self.assertIn("does not match expected-head", str(ctx.exception))
+
     def test_candidate_refuses_stale_worktree_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             timing_path = Path(temporary) / "timing.json"

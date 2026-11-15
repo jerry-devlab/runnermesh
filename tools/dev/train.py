@@ -981,6 +981,12 @@ def command_candidate(args: argparse.Namespace) -> int:
     if not is_valid:
         raise ToolError(f"candidate requires a clean worktree bound to a commit: {err_msg}")
     head = resolve_head("HEAD", REPO_ROOT)
+    if getattr(args, "expected_head", None):
+        expected_head = _validate_sha(args.expected_head, "expected-head")
+        if head != expected_head:
+            raise ToolError(
+                f"candidate head {head} does not match expected-head {expected_head}"
+            )
     base = resolve_base(args.base, head, REPO_ROOT)
     paths = git_changed_paths(base, head, "merge-base", REPO_ROOT)
     change_class = classify_paths(paths)
@@ -1022,7 +1028,12 @@ def command_candidate(args: argparse.Namespace) -> int:
                 if evidence_index_path.parent.name == "evidence"
                 else evidence_index_path.parent
             )
-            ev_result = check_evidence_index(ev_data, base_dir=base_dir, repo_root=REPO_ROOT)
+            ev_result = check_evidence_index(
+                ev_data,
+                base_dir=base_dir,
+                repo_root=REPO_ROOT,
+                expected_head=head,
+            )
             _emit(
                 {
                     "EVIDENCE_BINDING_CHECK": ev_result.disposition,
@@ -1450,6 +1461,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     candidate = subparsers.add_parser("candidate", help="run the settled local candidate gate")
     candidate.add_argument("--base", required=True, help="accepted main commit")
+    candidate.add_argument(
+        "--expected-head",
+        help="assert the candidate commit exactly matches this expected SHA",
+    )
     candidate.add_argument(
         "--portability", choices=("auto", "off"), default="auto"
     )

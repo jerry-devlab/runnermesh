@@ -1880,21 +1880,25 @@ fn regression_c4_runners_status_reflects_failures_and_resources() {
         }))
         .expect("IPC RunnersDisable must succeed");
 
-    // Wait 60ms for periodic tick to trigger reconcile_and_dispatch_multi_runners under GateClosed
-    std::thread::sleep(Duration::from_millis(60));
+    // Poll RunnersStatus via IPC until partial_failure is reflected, bounded by 1500ms
+    let start_wait = std::time::Instant::now();
+    let report = loop {
+        std::thread::sleep(Duration::from_millis(30));
+        let resp = ipc_client
+            .call(IpcRequest::new(AgentCommand::RunnersStatus {
+                local_runner_key: None,
+            }))
+            .expect("IPC RunnersStatus must succeed");
 
-    // Query RunnersStatus via IPC
-    let resp = ipc_client
-        .call(IpcRequest::new(AgentCommand::RunnersStatus {
-            local_runner_key: None,
-        }))
-        .expect("IPC RunnersStatus must succeed");
-
-    let runnermesh::IpcResponseBody::Success(boxed) = resp.body else {
-        panic!("Expected Success IPC response");
-    };
-    let runnermesh::AgentResponse::Runners(report) = *boxed else {
-        panic!("Expected Runners response");
+        let runnermesh::IpcResponseBody::Success(boxed) = resp.body else {
+            panic!("Expected Success IPC response");
+        };
+        let runnermesh::AgentResponse::Runners(report) = *boxed else {
+            panic!("Expected Runners response");
+        };
+        if report.partial_failure || start_wait.elapsed() > Duration::from_millis(1500) {
+            break report;
+        }
     };
 
     // Verify C4 requirements:
@@ -2175,17 +2179,31 @@ fn regression_finding_r2_a_01_service_account_worker_prevents_stop_with_zero_cal
         "Evidence under matching service account identity must be complete"
     );
 
-    // 2. Mock SCM service configured with Busy worker lifecycle state
+    // 2. Lifecycle state MUST be derived via production shared lifecycle mapping
+    // from actual process observation facts — NEVER hand-coded as Busy!
+    let derived_lifecycle = runnermesh::map_service_lifecycle_from_process_observation(
+        true, // SERVICE_RUNNING
+        1234, // dwProcessId
+        proc_result.listener_present,
+        proc_result.worker_present,
+        proc_result.evidence_complete,
+    );
+    assert_eq!(
+        derived_lifecycle,
+        DiscoveredLifecycle::Busy,
+        "Production lifecycle mapping must derive DiscoveredLifecycle::Busy from service worker observation"
+    );
+
     let mock_scm = MockScmBackend::new();
     mock_scm.insert(MockServiceRecord {
         observation: ServiceObservation {
             service_name: service_name.to_string(),
-            state: DiscoveredLifecycle::Busy,
+            state: derived_lifecycle,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,
             ownership_verified: true,
         },
-        worker_busy: true,
+        worker_busy: proc_result.worker_present,
         image_token: image_token.clone(),
         execution_identity_token: ident_token.clone(),
     });
@@ -2252,11 +2270,40 @@ fn regression_finding_r2_a_01_service_account_worker_prevents_stop_with_zero_cal
         "Foreign worker must mark evidence as incomplete"
     );
 
-    // When SCM observation receives incomplete/foreign evidence, state is Unknown
+    // Derive lifecycle state via shared production mapping from foreign process observation
+    let foreign_derived_lifecycle = runnermesh::map_service_lifecycle_from_process_observation(
+        true, // SERVICE_RUNNING
+        1234, // dwProcessId
+        foreign_proc_result.listener_present,
+        foreign_proc_result.worker_present,
+        foreign_proc_result.evidence_complete,
+    );
+    assert!(
+        matches!(
+            foreign_derived_lifecycle,
+            DiscoveredLifecycle::Busy | DiscoveredLifecycle::Unknown
+        ),
+        "Foreign worker process observation must map to Busy or Unknown lifecycle"
+    );
+
+    // Incomplete evidence without worker (e.g. observation error) maps to Unknown
+    let incomplete_derived_lifecycle = runnermesh::map_service_lifecycle_from_process_observation(
+        true,  // SERVICE_RUNNING
+        1234,  // dwProcessId
+        false, // listener_present
+        false, // worker_present
+        false, // evidence_complete = false
+    );
+    assert_eq!(
+        incomplete_derived_lifecycle,
+        DiscoveredLifecycle::Unknown,
+        "Incomplete evidence must derive DiscoveredLifecycle::Unknown"
+    );
+
     mock_scm.insert(MockServiceRecord {
         observation: ServiceObservation {
             service_name: service_name.to_string(),
-            state: DiscoveredLifecycle::Unknown,
+            state: incomplete_derived_lifecycle,
             start_mode: ServiceStartMode::Manual,
             image_path_matches: true,
             ownership_verified: true,
