@@ -1236,6 +1236,7 @@ pub type AdmissionCoordinatorFactory =
 
 /// Builds the authentic exact BoundRunnerAdmissionCoordinator for an active enrolled record
 /// that requests managed admission and has a valid credential reference.
+#[cfg(windows)]
 pub fn default_runner_admission_coordinator(
     record: &RunnerRecord,
 ) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> {
@@ -1262,6 +1263,13 @@ pub fn default_runner_admission_coordinator(
         record.runner_id,
         backend,
     )))
+}
+
+#[cfg(not(windows))]
+pub fn default_runner_admission_coordinator(
+    _record: &RunnerRecord,
+) -> Option<Arc<dyn MultiRunnerAdmissionCoordinator>> {
+    None
 }
 
 /// Authoritative multi-runner lifecycle backend for installed production runtime.
