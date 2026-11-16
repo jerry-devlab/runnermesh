@@ -4323,9 +4323,6 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
         Some(std::path::PathBuf::from(
             r"..\..\runnermesh-160h-audit\2026-11-15\160H-REMAINING-CLOSEOUT-1e7123b\baseline\1e7123b\runnermesh-0.2.0-rc.1-windows-x64.zip",
         )),
-        Some(std::path::PathBuf::from(
-            r"C:\Dev\runnermesh-160h-audit\2026-11-15\160H-REMAINING-CLOSEOUT-1e7123b\baseline\1e7123b\runnermesh-0.2.0-rc.1-windows-x64.zip",
-        )),
     ];
 
     let old_rc_source = old_candidate_paths
