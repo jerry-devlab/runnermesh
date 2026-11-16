@@ -109,8 +109,9 @@ pub fn run_development_agent(
     development_root: PathBuf,
     runner_home: Option<PathBuf>,
     process_probe_names: Vec<String>,
-) -> Result<(), String> {
-    fs::create_dir_all(&development_root).map_err(|error| error.to_string())?;
+) -> Result<(), AgentRunError> {
+    fs::create_dir_all(&development_root)
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let observer = RuntimeObserver::new(runner_home, process_probe_names);
     run_agent(
         development_root.join("config.json"),
@@ -126,34 +127,36 @@ pub fn run_development_agent(
 /// Starts only the active executable from an explicit, ledger-verified
 /// installation. An absent binding produces a safe unconfigured runtime; a
 /// present binding enables the accepted exact-runner admission controller.
-pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
+pub fn run_installed_agent(install_root: PathBuf) -> Result<(), AgentRunError> {
     let install_root = install_root
         .canonicalize()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let installation = Installation::new(install_root);
     let _active_agent = installation
         .active_agent_path()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?
         .canonicalize()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let stable_agent = installation
         .stable_agent_entry()
         .canonicalize()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let current_agent = std::env::current_exe()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?
         .canonicalize()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     if stable_agent != current_agent {
-        return Err("installed Agent is not the ledger-owned stable executable".to_owned());
+        return Err(AgentRunError::Startup(
+            "installed Agent is not the ledger-owned stable executable".to_owned(),
+        ));
     }
     let binding = installation
         .runtime_binding()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let (observer, reconciler, _admission_coord) = match binding {
         Some(ref binding) => {
             let backend = crate::windows_github_admission_backend(binding.admission.clone())
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| AgentRunError::Startup(error.to_string()))?;
             let observer = RuntimeObserver::new_bound(
                 &binding.local,
                 &binding.admission,
@@ -169,7 +172,7 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
                 RuntimeReconciler::Configured(Box::new(AdmissionAgentReconciler::new(
                     AdmissionController::new(
                         crate::windows_github_admission_backend(binding.admission.clone())
-                            .map_err(|error| error.to_string())?,
+                            .map_err(|error| AgentRunError::Startup(error.to_string()))?,
                     ),
                 ))),
                 Some(coord as Arc<dyn crate::MultiRunnerAdmissionCoordinator>),
@@ -183,11 +186,17 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), String> {
     };
     let state_root = installation.agent_state_dir();
     let state_guards = crate::installation::guard_existing_directories(&state_root)
-        .map_err(|error| error.to_string())?;
-    fs::create_dir_all(&state_root).map_err(|error| error.to_string())?;
-    state_guards.verify().map_err(|error| error.to_string())?;
-    if crate::installation::is_reparse_point(&state_root).map_err(|error| error.to_string())? {
-        return Err("installed Agent state root is a reparse point".to_owned());
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
+    fs::create_dir_all(&state_root).map_err(|error| AgentRunError::Startup(error.to_string()))?;
+    state_guards
+        .verify()
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
+    if crate::installation::is_reparse_point(&state_root)
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?
+    {
+        return Err(AgentRunError::Startup(
+            "installed Agent state root is a reparse point".to_owned(),
+        ));
     }
     let authoritative_backend = Arc::new(
         AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
@@ -360,6 +369,51 @@ impl InstalledAgentRuntimeSession {
     }
 }
 
+impl std::fmt::Debug for InstalledAgentRuntimeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstalledAgentRuntimeSession")
+            .field("state_root", &self.state_root)
+            .field("endpoint", &self.endpoint)
+            .field("has_pipe_thread", &self.pipe_thread.is_some())
+            .field("has_periodic_thread", &self.periodic_thread.is_some())
+            .finish()
+    }
+}
+
+/// Typed error for Agent runtime execution that preserves recoverable session ownership.
+#[derive(Debug)]
+pub enum AgentRunError {
+    Startup(String),
+    TrayLoop(String),
+    ShutdownIncomplete {
+        source: ShutdownError,
+        session: Box<InstalledAgentRuntimeSession>,
+    },
+}
+
+impl std::fmt::Display for AgentRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Startup(e) => write!(f, "startup failed: {e}"),
+            Self::TrayLoop(e) => write!(f, "tray loop failed: {e}"),
+            Self::ShutdownIncomplete { source, .. } => {
+                write!(f, "shutdown incomplete: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentRunError {}
+
+impl AgentRunError {
+    pub fn into_incomplete_session(self) -> Option<InstalledAgentRuntimeSession> {
+        match self {
+            Self::ShutdownIncomplete { session, .. } => Some(*session),
+            _ => None,
+        }
+    }
+}
+
 /// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
 pub struct RunningInstalledAgentSandbox {
     core: Arc<Mutex<RuntimeCore>>,
@@ -500,6 +554,11 @@ impl RunningInstalledAgentSandbox {
     /// Returns the IPC endpoint bound by this sandbox.
     pub fn endpoint(&self) -> &IpcEndpoint {
         &self.endpoint
+    }
+
+    /// Accesses the underlying AgentCore for qualification inspection.
+    pub fn core(&self) -> &Arc<Mutex<RuntimeCore>> {
+        &self.core
     }
 
     /// Fault injection helper for qualification: attaches an uncompleted thread to simulate
@@ -670,7 +729,7 @@ pub fn start_installed_agent_sandbox(
     })
 }
 
-fn run_agent(
+pub fn run_agent(
     config_path: PathBuf,
     runtime_state_root: PathBuf,
     observer: RuntimeObserver,
@@ -678,31 +737,60 @@ fn run_agent(
     multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     development_controls: bool,
     runtime_binding: Option<&crate::InstalledRuntimeBinding>,
-) -> Result<(), String> {
+) -> Result<(), AgentRunError> {
+    run_agent_with_shutdown_timeout(
+        config_path,
+        runtime_state_root,
+        observer,
+        reconciler,
+        multi_runner_backend,
+        development_controls,
+        runtime_binding,
+        Duration::from_secs(5),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_agent_with_shutdown_timeout(
+    config_path: PathBuf,
+    runtime_state_root: PathBuf,
+    observer: RuntimeObserver,
+    reconciler: RuntimeReconciler,
+    multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
+    development_controls: bool,
+    runtime_binding: Option<&crate::InstalledRuntimeBinding>,
+    shutdown_timeout: Duration,
+) -> Result<(), AgentRunError> {
     // Acquire the user-scoped authority guard before constructing a configured
     // core or performing any observation/reconciliation that could mutate the
     // remote admission selector.
-    let endpoint = IpcEndpoint::for_current_user().map_err(|error| error.to_string())?;
-    let server = IpcServer::bind(endpoint.clone()).map_err(|error| error.to_string())?;
+    let endpoint = IpcEndpoint::for_current_user()
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
+    let server = IpcServer::bind(endpoint.clone())
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let runner_home = observer.runner_home.as_deref().map(Path::to_path_buf);
     let runner_control_configured = matches!(&reconciler, RuntimeReconciler::Configured(_));
     let readiness = Arc::new(RuntimeReadiness::from_runner_home(
         runner_home.as_deref(),
         runner_control_configured,
     ));
-    let mut core =
-        assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)?;
+    let mut core = assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)
+        .map_err(AgentRunError::Startup)?;
     if let Some(binding) = runtime_binding {
         core.migrate_v01_binding_if_needed(binding, None)
-            .map_err(|error| format!("migration of v0.1 binding failed: {error}"))?;
+            .map_err(|error| {
+                AgentRunError::Startup(format!("migration of v0.1 binding failed: {error}"))
+            })?;
     }
     let initial_snapshot = core
         .observe_decide_reconcile()
-        .map_err(|error| error.to_string())?;
-    write_runtime_stage(&runtime_state_root, "observation-complete")?;
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
+    write_runtime_stage(&runtime_state_root, "observation-complete")
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let core = Arc::new(Mutex::new(core));
     let exit = Arc::new(RuntimeExitState::default());
-    write_runtime_stage(&runtime_state_root, "pipe-bound")?;
+    write_runtime_stage(&runtime_state_root, "pipe-bound")
+        .map_err(|error| AgentRunError::Startup(error.to_string()))?;
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     #[cfg(windows)]
     let pipe_native_handle = Arc::new(AtomicIsize::new(0));
@@ -742,12 +830,15 @@ fn run_agent(
         readiness,
         development_controls,
     );
-    let shutdown_res = session.shutdown(Duration::from_secs(5));
-    if let Err(ref e) = shutdown_res {
-        eprintln!("[installed_agent] ERROR: shutdown incomplete: {e}");
-        return Err(format!("installed_agent shutdown incomplete: {e}"));
+    let shutdown_res = session.shutdown(shutdown_timeout);
+    if let Err(source) = shutdown_res {
+        eprintln!("[installed_agent] ERROR: shutdown incomplete: {source}");
+        return Err(AgentRunError::ShutdownIncomplete {
+            source,
+            session: Box::new(session),
+        });
     }
-    result
+    result.map_err(AgentRunError::TrayLoop)
 }
 
 #[derive(Default)]

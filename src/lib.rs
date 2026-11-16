@@ -70,7 +70,7 @@ pub use agent::{
     CONFIG_SCHEMA_VERSION,
 };
 #[cfg(windows)]
-pub use agent_runtime::InstalledAgentRuntimeSession;
+pub use agent_runtime::{AgentRunError, InstalledAgentRuntimeSession};
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]
 pub(crate) use credential::WindowsCredentialManagerProvider;

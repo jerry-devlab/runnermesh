@@ -42,7 +42,9 @@ fn main() {
         (None, Some(installed_root)) if runner_home.is_none() && process_probe_names.is_empty() => {
             runnermesh::agent_runtime::run_installed_agent(installed_root)
         }
-        _ => Err("exactly one Agent runtime profile is required".to_owned()),
+        _ => Err(runnermesh::AgentRunError::Startup(
+            "exactly one Agent runtime profile is required".to_owned(),
+        )),
     };
     if let Err(error) = result {
         // The Windows-subsystem binary has no console of its own, but a

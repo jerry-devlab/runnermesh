@@ -127,21 +127,14 @@ jobs:
           $cliExe = Join-Path $binaryRoot 'runnermesh.exe'
           $agentExe = Join-Path $binaryRoot 'runnermesh-agent.exe'
           $manifest = Join-Path $PWD 'resources\runnermesh-agent.manifest'
-          & $pkgExe create $pkgOut '0.2.0-rc.1' '1e7123b612e453375e57312585730a10dcd3f528' 'rc' $cliExe $agentExe $manifest
-          if ($LASTEXITCODE -ne 0) { throw 'LRM RC1 package creation failed' }
-          $zipPathRc1 = Join-Path $pkgOut 'runnermesh-0.2.0-rc.1-windows-x64.zip'
-          & $pkgExe verify $zipPathRc1
-          if ($LASTEXITCODE -ne 0) { throw 'LRM RC1 package verification failed' }
-
           & $pkgExe create $pkgOut '0.2.0-rc.2' '${{ needs.classify.outputs.head_sha }}' 'rc' $cliExe $agentExe $manifest
           if ($LASTEXITCODE -ne 0) { throw 'LRM RC2 package creation failed' }
           $zipPathRc2 = Join-Path $pkgOut 'runnermesh-0.2.0-rc.2-windows-x64.zip'
           & $pkgExe verify $zipPathRc2
           if ($LASTEXITCODE -ne 0) { throw 'LRM RC2 package verification failed' }
 
-          echo "RUNNERMESH_OLD_RC_PACKAGE_PATH=$zipPathRc1" >> $env:GITHUB_ENV
           echo "RUNNERMESH_NEW_RC_PACKAGE_PATH=$zipPathRc2" >> $env:GITHUB_ENV
-          echo "RUNNERMESH_RC_PACKAGE_PATH=$zipPathRc1" >> $env:GITHUB_ENV
+          echo "RUNNERMESH_RC_PACKAGE_PATH=$zipPathRc2" >> $env:GITHUB_ENV
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Build and execute installed Windows release smoke

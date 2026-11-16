@@ -101,8 +101,9 @@ impl OwnerAuthorizationScope {
         }
     }
 
-    /// Issues a cryptographically signed authorization request for synthetic testing and qualification suites.
-    pub fn issue_synthetic_request(
+    /// Internal test helper: issues a cryptographically signed authorization request for module unit tests.
+    #[cfg(test)]
+    pub(crate) fn issue_synthetic_request(
         &self,
         authority_secret: &[u8],
         validity_seconds: u64,
@@ -849,9 +850,9 @@ impl TokenValidatingOwnerVerifier {
         )
     }
 
-    /// Constructs a verifier with an in-memory authority secret for synthetic testing / qualification suites.
-    /// Never used in production deployment without explicit Owner provisioning.
-    pub fn for_synthetic_test(
+    /// Internal test constructor bound to an in-memory authority secret for unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_synthetic_test(
         authority_secret: &[u8],
         scope: OwnerAuthorizationScope,
         clock: Arc<dyn TrustedClock>,
@@ -6410,5 +6411,66 @@ mod tests {
         // 5. Disarming restores inert state
         backend.disarm();
         assert!(!backend.is_armed());
+    }
+
+    #[test]
+    fn test_s2_positive_hmac_and_pre_io_side_effect_checks() {
+        let secret = b"unit-test-authority-secret-32-bytes!";
+        let clock = Arc::new(MockClock::new(1000));
+        let scope = OwnerAuthorizationScope::new(
+            "actions.runner.svc-a",
+            "img-token-1",
+            "identity-token-1",
+            "host-token-1",
+            "candidate-commit-40-chars-hex-sha12345678",
+            "tx-s2-auth-1",
+            true,  // allow_start
+            true,  // allow_stop
+            false, // allow_change_config
+        );
+        let verifier =
+            TokenValidatingOwnerVerifier::for_synthetic_test(secret, scope.clone(), clock.clone());
+        let (req, _sig) =
+            scope.issue_synthetic_request(secret, 300, "nonce-s2-positive", clock.clone());
+
+        // 1. Valid HMAC request successfully produces TrustedLive gate inside unit test
+        let gate = LiveScmExecutionGate::from_trusted_owner_authorization(&verifier, &req).unwrap();
+        assert!(gate.is_trusted_live());
+        assert!(gate.allows_mutation());
+
+        // 2. Arm backend with verified gate
+        let mut backend = WindowsScmBackend::mutation_inert().with_clock(clock.clone());
+        backend.arm_with_gate(&gate).unwrap();
+        assert!(backend.is_armed());
+
+        // 3. Pre-I/O check: name drift is rejected before native call
+        assert_eq!(
+            backend
+                .authorize_mutation("other.service", ScmActionKind::Start)
+                .unwrap_err(),
+            ScmApiError::NameDrift
+        );
+
+        // 4. Pre-I/O check: unpermitted action (ChangeConfig) is rejected
+        assert_eq!(
+            backend
+                .authorize_mutation("actions.runner.svc-a", ScmActionKind::ChangeConfig)
+                .unwrap_err(),
+            ScmApiError::GateClosed
+        );
+
+        // 5. Pre-I/O check: permitted action (Start) succeeds
+        assert!(backend
+            .authorize_mutation("actions.runner.svc-a", ScmActionKind::Start)
+            .is_ok());
+
+        // 6. Pre-I/O check: expiry rejects with AccessDenied
+        clock.set_time(1400);
+        assert_eq!(
+            backend
+                .authorize_mutation("actions.runner.svc-a", ScmActionKind::Start)
+                .unwrap_err(),
+            ScmApiError::AccessDenied
+        );
     }
 }

@@ -611,6 +611,10 @@ impl LiveSessionExecutionGate {
         if !scm_gate.is_trusted_live() || !scm_gate.allows_mutation() {
             return Err(crate::windows_scm_executor::ScmApiError::GateClosed);
         }
+        // Stop-only authorizations must not be escalated to session launch authority.
+        if !request.allow_start {
+            return Err(crate::windows_scm_executor::ScmApiError::GateClosed);
+        }
         Ok(Self::mint_trusted_live(
             &request.service_name,
             &request.execution_identity_token,
