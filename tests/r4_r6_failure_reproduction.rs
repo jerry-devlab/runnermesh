@@ -2936,11 +2936,11 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
         std::env::var("RUNNERMESH_RC_PACKAGE_PATH")
             .map(std::path::PathBuf::from)
             .ok(),
+        std::env::var("RUNNERMESH_NEW_RC_PACKAGE_PATH")
+            .map(std::path::PathBuf::from)
+            .ok(),
         Some(std::path::PathBuf::from(
-            r"..\..\runnermesh-160h-audit\2026-11-12\160H-FINAL-CLOSEOUT-2703a1e\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
-        )),
-        Some(std::path::PathBuf::from(
-            r"target\artifacts\lrm-rc\runnermesh-0.2.0-rc.1-windows-x64.zip",
+            r"target\artifacts\lrm-rc\runnermesh-0.2.0-rc.2-windows-x64.zip",
         )),
     ];
 
@@ -2968,13 +2968,13 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
         "Authentic archive bytes must be authentic binary size (>1MB), not stub"
     );
 
-    let target_archive = temp_root.join("runnermesh-0.2.0-rc.1-windows-x64.zip");
+    let target_archive = temp_root.join("runnermesh-0.2.0-rc.2-windows-x64.zip");
     std::fs::copy(&rc_archive_source, &target_archive).unwrap();
     let rc_archive = target_archive;
 
     let (manifest, hash) = runnermesh::PackageVerifier::verify_with_hash(&rc_archive).unwrap();
     assert!(!hash.is_empty(), "RC package hash must be non-empty");
-    assert_eq!(manifest.provenance.version, "0.2.0-rc.1");
+    assert_eq!(manifest.provenance.version, "0.2.0-rc.2");
     assert_eq!(manifest.provenance.channel, "rc");
     assert_eq!(manifest.provenance.commit.len(), 40);
 
@@ -2994,22 +2994,22 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
         files: extracted.files,
     };
     let receipt = installation
-        .install_with_manifest("0.2.0-rc.1", &staging_1, &accepted_members)
+        .install_with_manifest("0.2.0-rc.2", &staging_1, &accepted_members)
         .unwrap();
     assert!(receipt.activated);
-    assert_eq!(receipt.version, "0.2.0-rc.1");
+    assert_eq!(receipt.version, "0.2.0-rc.2");
     assert_eq!(
         installation.active_agent_path().unwrap(),
         install_root
             .join("versions")
-            .join("0.2.0-rc.1")
+            .join("0.2.0-rc.2")
             .join("runnermesh-agent.exe")
     );
 
     // Real byte execution proof: execute the extracted authentic PE binary
     let active_cli = install_root
         .join("versions")
-        .join("0.2.0-rc.1")
+        .join("0.2.0-rc.2")
         .join("runnermesh.exe");
     assert!(active_cli.is_file(), "Extracted CLI binary must exist");
     let run_res = std::process::Command::new(&active_cli)
@@ -3037,15 +3037,36 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
         std::fs::copy(staging_1.join(name), staging_2.join(name)).unwrap();
     }
     let receipt_2 = installation
-        .install_with_manifest("0.2.0-rc.2", &staging_2, &accepted_members)
+        .install_with_manifest("0.2.0-rc.3", &staging_2, &accepted_members)
         .unwrap();
     assert!(
         !receipt_2.activated,
         "Second version slot installation must not automatically activate"
     );
-    assert_eq!(receipt_2.version, "0.2.0-rc.2");
+    assert_eq!(receipt_2.version, "0.2.0-rc.3");
 
-    // Upgrade: select active 0.2.0-rc.2
+    // Upgrade: select active 0.2.0-rc.3
+    installation.select_active("0.2.0-rc.3").unwrap();
+    assert_eq!(
+        installation.active_agent_path().unwrap(),
+        install_root
+            .join("versions")
+            .join("0.2.0-rc.3")
+            .join("runnermesh-agent.exe")
+    );
+
+    // Real byte execution proof on upgraded slot
+    let upgraded_cli = install_root
+        .join("versions")
+        .join("0.2.0-rc.3")
+        .join("runnermesh.exe");
+    let run_upgraded = std::process::Command::new(&upgraded_cli)
+        .arg("version")
+        .output()
+        .expect("Upgraded binary must execute successfully");
+    assert!(run_upgraded.status.success());
+
+    // Rollback: select active 0.2.0-rc.2
     installation.select_active("0.2.0-rc.2").unwrap();
     assert_eq!(
         installation.active_agent_path().unwrap(),
@@ -3055,31 +3076,10 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
             .join("runnermesh-agent.exe")
     );
 
-    // Real byte execution proof on upgraded slot
-    let upgraded_cli = install_root
-        .join("versions")
-        .join("0.2.0-rc.2")
-        .join("runnermesh.exe");
-    let run_upgraded = std::process::Command::new(&upgraded_cli)
-        .arg("version")
-        .output()
-        .expect("Upgraded binary must execute successfully");
-    assert!(run_upgraded.status.success());
-
-    // Rollback: select active 0.2.0-rc.1
-    installation.select_active("0.2.0-rc.1").unwrap();
-    assert_eq!(
-        installation.active_agent_path().unwrap(),
-        install_root
-            .join("versions")
-            .join("0.2.0-rc.1")
-            .join("runnermesh-agent.exe")
-    );
-
     // Real byte execution proof on rolled-back slot
     let rolled_back_cli = install_root
         .join("versions")
-        .join("0.2.0-rc.1")
+        .join("0.2.0-rc.2")
         .join("runnermesh.exe");
     let run_rolled_back = std::process::Command::new(&rolled_back_cli)
         .arg("version")
@@ -4248,7 +4248,7 @@ fn regression_s3_shared_shutdown_bounded_incomplete_recovery() {
         let _ = prod_rx.recv_timeout(Duration::from_secs(5));
     });
 
-    let mut raw_session = runnermesh::InstalledAgentRuntimeSession::new(
+    let raw_session = runnermesh::InstalledAgentRuntimeSession::new(
         prod_dir.clone(),
         prod_exit,
         prod_endpoint,
@@ -4257,51 +4257,72 @@ fn regression_s3_shared_shutdown_bounded_incomplete_recovery() {
         std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0)),
     );
 
-    // Production caller shutdown path with bounded timeout
-    let shutdown_err = match raw_session.shutdown(Duration::from_millis(50)) {
-        Err(source) => runnermesh::AgentRunError::ShutdownIncomplete {
-            source,
-            session: Box::new(raw_session),
-        },
-        Ok(()) => panic!("Expected timeout on slow worker"),
-    };
-
-    // Upper-level caller receives typed AgentRunError and reclaims ownership of session
-    let mut reclaimed_session = match shutdown_err {
-        runnermesh::AgentRunError::ShutdownIncomplete { source, session } => {
-            assert!(matches!(
-                source,
-                runnermesh::agent_runtime::ShutdownError::Incomplete {
-                    poll_timed_out: true,
-                    ..
-                }
-            ));
-            *session
+    // 5a. Call authentic production finish_agent_session: returns Err(ShutdownIncomplete) retaining session
+    let run_res = runnermesh::finish_agent_session(raw_session, Ok(()), Duration::from_millis(50));
+    let shutdown_err = match run_res {
+        Err(err @ runnermesh::AgentRunError::ShutdownIncomplete { .. }) => err,
+        other => {
+            panic!("Expected finish_agent_session to return ShutdownIncomplete, got {other:?}")
         }
-        other => panic!("Expected ShutdownIncomplete, got {other:?}"),
     };
 
+    // 5b. Pass ShutdownIncomplete to outermost handle_agent_entrypoint_result while worker is still blocked.
+    // Outermost handler attempts recovery join; worker is still blocked, so it returns ShutdownStillIncomplete with exit code 2.
+    let still_incomplete_exit =
+        runnermesh::handle_agent_entrypoint_result(Err(shutdown_err), Duration::from_millis(50));
+    assert_eq!(still_incomplete_exit.exit_code(), 2);
+    assert!(!still_incomplete_exit.is_success());
+
+    let (still_source, uncompleted_session) = match still_incomplete_exit {
+        runnermesh::EntrypointExit::ShutdownStillIncomplete { source, session } => {
+            (source, session)
+        }
+        other => panic!("Expected ShutdownStillIncomplete, got {other:?}"),
+    };
+    assert!(matches!(
+        still_source,
+        runnermesh::agent_runtime::ShutdownError::Incomplete {
+            poll_timed_out: true,
+            ..
+        }
+    ));
     assert!(
-        reclaimed_session.has_unjoined_threads(),
-        "Session must retain thread handles across production return path"
+        uncompleted_session.has_unjoined_threads(),
+        "Session must retain unjoined thread handles"
     );
-    assert!(!reclaimed_session.is_completely_shutdown());
+    assert!(!uncompleted_session.is_completely_shutdown());
+    assert!(uncompleted_session.has_periodic_thread());
+    assert!(!uncompleted_session.has_pipe_thread());
     assert_eq!(
-        reclaimed_session.stage().as_deref(),
+        uncompleted_session.stage().as_deref(),
         Some("shutdown-incomplete")
     );
 
-    // Upper-level caller unblocks worker and completes clean recovery shutdown
+    // 5c. Unblock the slow worker simulating completed drain / safe shutdown
     let _ = prod_tx.send(());
-    let recover_ok = reclaimed_session.shutdown(Duration::from_secs(3));
-    assert!(
-        recover_ok.is_ok(),
-        "Reclaimed session shutdown must succeed cleanly after unblock"
+
+    // 5d. Pass uncompleted session back to outermost handle_agent_entrypoint_result for recovery.
+    // Outermost handler succeeds in joining unblocked thread, returns ShutdownRecovered with exit code 0.
+    let recovered_exit = runnermesh::handle_agent_entrypoint_result(
+        Err(runnermesh::AgentRunError::ShutdownIncomplete {
+            source: still_source,
+            session: uncompleted_session,
+        }),
+        Duration::from_secs(3),
     );
-    assert!(!reclaimed_session.has_unjoined_threads());
-    assert!(reclaimed_session.is_completely_shutdown());
+    assert_eq!(recovered_exit.exit_code(), 0);
+    assert!(recovered_exit.is_success());
+
+    let recovered_session = match recovered_exit {
+        runnermesh::EntrypointExit::ShutdownRecovered(session) => session,
+        other => panic!("Expected ShutdownRecovered, got {other:?}"),
+    };
+    assert!(!recovered_session.has_unjoined_threads());
+    assert!(recovered_session.is_completely_shutdown());
+    assert!(!recovered_session.has_periodic_thread());
+    assert!(!recovered_session.has_pipe_thread());
     assert_eq!(
-        reclaimed_session.stage().as_deref(),
+        recovered_session.stage().as_deref(),
         Some("shutdown-complete")
     );
 
@@ -4375,51 +4396,36 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
     assert_eq!(receipt_1.version, "0.2.0-rc.1");
     assert!(receipt_1.activated, "First slot should be active");
 
-    // 2. Resolve or build authentic distinct candidate package v0.2.0-rc.2
+    // 2. Resolve authentic distinct candidate package v0.2.0-rc.2 from explicit inputs only.
+    // Arbitrary target searches and obsolete SHA fallbacks are forbidden.
     let new_pkg_source = if let Some(pkg_path) = std::env::var("RUNNERMESH_NEW_RC_PACKAGE_PATH")
         .ok()
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_file())
     {
-        pkg_path
-    } else {
-        let cli_binary = [
-            std::path::PathBuf::from(r"target\debug\runnermesh.exe"),
-            std::path::PathBuf::from(r"target\release\runnermesh.exe"),
-            std::path::PathBuf::from(r"target\x86_64-pc-windows-msvc\release\runnermesh.exe"),
-            std::path::PathBuf::from(r"..\target\debug\runnermesh.exe"),
-            std::path::PathBuf::from(r"..\target\release\runnermesh.exe"),
-        ]
-        .into_iter()
-        .find(|p| p.is_file())
-        .map(|p| std::fs::canonicalize(p).unwrap())
-        .expect("candidate runnermesh.exe must exist in target");
-
-        let agent_binary = [
-            std::path::PathBuf::from(r"target\debug\runnermesh-agent.exe"),
-            std::path::PathBuf::from(r"target\release\runnermesh-agent.exe"),
-            std::path::PathBuf::from(r"target\x86_64-pc-windows-msvc\release\runnermesh-agent.exe"),
-            std::path::PathBuf::from(r"..\target\debug\runnermesh-agent.exe"),
-            std::path::PathBuf::from(r"..\target\release\runnermesh-agent.exe"),
-        ]
-        .into_iter()
-        .find(|p| p.is_file())
-        .map(|p| std::fs::canonicalize(p).unwrap())
-        .expect("candidate runnermesh-agent.exe must exist in target");
-
-        let manifest_path = [
-            std::path::PathBuf::from(r"resources\runnermesh-agent.manifest"),
-            std::path::PathBuf::from(r"..\resources\runnermesh-agent.manifest"),
-        ]
-        .into_iter()
-        .find(|p| p.is_file())
-        .map(|p| std::fs::canonicalize(p).unwrap())
-        .expect("runnermesh-agent.manifest must exist");
-
-        let build_commit = std::env::var("RUNNERMESH_BUILD_COMMIT")
-            .ok()
-            .filter(|c| c.len() == 40 && c.chars().all(|ch| ch.is_ascii_hexdigit()))
-            .unwrap_or_else(|| "70a94ce1baa2650c843a67619278c6f158bfc86a".to_string());
+        std::fs::canonicalize(pkg_path).expect("canonicalize RUNNERMESH_NEW_RC_PACKAGE_PATH")
+    } else if let Some(pkg_path) = std::env::var("RUNNERMESH_RC_PACKAGE_PATH")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        std::fs::canonicalize(pkg_path).expect("canonicalize RUNNERMESH_RC_PACKAGE_PATH")
+    } else if let (Some(cli_str), Some(agent_str), Some(manifest_str), Some(commit_str)) = (
+        std::env::var("RUNNERMESH_CANDIDATE_CLI_PATH").ok(),
+        std::env::var("RUNNERMESH_CANDIDATE_AGENT_PATH").ok(),
+        std::env::var("RUNNERMESH_CANDIDATE_MANIFEST_PATH").ok(),
+        std::env::var("RUNNERMESH_BUILD_COMMIT").ok(),
+    ) {
+        let cli_binary = std::fs::canonicalize(std::path::PathBuf::from(cli_str))
+            .expect("candidate CLI binary must exist at RUNNERMESH_CANDIDATE_CLI_PATH");
+        let agent_binary = std::fs::canonicalize(std::path::PathBuf::from(agent_str))
+            .expect("candidate Agent binary must exist at RUNNERMESH_CANDIDATE_AGENT_PATH");
+        let manifest_path = std::fs::canonicalize(std::path::PathBuf::from(manifest_str))
+            .expect("candidate manifest must exist at RUNNERMESH_CANDIDATE_MANIFEST_PATH");
+        assert!(
+            commit_str.len() == 40 && commit_str.chars().all(|c| c.is_ascii_hexdigit()),
+            "RUNNERMESH_BUILD_COMMIT must be a 40-character hex commit SHA"
+        );
 
         let new_pkg_out = temp_root.join("new-package-out");
         std::fs::create_dir_all(&new_pkg_out).unwrap();
@@ -4427,7 +4433,7 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
         let new_pkg_input = runnermesh::PackageInput {
             provenance: runnermesh::PackageProvenance {
                 version: "0.2.0-rc.2".to_string(),
-                commit: build_commit,
+                commit: commit_str,
                 channel: "rc".to_string(),
                 target: env!("RUNNERMESH_BUILD_TARGET").to_string(),
             },
@@ -4439,21 +4445,62 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
         let new_pkg_receipt = runnermesh::PackageVerifier::create(&new_pkg_input, &new_pkg_out)
             .expect("Authentic creation of candidate v0.2.0-rc.2 package");
         new_pkg_receipt.archive
+    } else {
+        panic!(
+            "FAIL-CLOSED: Explicit candidate package not found! Set RUNNERMESH_NEW_RC_PACKAGE_PATH or provide explicit inputs (RUNNERMESH_CANDIDATE_CLI_PATH, RUNNERMESH_CANDIDATE_AGENT_PATH, RUNNERMESH_CANDIDATE_MANIFEST_PATH, RUNNERMESH_BUILD_COMMIT). Arbitrary target searching and obsolete SHA fallbacks are forbidden."
+        );
     };
 
     let (new_manifest, _new_hash) = runnermesh::PackageVerifier::verify_with_hash(&new_pkg_source)
         .expect("Candidate package verification");
     assert_eq!(new_manifest.provenance.version, "0.2.0-rc.2");
+    assert_eq!(new_manifest.provenance.channel, "rc");
+    assert_eq!(new_manifest.provenance.commit.len(), 40);
 
     let staging_2 = temp_root.join("staging-2");
     runnermesh::PackageVerifier::extract_runtime(&new_pkg_source, &staging_2)
         .expect("extract candidate rc.2 archive");
+
+    // Real PE execution proof: verify candidate binary identity and version match manifest provenance
+    let candidate_cli = staging_2.join("runnermesh.exe");
+    assert!(
+        candidate_cli.is_file(),
+        "Candidate CLI binary must exist in staging_2"
+    );
+    let version_output = std::process::Command::new(&candidate_cli)
+        .arg("version")
+        .output()
+        .expect("candidate CLI version execution");
+    assert!(
+        version_output.status.success(),
+        "candidate CLI version must return exit code 0"
+    );
+    let version_str = String::from_utf8_lossy(&version_output.stdout);
+    println!("[regression_s4] candidate extracted binary execution output: {version_str}");
+    assert!(
+        version_str.contains("runnermesh"),
+        "version output must contain 'runnermesh'"
+    );
+    assert!(
+        version_str.contains("0.2.0-rc.2"),
+        "version output must contain '0.2.0-rc.2'"
+    );
+
     let payload_2_hash = runnermesh::payload_sha256(&staging_2).expect("payload 2 sha256");
 
     assert_ne!(
         payload_1_hash, payload_2_hash,
         "Authentic rc.1 and rc.2 must have distinct payload hashes"
     );
+
+    // B10: Setup initial runner config in install_root with a distinct user mode to prove persistence
+    let config_path = install_root.join("config.json");
+    let initial_config = runnermesh::AgentConfig {
+        user_mode: runnermesh::UserMode::Gaming,
+        ..Default::default()
+    };
+    let config_bytes = serde_json::to_vec_pretty(&initial_config).unwrap();
+    std::fs::write(&config_path, config_bytes).unwrap();
 
     // 3. Exercise full UpdateCoordinator: staging -> safe point deferral -> safe point activation -> rollback
     let update_coordinator = runnermesh::UpdateCoordinator::new(installation.clone());
@@ -4508,6 +4555,15 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
         .to_string_lossy()
         .contains("0.2.0-rc.2"));
 
+    // Verify config persists across activation
+    assert!(
+        config_path.is_file(),
+        "config.json must persist across activation"
+    );
+    let read_config: runnermesh::AgentConfig =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(read_config.user_mode, runnermesh::UserMode::Gaming);
+
     // Rollback: return to 0.2.0-rc.1 cleanly restoring active version
     installation.select_active("0.2.0-rc.1").unwrap();
     assert_eq!(
@@ -4520,6 +4576,15 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
         .unwrap()
         .to_string_lossy()
         .contains("0.2.0-rc.1"));
+
+    // Verify config persists across rollback
+    assert!(
+        config_path.is_file(),
+        "config.json must persist across rollback"
+    );
+    let read_config_rollback: runnermesh::AgentConfig =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(read_config_rollback.user_mode, runnermesh::UserMode::Gaming);
 
     // 4. B11: Use SandboxAutostartBackend (fake startup) for clean test isolation
     let fake_startup = runnermesh::SandboxAutostartBackend::new(temp_root.join("autostart.json"));

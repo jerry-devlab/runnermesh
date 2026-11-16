@@ -46,13 +46,12 @@ fn main() {
             "exactly one Agent runtime profile is required".to_owned(),
         )),
     };
-    if let Err(error) = result {
-        // The Windows-subsystem binary has no console of its own, but a
-        // supervised launch can still redirect stderr. Keep startup failures
-        // observable without opening a window or persisting sensitive runtime
-        // details into the public installation contract.
-        eprintln!("runnermesh-agent: {error}");
-        std::process::exit(2);
+    let exit = runnermesh::agent_runtime::handle_agent_entrypoint_result(
+        result,
+        std::time::Duration::from_secs(5),
+    );
+    if exit.exit_code() != 0 {
+        std::process::exit(exit.exit_code());
     }
 }
 

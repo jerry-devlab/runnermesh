@@ -360,6 +360,16 @@ impl InstalledAgentRuntimeSession {
         !self.is_completely_shutdown()
     }
 
+    /// Whether the background IPC pipe listener thread handle is currently held.
+    pub fn has_pipe_thread(&self) -> bool {
+        self.pipe_thread.is_some()
+    }
+
+    /// Whether the background periodic scheduler thread handle is currently held.
+    pub fn has_periodic_thread(&self) -> bool {
+        self.periodic_thread.is_some()
+    }
+
     /// Reads the current recorded runtime stage if present.
     pub fn stage(&self) -> Option<String> {
         let stage_file = self.state_root.join("runtime-stage.txt");
@@ -412,6 +422,108 @@ impl AgentRunError {
             _ => None,
         }
     }
+}
+
+/// Typed disposition of the outermost Agent entrypoint.
+#[derive(Debug)]
+pub enum EntrypointExit {
+    /// Agent started, ran, and shut down cleanly.
+    Success,
+    /// Initial shutdown was incomplete, but outer recovery join succeeded.
+    ShutdownRecovered(Box<InstalledAgentRuntimeSession>),
+    /// Startup failed before the event loop started.
+    StartupError(String),
+    /// The tray event loop encountered an unrecoverable failure.
+    TrayLoopError(String),
+    /// Initial shutdown was incomplete and recovery join also failed to join all threads.
+    ShutdownStillIncomplete {
+        source: ShutdownError,
+        session: Box<InstalledAgentRuntimeSession>,
+    },
+}
+
+impl EntrypointExit {
+    /// Returns the process exit code for this entrypoint disposition.
+    /// Clean execution and successful recovery exit with 0; errors and incomplete shutdown exit with 2.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Success | Self::ShutdownRecovered(_) => 0,
+            Self::StartupError(_)
+            | Self::TrayLoopError(_)
+            | Self::ShutdownStillIncomplete { .. } => 2,
+        }
+    }
+
+    /// Whether the outcome represents successful execution or recovery.
+    pub fn is_success(&self) -> bool {
+        self.exit_code() == 0
+    }
+}
+
+/// Outermost entrypoint result handler shared between `runnermesh-agent` main and tests.
+///
+/// Handles `ShutdownIncomplete` by taking ownership of the uncompleted session, attempting
+/// recovery shutdown within `recovery_timeout`, and only declaring success if all background
+/// threads join cleanly.
+pub fn handle_agent_entrypoint_result(
+    result: Result<(), AgentRunError>,
+    recovery_timeout: Duration,
+) -> EntrypointExit {
+    match result {
+        Ok(()) => EntrypointExit::Success,
+        Err(AgentRunError::Startup(error)) => {
+            eprintln!("runnermesh-agent: startup failed: {error}");
+            EntrypointExit::StartupError(error)
+        }
+        Err(AgentRunError::TrayLoop(error)) => {
+            eprintln!("runnermesh-agent: tray loop failed: {error}");
+            EntrypointExit::TrayLoopError(error)
+        }
+        Err(AgentRunError::ShutdownIncomplete {
+            source,
+            mut session,
+        }) => {
+            eprintln!(
+                "runnermesh-agent: initial shutdown incomplete ({source}); attempting recovery join"
+            );
+            match session.shutdown(recovery_timeout) {
+                Ok(()) => {
+                    eprintln!("runnermesh-agent: shutdown recovery succeeded; all threads joined");
+                    EntrypointExit::ShutdownRecovered(session)
+                }
+                Err(recovery_error) => {
+                    eprintln!(
+                        "runnermesh-agent: shutdown recovery failed ({recovery_error}); unjoined threads preserved"
+                    );
+                    EntrypointExit::ShutdownStillIncomplete {
+                        source: recovery_error,
+                        session,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Finishes an Agent runtime session by executing bounded graceful shutdown and mapping
+/// the tray loop result.
+///
+/// If shutdown exceeds the specified timeout, returns `Err(AgentRunError::ShutdownIncomplete)`
+/// retaining the session and all its unjoined thread handles for outer recovery.
+pub fn finish_agent_session(
+    mut session: InstalledAgentRuntimeSession,
+    tray_result: Result<(), String>,
+    shutdown_timeout: Duration,
+) -> Result<(), AgentRunError> {
+    let shutdown_res = session.shutdown(shutdown_timeout);
+    if let Err(source) = shutdown_res {
+        eprintln!("[installed_agent] ERROR: shutdown incomplete: {source}");
+        return Err(AgentRunError::ShutdownIncomplete {
+            source,
+            session: Box::new(session),
+        });
+    }
+    tray_result.map_err(AgentRunError::TrayLoop)
 }
 
 /// Running handle to a sandboxed installed Agent runtime driven via IPC and polling loop.
@@ -812,7 +924,7 @@ pub fn run_agent_with_shutdown_timeout(
         Some(snapshot_sender),
     );
 
-    let mut session = InstalledAgentRuntimeSession::new(
+    let session = InstalledAgentRuntimeSession::new(
         runtime_state_root.clone(),
         Arc::clone(&exit),
         endpoint.clone(),
@@ -830,15 +942,7 @@ pub fn run_agent_with_shutdown_timeout(
         readiness,
         development_controls,
     );
-    let shutdown_res = session.shutdown(shutdown_timeout);
-    if let Err(source) = shutdown_res {
-        eprintln!("[installed_agent] ERROR: shutdown incomplete: {source}");
-        return Err(AgentRunError::ShutdownIncomplete {
-            source,
-            session: Box::new(session),
-        });
-    }
-    result.map_err(AgentRunError::TrayLoop)
+    finish_agent_session(session, result, shutdown_timeout)
 }
 
 #[derive(Default)]
