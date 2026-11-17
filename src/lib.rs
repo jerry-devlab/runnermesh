@@ -246,17 +246,18 @@ pub use windows_runner_discovery::{
     service_image_path_token, ConfiguredSessionDiscoverySource, DiscoveredRunnerProcesses,
     PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
+#[doc(hidden)]
+pub use windows_scm_executor::test_support;
 pub use windows_scm_executor::{
     map_service_lifecycle_from_process_observation, opaque_image_token,
     reconcile_interrupted_scm_journal, runner_service_binary_path, runner_service_image_token,
-    AdmissionSelectorObserver, DurableLedgerEntry, FakeCredentialManagerAuthorityProvider,
-    FakeGithubAdmissionBackend, GatedWindowsScmBackend, LiveScmExecutionGate, MockClock,
-    MockScmBackend, MockServiceRecord, OwnerAuthoritySecretProvider, OwnerAuthorizationIssuer,
-    OwnerAuthorizationScope, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
-    PrivilegedScmRequest, ScmActionKind, ScmApiError, ScmControlBackend, ScmControlExecutor,
-    ScmExactSnapshot, ScmMutationArm, ScmTransactionJournal, ScmTransactionReceipt,
-    ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant, SystemClock,
-    TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
+    AdmissionSelectorObserver, DurableLedgerEntry, FakeGithubAdmissionBackend,
+    GatedWindowsScmBackend, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
+    OwnerAuthoritySecretProvider, OwnerAuthorizationScope, PrivilegedScmAction,
+    PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ScmActionKind, ScmApiError,
+    ScmControlBackend, ScmControlExecutor, ScmExactSnapshot, ScmMutationArm, ScmTransactionJournal,
+    ScmTransactionReceipt, ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant,
+    SystemClock, TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
     TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier,
     WindowsCredentialManagerAuthorityProvider, WindowsScmBackend,
     DEFAULT_AUTHORIZATION_VALIDITY_SECONDS, DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,

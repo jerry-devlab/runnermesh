@@ -353,6 +353,22 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
 
     /// Arms the mutation gate for SCM control on this backend.
     fn arm_scm_gate(&self, _gate: crate::windows_scm_executor::LiveScmExecutionGate) {}
+
+    /// Arms the mutation gate for owned user session control on this backend.
+    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
+
+    /// Disarms all lifecycle mutation gates.
+    fn disarm_lifecycle_gates(&self) {}
+
+    /// Returns the target host token bound to this backend, if known.
+    fn target_host_token(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns the candidate commit bound to this backend, if known.
+    fn candidate_commit(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -363,6 +379,7 @@ pub struct SandboxMultiRunnerLifecycleBackend<B> {
     advertised_selectors: Arc<Mutex<Vec<(crate::RegistrationScope, u64)>>>,
     dispatched_session_actions:
         Arc<Mutex<Vec<(String, crate::runner_session_backend::PreparedSessionAction)>>>,
+    armed_session_gate: Arc<Mutex<Option<LiveSessionExecutionGate>>>,
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> SandboxMultiRunnerLifecycleBackend<B> {
@@ -373,7 +390,19 @@ impl<B: ScmControlBackend + Send + Sync + 'static> SandboxMultiRunnerLifecycleBa
             withdrawn_selectors: Arc::new(Mutex::new(Vec::new())),
             advertised_selectors: Arc::new(Mutex::new(Vec::new())),
             dispatched_session_actions: Arc::new(Mutex::new(Vec::new())),
+            armed_session_gate: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn helper(&self) -> &PrivilegedScmHelper<B> {
+        &self.helper
+    }
+
+    pub fn armed_session_gate(&self) -> Option<LiveSessionExecutionGate> {
+        self.armed_session_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub fn set_observations(&self, obs: Vec<PerRunnerObservation>) {
@@ -455,7 +484,30 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
     }
 
     fn arm_scm_gate(&self, gate: crate::windows_scm_executor::LiveScmExecutionGate) {
-        self.helper.arm_with_gate(gate);
+        let _ = self.helper.arm_with_gate(gate);
+    }
+
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
+        *self
+            .armed_session_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(gate);
+    }
+
+    fn disarm_lifecycle_gates(&self) {
+        self.helper.disarm();
+        *self
+            .armed_session_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn target_host_token(&self) -> Option<&str> {
+        Some(self.helper.target_host_token())
+    }
+
+    fn candidate_commit(&self) -> Option<&str> {
+        Some(self.helper.candidate_commit())
     }
 }
 
@@ -500,6 +552,9 @@ pub trait MultiRunnerSessionCoordinator: Send + Sync {
     fn observe_session_for_key(&self, _key: &str) -> Option<DiscoveredLifecycle> {
         None
     }
+
+    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
+    fn disarm_session_gate(&self) {}
 }
 
 /// Injectable process transport for owned user session runners.
@@ -514,6 +569,9 @@ pub trait UserSessionProcessTransport: Send + Sync {
     fn observe_session_for_key(&self, _key: &str) -> Option<DiscoveredLifecycle> {
         None
     }
+
+    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
+    fn disarm_session_gate(&self) {}
 }
 
 /// Production default process transport for user session runners (sealed closed).
@@ -706,32 +764,44 @@ impl LiveSessionExecutionGate {
 /// spawning processes or modifying workstation state.
 #[derive(Clone, Debug, Default)]
 pub struct GatedUserSessionProcessTransport {
-    gate: LiveSessionExecutionGate,
+    gate: Arc<Mutex<LiveSessionExecutionGate>>,
 }
 
 impl GatedUserSessionProcessTransport {
     pub fn closed() -> Self {
         Self {
-            gate: LiveSessionExecutionGate::CLOSED,
+            gate: Arc::new(Mutex::new(LiveSessionExecutionGate::CLOSED)),
         }
     }
 
     pub fn from_synthetic_test_grant(grant: &SyntheticSessionTestGrant) -> Self {
         Self {
-            gate: LiveSessionExecutionGate::from_synthetic_test_grant(grant),
+            gate: Arc::new(Mutex::new(
+                LiveSessionExecutionGate::from_synthetic_test_grant(grant),
+            )),
         }
     }
 
     pub fn with_gate(gate: LiveSessionExecutionGate) -> Self {
-        Self { gate }
+        Self {
+            gate: Arc::new(Mutex::new(gate)),
+        }
+    }
+
+    pub fn arm_with_gate(&self, gate: LiveSessionExecutionGate) {
+        *self.gate.lock().unwrap_or_else(|p| p.into_inner()) = gate;
     }
 
     pub fn close(&self) {
-        self.gate.close();
+        *self.gate.lock().unwrap_or_else(|p| p.into_inner()) = LiveSessionExecutionGate::CLOSED;
     }
 
-    pub fn gate(&self) -> &LiveSessionExecutionGate {
-        &self.gate
+    pub fn current_gate(&self) -> LiveSessionExecutionGate {
+        self.gate.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub fn gate(&self) -> LiveSessionExecutionGate {
+        self.current_gate()
     }
 }
 
@@ -741,11 +811,11 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.gate
-            .authorizes_runner(record, now)
+        let gate = self.current_gate();
+        gate.authorizes_runner(record, now)
             .map_err(|e| format!("session.transport-refused: {e}"))?;
 
-        if !self.gate.is_trusted_live() {
+        if !gate.is_trusted_live() {
             return Err("session.synthetic-gate-refuses-live-mutation".to_owned());
         }
 
@@ -793,11 +863,11 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.gate
-            .authorizes_runner(record, now)
+        let gate = self.current_gate();
+        gate.authorizes_runner(record, now)
             .map_err(|e| format!("session.transport-refused: {e}"))?;
 
-        if !self.gate.is_trusted_live() {
+        if !gate.is_trusted_live() {
             return Err("session.synthetic-gate-refuses-live-mutation".to_owned());
         }
 
@@ -880,6 +950,14 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             None
         }
     }
+
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
+        self.arm_with_gate(gate);
+    }
+
+    fn disarm_session_gate(&self) {
+        self.close();
+    }
 }
 
 /// Simulated user session process transport for tests and qualification.
@@ -952,6 +1030,10 @@ impl StandardSessionCoordinator {
 
     pub fn inert() -> Self {
         Self::default()
+    }
+
+    pub fn transport(&self) -> &Arc<dyn UserSessionProcessTransport> {
+        &self.transport
     }
 }
 
@@ -1077,6 +1159,14 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
 
     fn observe_session_for_key(&self, key: &str) -> Option<DiscoveredLifecycle> {
         self.transport.observe_session_for_key(key)
+    }
+
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
+        self.transport.arm_session_gate(gate);
+    }
+
+    fn disarm_session_gate(&self) {
+        self.transport.disarm_session_gate();
     }
 }
 
@@ -1385,6 +1475,14 @@ impl<B: ScmControlBackend + Send + Sync + 'static> AuthoritativeMultiRunnerLifec
         self.session = Some(coordinator);
         self
     }
+
+    pub fn helper(&self) -> &PrivilegedScmHelper<B> {
+        &self.helper
+    }
+
+    pub fn session(&self) -> Option<&Arc<dyn MultiRunnerSessionCoordinator>> {
+        self.session.as_ref()
+    }
 }
 
 impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
@@ -1650,7 +1748,28 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
     }
 
     fn arm_scm_gate(&self, gate: crate::windows_scm_executor::LiveScmExecutionGate) {
-        self.helper.arm_with_gate(gate);
+        let _ = self.helper.arm_with_gate(gate);
+    }
+
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
+        if let Some(session) = &self.session {
+            session.arm_session_gate(gate);
+        }
+    }
+
+    fn disarm_lifecycle_gates(&self) {
+        self.helper.disarm();
+        if let Some(session) = &self.session {
+            session.disarm_session_gate();
+        }
+    }
+
+    fn target_host_token(&self) -> Option<&str> {
+        Some(self.helper.target_host_token())
+    }
+
+    fn candidate_commit(&self) -> Option<&str> {
+        Some(self.helper.candidate_commit())
     }
 }
 
@@ -1670,6 +1789,8 @@ pub struct AgentCore<O, R, S> {
     multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     last_runner_reports: Vec<PrivilegedScmReport>,
     authority_provider: Option<Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>>,
+    authority_clock: Option<Arc<dyn crate::windows_scm_executor::TrustedClock>>,
+    expected_target_host_token: Option<String>,
 }
 
 impl<O, R, S> AgentCore<O, R, S>
@@ -1732,11 +1853,14 @@ where
             multi_runner_backend: None,
             last_runner_reports: Vec::new(),
             authority_provider: None,
+            authority_clock: None,
+            expected_target_host_token: None,
         })
     }
 
-    /// Attaches an authority secret provider for owner authorization verification.
-    pub fn with_authority_provider(
+    /// Attaches an authority secret provider for owner authorization verification in tests.
+    #[doc(hidden)]
+    pub fn with_authority_provider_for_test(
         mut self,
         provider: Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>,
     ) -> Self {
@@ -1744,12 +1868,25 @@ where
         self
     }
 
-    /// Attaches an authority secret provider on an existing AgentCore.
-    pub fn set_authority_provider(
+    /// Attaches an authority secret provider on an existing AgentCore for tests.
+    #[doc(hidden)]
+    pub fn set_authority_provider_for_test(
         &mut self,
         provider: Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>,
+        clock: Option<Arc<dyn crate::windows_scm_executor::TrustedClock>>,
     ) {
         self.authority_provider = Some(provider);
+        self.authority_clock = clock;
+    }
+
+    /// Sets the expected target host token for test verification.
+    #[doc(hidden)]
+    pub fn set_expected_target_host_token_for_test(&mut self, token: impl Into<String>) {
+        self.expected_target_host_token = Some(token.into());
+    }
+
+    pub fn build(&self) -> &BuildProvenance {
+        &self.build
     }
 
     /// Attaches a multi-runner lifecycle backend for runner observation,
@@ -2237,17 +2374,56 @@ where
     ) -> Result<AgentResponse, AgentCoreError> {
         use crate::windows_scm_executor::{
             OwnerAuthorizationScope, TokenValidatingOwnerVerifier,
-            TrustedOwnerAuthorizationVerifier, WindowsCredentialManagerAuthorityProvider,
-            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+            TrustedOwnerAuthorizationVerifier, DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
         };
 
-        let target_name = DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET;
-        let default_provider = WindowsCredentialManagerAuthorityProvider;
-        let provider: &dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider = self
-            .authority_provider
-            .as_ref()
-            .map(|p| p.as_ref())
-            .unwrap_or(&default_provider);
+        // 1. Verify candidate commit matches running binary provenance
+        if !self.build.commit.is_empty()
+            && self.build.commit != "unspecified"
+            && !request
+                .candidate_commit
+                .trim()
+                .eq_ignore_ascii_case(self.build.commit.trim())
+        {
+            return Ok(AgentResponse::OwnerAuthorization(
+                crate::OwnerAuthorizationReport {
+                    authorized: false,
+                    transaction_id: request.transaction_id,
+                    service_name: request.service_name,
+                    expires_at_epoch_seconds: 0,
+                    reason_code: Some(
+                        ReasonCode::new("owner-auth-candidate-commit-mismatch").unwrap(),
+                    ),
+                },
+            ));
+        }
+
+        // 2. Verify target host token matches current environment
+        let expected_host = self.expected_target_host_token.as_deref().or_else(|| {
+            self.multi_runner_backend
+                .as_ref()
+                .and_then(|b| b.target_host_token())
+        });
+        if let Some(expected) = expected_host {
+            if !expected.is_empty()
+                && !request
+                    .target_host_token
+                    .trim()
+                    .eq_ignore_ascii_case(expected.trim())
+            {
+                return Ok(AgentResponse::OwnerAuthorization(
+                    crate::OwnerAuthorizationReport {
+                        authorized: false,
+                        transaction_id: request.transaction_id,
+                        service_name: request.service_name,
+                        expires_at_epoch_seconds: 0,
+                        reason_code: Some(
+                            ReasonCode::new("owner-auth-target-host-mismatch").unwrap(),
+                        ),
+                    },
+                ));
+            }
+        }
 
         let scope = OwnerAuthorizationScope {
             service_name: request.service_name.clone(),
@@ -2261,22 +2437,44 @@ where
             allow_change_config: request.allow_change_config,
         };
 
-        let verifier = match TokenValidatingOwnerVerifier::from_credential_provider(
-            scope,
-            target_name,
-            provider,
-        ) {
-            Ok(v) => v,
-            Err(_) => {
-                return Ok(AgentResponse::OwnerAuthorization(
-                    crate::OwnerAuthorizationReport {
-                        authorized: false,
-                        transaction_id: request.transaction_id,
-                        service_name: request.service_name,
-                        expires_at_epoch_seconds: 0,
-                        reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
-                    },
-                ));
+        let verifier = if let Some(ref provider) = self.authority_provider {
+            let clock = self
+                .authority_clock
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::windows_scm_executor::SystemClock));
+            match crate::windows_scm_executor::test_support::create_test_verifier_with_provider_and_clock(
+                scope,
+                DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+                provider.as_ref(),
+                clock,
+            ) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Ok(AgentResponse::OwnerAuthorization(
+                        crate::OwnerAuthorizationReport {
+                            authorized: false,
+                            transaction_id: request.transaction_id,
+                            service_name: request.service_name,
+                            expires_at_epoch_seconds: 0,
+                            reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
+                        },
+                    ));
+                }
+            }
+        } else {
+            match TokenValidatingOwnerVerifier::from_credential_manager(scope) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Ok(AgentResponse::OwnerAuthorization(
+                        crate::OwnerAuthorizationReport {
+                            authorized: false,
+                            transaction_id: request.transaction_id,
+                            service_name: request.service_name,
+                            expires_at_epoch_seconds: 0,
+                            reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
+                        },
+                    ));
+                }
             }
         };
 
@@ -2284,6 +2482,15 @@ where
             Ok(gate) => {
                 if let Some(backend) = &self.multi_runner_backend {
                     backend.arm_scm_gate(gate.clone());
+                    if request.allow_start || request.allow_stop {
+                        let session_gate = LiveSessionExecutionGate::mint_trusted_live(
+                            &request.service_name,
+                            &request.execution_identity_token,
+                            &request.transaction_id,
+                            request.expires_at_epoch_seconds,
+                        );
+                        backend.arm_session_gate(session_gate);
+                    }
                 }
                 Ok(AgentResponse::OwnerAuthorization(
                     crate::OwnerAuthorizationReport {
@@ -4926,8 +5133,10 @@ mod tests {
 
     #[test]
     fn test_authorize_owner_mutation_command_with_fake_provider() {
-        use crate::windows_scm_executor::{
+        use crate::windows_scm_executor::test_support::{
             FakeCredentialManagerAuthorityProvider, OwnerAuthorizationIssuer,
+        };
+        use crate::windows_scm_executor::{
             OwnerAuthorizationScope, DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
             DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
         };
@@ -4940,14 +5149,15 @@ mod tests {
         let fake_provider = Arc::new(FakeCredentialManagerAuthorityProvider::new());
         let secret = b"offline-owner-qualification-key-32b-secret";
         fake_provider.set_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET, secret);
-        core.set_authority_provider(fake_provider);
+        core.set_authority_provider_for_test(fake_provider, None);
+        core.set_expected_target_host_token_for_test("host-token-abcde");
 
         let scope = OwnerAuthorizationScope::new(
             "actions.runner.auth-target",
             "image-token-12345",
             "identity-token-67890",
             "host-token-abcde",
-            "028c7efba9ebd3d3925371b356a187eba428041d",
+            "0123456789abcdef",
             "tx-p03-qualification-001",
             true,
             true,

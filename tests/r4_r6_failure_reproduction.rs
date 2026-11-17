@@ -3355,8 +3355,7 @@ fn regression_finding5_runner_registry_scope_validation_strictly_matches_admissi
     for scope in invalid_scopes {
         assert!(
             !scope.validate(),
-            "Scope {:?} must be invalid under admission rules",
-            scope
+            "Scope {scope:?} must be invalid under admission rules"
         );
         let mut record = make_f_runner_record(
             "valid-key",
@@ -4144,7 +4143,7 @@ fn regression_s2_gated_session_trusted_authorization_and_close() {
         "Synthetic gate must strictly refuse to mint mutation arm"
     );
 
-    let mut scm_backend = runnermesh::WindowsScmBackend::mutation_inert();
+    let scm_backend = runnermesh::WindowsScmBackend::mutation_inert();
     assert!(!scm_backend.is_armed());
     assert_eq!(
         scm_backend.arm_with_gate(&synth_scm_gate).unwrap_err(),

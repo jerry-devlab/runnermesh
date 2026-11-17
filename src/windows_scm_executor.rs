@@ -949,24 +949,18 @@ impl TokenValidatingOwnerVerifier {
         )
     }
 
-    /// Constructs a verifier by reading the authority secret from an authority provider
-    /// (e.g. Windows Credential Manager or sandbox fake provider) for the specified target.
-    pub fn from_credential_provider(
-        scope: OwnerAuthorizationScope,
-        target_name: &str,
-        provider: &dyn OwnerAuthoritySecretProvider,
-    ) -> Result<Self, ScmApiError> {
-        Self::from_credential_provider_and_clock(
+    /// Constructs a verifier bound to current user's Windows Credential Manager
+    /// target `runnermesh/owner-authority`. Fails closed if absent or unissued.
+    pub fn from_credential_manager(scope: OwnerAuthorizationScope) -> Result<Self, ScmApiError> {
+        Self::from_credential_provider_and_clock_internal(
             scope,
-            target_name,
-            provider,
+            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+            &WindowsCredentialManagerAuthorityProvider,
             Arc::new(SystemClock),
         )
     }
 
-    /// Constructs a verifier by reading the authority secret from an authority provider
-    /// with a custom trusted boundary clock.
-    pub fn from_credential_provider_and_clock(
+    pub(crate) fn from_credential_provider_and_clock_internal(
         scope: OwnerAuthorizationScope,
         target_name: &str,
         provider: &dyn OwnerAuthoritySecretProvider,
@@ -980,16 +974,6 @@ impl TokenValidatingOwnerVerifier {
             clock,
             SharedAuthorizationLedger::global().clone(),
         ))
-    }
-
-    /// Constructs a verifier bound to current user's Windows Credential Manager
-    /// target `runnermesh/owner-authority`. Fails closed if absent or unissued.
-    pub fn from_credential_manager(scope: OwnerAuthorizationScope) -> Result<Self, ScmApiError> {
-        Self::from_credential_provider(
-            scope,
-            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
-            &WindowsCredentialManagerAuthorityProvider,
-        )
     }
 
     /// Internal test constructor bound to an in-memory authority secret for unit tests.
@@ -1081,6 +1065,41 @@ impl TokenValidatingOwnerVerifier {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .len()
+    }
+}
+
+#[doc(hidden)]
+pub mod test_support {
+    use super::*;
+
+    pub use super::FakeCredentialManagerAuthorityProvider;
+    pub use super::OwnerAuthorizationIssuer;
+
+    pub fn create_test_verifier_with_provider_and_clock(
+        scope: OwnerAuthorizationScope,
+        target_name: &str,
+        provider: &dyn OwnerAuthoritySecretProvider,
+        clock: Arc<dyn TrustedClock>,
+    ) -> Result<TokenValidatingOwnerVerifier, ScmApiError> {
+        TokenValidatingOwnerVerifier::from_credential_provider_and_clock_internal(
+            scope,
+            target_name,
+            provider,
+            clock,
+        )
+    }
+
+    pub fn create_test_verifier_with_provider(
+        scope: OwnerAuthorizationScope,
+        target_name: &str,
+        provider: &dyn OwnerAuthoritySecretProvider,
+    ) -> Result<TokenValidatingOwnerVerifier, ScmApiError> {
+        create_test_verifier_with_provider_and_clock(
+            scope,
+            target_name,
+            provider,
+            Arc::new(SystemClock),
+        )
     }
 }
 
@@ -1724,6 +1743,17 @@ pub trait ScmControlBackend {
         service_name: &str,
         mode: ServiceStartMode,
     ) -> Result<(), ScmApiError>;
+
+    /// Arms the underlying execution arm with a verified gate. Default is no-op.
+    fn arm_mutation(&self, _gate: &LiveScmExecutionGate) -> Result<(), ScmApiError> {
+        Ok(())
+    }
+
+    /// Disarms the underlying execution arm. Default is no-op.
+    fn disarm_mutation(&self) {}
+
+    /// Attaches a trusted boundary clock for expiry validation. Default is no-op.
+    fn attach_clock(&self, _clock: Arc<dyn TrustedClock>) {}
 }
 
 /// In-memory SCM used by synthetic HUX-2 and unit tests.
@@ -1745,6 +1775,8 @@ struct MockScmState {
     service_stop_calls: BTreeMap<String, u32>,
     service_start_calls: BTreeMap<String, u32>,
     service_actions: BTreeMap<String, Vec<String>>,
+    mutation_arm: Option<ScmMutationArm>,
+    clock: Option<Arc<dyn TrustedClock>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1863,6 +1895,28 @@ impl MockScmBackend {
             .unwrap_or_default()
     }
 
+    pub fn is_armed(&self) -> bool {
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(ref arm) = guard.mutation_arm else {
+            return false;
+        };
+        if let Some(ref clock) = guard.clock {
+            let now = clock.now_epoch_seconds();
+            now >= arm.not_before_epoch_seconds
+                && (arm.expires_at_epoch_seconds == 0 || now < arm.expires_at_epoch_seconds)
+        } else {
+            true
+        }
+    }
+
+    pub fn mutation_arm(&self) -> Option<ScmMutationArm> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mutation_arm
+            .clone()
+    }
+
     fn take_fail(&self) -> Result<(), ScmApiError> {
         if let Some(error) = self
             .inner
@@ -1909,6 +1963,16 @@ impl ScmControlBackend for MockScmBackend {
         self.take_fail()?;
         let key = service_name.to_ascii_lowercase();
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ref arm) = guard.mutation_arm {
+            if let Some(ref clock) = guard.clock {
+                let now = clock.now_epoch_seconds();
+                if now < arm.not_before_epoch_seconds
+                    || (arm.expires_at_epoch_seconds > 0 && now >= arm.expires_at_epoch_seconds)
+                {
+                    return Err(ScmApiError::AccessDenied);
+                }
+            }
+        }
         {
             let record = guard.services.get_mut(&key).ok_or(ScmApiError::NotFound)?;
             record.observation.state = DiscoveredLifecycle::Listening;
@@ -1927,6 +1991,16 @@ impl ScmControlBackend for MockScmBackend {
         self.take_fail()?;
         let key = service_name.to_ascii_lowercase();
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ref arm) = guard.mutation_arm {
+            if let Some(ref clock) = guard.clock {
+                let now = clock.now_epoch_seconds();
+                if now < arm.not_before_epoch_seconds
+                    || (arm.expires_at_epoch_seconds > 0 && now >= arm.expires_at_epoch_seconds)
+                {
+                    return Err(ScmApiError::AccessDenied);
+                }
+            }
+        }
         {
             let record = guard.services.get_mut(&key).ok_or(ScmApiError::NotFound)?;
             if record.worker_busy {
@@ -1961,6 +2035,16 @@ impl ScmControlBackend for MockScmBackend {
         self.take_fail()?;
         let key = service_name.to_ascii_lowercase();
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ref arm) = guard.mutation_arm {
+            if let Some(ref clock) = guard.clock {
+                let now = clock.now_epoch_seconds();
+                if now < arm.not_before_epoch_seconds
+                    || (arm.expires_at_epoch_seconds > 0 && now >= arm.expires_at_epoch_seconds)
+                {
+                    return Err(ScmApiError::AccessDenied);
+                }
+            }
+        }
         {
             let record = guard.services.get_mut(&key).ok_or(ScmApiError::NotFound)?;
             record.observation.start_mode = mode;
@@ -1970,8 +2054,28 @@ impl ScmControlBackend for MockScmBackend {
             .service_actions
             .entry(key)
             .or_default()
-            .push(format!("change_start_mode:{:?}", mode));
+            .push(format!("change_start_mode:{mode:?}"));
         Ok(())
+    }
+
+    fn arm_mutation(&self, gate: &LiveScmExecutionGate) -> Result<(), ScmApiError> {
+        let arm = gate.mint_mutation_arm()?;
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mutation_arm = Some(arm);
+        Ok(())
+    }
+
+    fn disarm_mutation(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mutation_arm = None;
+    }
+
+    fn attach_clock(&self, clock: Arc<dyn TrustedClock>) {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).clock = Some(clock);
     }
 }
 
@@ -2891,8 +2995,8 @@ impl ScmMutationArm {
 pub struct WindowsScmBackend {
     allow_read_only_query: bool,
     /// Verified mutation authority; `None` when mutation-inert.
-    mutation_arm: Option<ScmMutationArm>,
-    clock: Option<Arc<dyn TrustedClock>>,
+    mutation_arm: Arc<Mutex<Option<ScmMutationArm>>>,
+    clock: Arc<Mutex<Option<Arc<dyn TrustedClock>>>>,
 }
 
 impl Default for WindowsScmBackend {
@@ -2905,8 +3009,8 @@ impl WindowsScmBackend {
     pub fn mutation_inert() -> Self {
         Self {
             allow_read_only_query: true,
-            mutation_arm: None,
-            clock: None,
+            mutation_arm: Arc::new(Mutex::new(None)),
+            clock: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2914,40 +3018,45 @@ impl WindowsScmBackend {
     pub fn with_mutation_arm(arm: ScmMutationArm) -> Self {
         Self {
             allow_read_only_query: true,
-            mutation_arm: Some(arm),
-            clock: None,
+            mutation_arm: Arc::new(Mutex::new(Some(arm))),
+            clock: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Attaches a trusted boundary clock for expiry validation.
-    pub fn with_clock(mut self, clock: Arc<dyn TrustedClock>) -> Self {
-        self.clock = Some(clock);
+    pub fn with_clock(self, clock: Arc<dyn TrustedClock>) -> Self {
+        *self.clock.lock().unwrap_or_else(|p| p.into_inner()) = Some(clock);
         self
     }
 
     /// Returns the currently attached mutation arm, if any.
-    pub fn mutation_arm(&self) -> Option<&ScmMutationArm> {
-        self.mutation_arm.as_ref()
+    pub fn mutation_arm(&self) -> Option<ScmMutationArm> {
+        self.mutation_arm
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Arms the mutation arm from a verified TrustedLive gate.
-    pub fn arm_with_gate(&mut self, gate: &LiveScmExecutionGate) -> Result<(), ScmApiError> {
+    pub fn arm_with_gate(&self, gate: &LiveScmExecutionGate) -> Result<(), ScmApiError> {
         let arm = gate.mint_mutation_arm()?;
-        self.mutation_arm = Some(arm);
+        *self.mutation_arm.lock().unwrap_or_else(|p| p.into_inner()) = Some(arm);
         Ok(())
     }
 
     /// Disarms mutation authority, restoring mutation_inert state.
-    pub fn disarm(&mut self) {
-        self.mutation_arm = None;
+    pub fn disarm(&self) {
+        *self.mutation_arm.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Queries whether the mutation arm is currently armed and temporally valid.
     pub fn is_armed(&self) -> bool {
-        let Some(ref arm) = self.mutation_arm else {
+        let guard = self.mutation_arm.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(ref arm) = *guard else {
             return false;
         };
-        if let Some(ref clock) = self.clock {
+        let clock_guard = self.clock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ref clock) = *clock_guard {
             let now = clock.now_epoch_seconds();
             now >= arm.not_before_epoch_seconds
                 && (arm.expires_at_epoch_seconds == 0 || now < arm.expires_at_epoch_seconds)
@@ -2970,7 +3079,8 @@ impl WindowsScmBackend {
         service_name: &str,
         action: ScmActionKind,
     ) -> Result<(), ScmApiError> {
-        let arm = self.mutation_arm.as_ref().ok_or(ScmApiError::GateClosed)?;
+        let guard = self.mutation_arm.lock().unwrap_or_else(|p| p.into_inner());
+        let arm = guard.as_ref().ok_or(ScmApiError::GateClosed)?;
 
         // 1. Exact target match (case-insensitive)
         if !arm.bound_service_name.is_empty()
@@ -2999,7 +3109,8 @@ impl WindowsScmBackend {
         }
 
         // 3. Temporal validity check against trusted boundary clock
-        let now = if let Some(ref clock) = self.clock {
+        let clock_guard = self.clock.lock().unwrap_or_else(|p| p.into_inner());
+        let now = if let Some(ref clock) = *clock_guard {
             clock.now_epoch_seconds()
         } else {
             SystemClock.now_epoch_seconds()
@@ -3016,6 +3127,17 @@ impl WindowsScmBackend {
 }
 
 impl ScmControlBackend for WindowsScmBackend {
+    fn arm_mutation(&self, gate: &LiveScmExecutionGate) -> Result<(), ScmApiError> {
+        self.arm_with_gate(gate)
+    }
+
+    fn disarm_mutation(&self) {
+        self.disarm();
+    }
+
+    fn attach_clock(&self, clock: Arc<dyn TrustedClock>) {
+        *self.clock.lock().unwrap_or_else(|p| p.into_inner()) = Some(clock);
+    }
     fn query_exact(&self, service_name: &str) -> Result<ScmExactSnapshot, ScmApiError> {
         if !self.allow_read_only_query {
             return Err(ScmApiError::GateClosed);
@@ -3621,6 +3743,7 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
     }
 
     pub fn with_clock(mut self, clock: Arc<dyn TrustedClock>) -> Self {
+        self.backend.attach_clock(Arc::clone(&clock));
         self.clock = clock;
         self
     }
@@ -3639,11 +3762,26 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
         self
     }
 
-    pub fn arm_with_gate(&self, gate: LiveScmExecutionGate) {
+    pub fn target_host_token(&self) -> &str {
+        &self.target_host_token
+    }
+
+    pub fn candidate_commit(&self) -> &str {
+        &self.candidate_commit
+    }
+
+    pub fn clock(&self) -> &Arc<dyn TrustedClock> {
+        &self.clock
+    }
+
+    pub fn arm_with_gate(&self, gate: LiveScmExecutionGate) -> Result<(), ScmApiError> {
+        self.backend.arm_mutation(&gate)?;
         *self.active_gate.lock().unwrap_or_else(|p| p.into_inner()) = Some(gate);
+        Ok(())
     }
 
     pub fn disarm(&self) {
+        self.backend.disarm_mutation();
         *self.active_gate.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
@@ -6458,7 +6596,7 @@ mod tests {
     #[test]
     fn regression_c1_issuer_debug_redacts_authority_secret() {
         let issuer = OwnerAuthorizationIssuer::new(b"super-secret-key-material-never-log");
-        let debug_str = format!("{:?}", issuer);
+        let debug_str = format!("{issuer:?}");
         assert!(!debug_str.contains("super-secret-key-material-never-log"));
         assert!(debug_str.contains("<redacted>"));
     }
@@ -6565,7 +6703,7 @@ mod tests {
         );
 
         // 3. Backend cannot be armed with synthetic gate
-        let mut backend = WindowsScmBackend::mutation_inert();
+        let backend = WindowsScmBackend::mutation_inert();
         assert!(!backend.is_armed());
         assert_eq!(
             backend.arm_with_gate(&gate_synth).unwrap_err(),
@@ -6623,7 +6761,7 @@ mod tests {
         assert!(gate.allows_mutation());
 
         // 2. Arm backend with verified gate
-        let mut backend = WindowsScmBackend::mutation_inert().with_clock(clock.clone());
+        let backend = WindowsScmBackend::mutation_inert().with_clock(clock.clone());
         backend.arm_with_gate(&gate).unwrap();
         assert!(backend.is_armed());
 

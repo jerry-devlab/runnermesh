@@ -268,15 +268,14 @@ impl IpcServer {
                 std::fs::File::from_raw_handle(raw_pipe as RawHandle)
             };
             let authorized = client_matches_current_user(raw_pipe)?;
-            let result = if authorized {
-                serve_stream(&mut pipe, &mut handle_command)
-            } else {
-                write_unauthorized_response(&mut pipe)
-            };
             // Dropping the server handle closes this one-shot byte pipe after
             // the response has been flushed. `DisconnectNamedPipe` would
             // discard buffered response bytes before the client can read them.
-            result
+            if authorized {
+                serve_stream(&mut pipe, &mut handle_command)
+            } else {
+                write_unauthorized_response(&mut pipe)
+            }
         }
 
         #[cfg(not(windows))]
