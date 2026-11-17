@@ -15,27 +15,33 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use runnermesh::agent_runtime::{start_installed_agent_sandbox, InstalledAgentSandboxConfig};
 use runnermesh::test_support::{
     create_test_verifier_with_provider_and_clock, FakeCredentialManagerAuthorityProvider,
     OwnerAuthorizationIssuer,
 };
 use runnermesh::{
-    capture_restore_plan, AchievedServiceControl, AgentCommand, AgentResponse, DiscoveredLifecycle,
-    DiscoveredRunner, DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
-    DiscoveryDisposition, FakeGithubAdmissionBackend, IpcClient, IpcEndpoint, IpcRequest,
-    IpcResponseBody, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
-    MultiRunnerLifecycleBackend, OpaqueIdentityReference, OwnerAuthoritySecretProvider,
-    OwnerAuthorizationScope, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmRequest,
-    RegistrationScope, RegistryError, RunnerBackendKind, RunnerRegistryEditor,
-    SandboxMultiRunnerLifecycleBackend, ScmActionKind, ScmApiError, ScmControlBackend,
-    ScmControlExecutor, ScmTransactionStage, ServiceObservation, ServiceStartMode,
-    SyntheticScmTestGrant, TokenValidatingOwnerVerifier, TrustedOwnerAuthorizationRequest,
+    capture_restore_plan, AchievedServiceControl, DiscoveredLifecycle, DiscoveredRunner,
+    DiscoveredRunnerIdentity, DiscoveredServiceBinding, DiscoveryCapabilities,
+    DiscoveryDisposition, FakeGithubAdmissionBackend, LiveScmExecutionGate, MockClock,
+    MockScmBackend, MockServiceRecord, OpaqueIdentityReference, OwnerAuthoritySecretProvider,
+    OwnerAuthorizationScope, RegistrationScope, RegistryError, RunnerBackendKind,
+    RunnerRegistryEditor, ScmActionKind, ScmApiError, ScmControlBackend, ScmControlExecutor,
+    ScmTransactionStage, ServiceObservation, ServiceStartMode, SyntheticScmTestGrant,
+    TokenValidatingOwnerVerifier, TrustedOwnerAuthorizationRequest,
     UnissuedOwnerAuthorizationVerifier, WindowsCredentialManagerAuthorityProvider,
     WindowsScmBackend, DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
     DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+};
+#[cfg(windows)]
+use runnermesh::{
+    AgentCommand, AgentResponse, IpcClient, IpcEndpoint, IpcRequest, IpcResponseBody,
+    MultiRunnerLifecycleBackend, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmRequest,
+    SandboxMultiRunnerLifecycleBackend,
 };
 
 fn test_scope() -> OwnerAuthorizationScope {
@@ -475,6 +481,7 @@ fn default_release_api_refuses_arbitrary_key_minting_trusted_live_for_native_ope
 }
 
 #[test]
+#[cfg(windows)]
 fn p03_end_to_end_controlled_execution_chain_via_ipc_with_fake_credentials_and_os_boundary() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-p03-e2e-{}",
@@ -671,6 +678,7 @@ fn p03_end_to_end_controlled_execution_chain_via_ipc_with_fake_credentials_and_o
 }
 
 #[test]
+#[cfg(windows)]
 fn p03_controlled_execution_chain_candidate_commit_and_host_token_drift_rejected() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-p03-drift-{}",
