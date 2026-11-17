@@ -310,6 +310,7 @@ impl<T: AgentTransport> NativeTrayEventLoop<T> {
                 }
                 Ok(TrayActionResult::Runners(Box::new(report)))
             }
+            AgentResponse::OwnerAuthorization(_) => Ok(TrayActionResult::NoOp),
         }
     }
 

@@ -37,6 +37,108 @@ pub trait AdmissionSelectorObserver {
     fn observe_selector_absent(&mut self) -> Result<bool, ScmApiError>;
 }
 
+/// Default fixed credential target in current user's Windows Credential Manager.
+pub const DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET: &str = "runnermesh/owner-authority";
+
+/// Default authorization validity window: 30 minutes (1800 seconds).
+pub const DEFAULT_AUTHORIZATION_VALIDITY_SECONDS: u64 = 1800;
+
+/// Abstraction for reading owner authority root secret.
+pub trait OwnerAuthoritySecretProvider: Send + Sync + std::fmt::Debug {
+    fn read_authority_secret(&self, target_name: &str) -> Result<Vec<u8>, ScmApiError>;
+}
+
+/// Windows Credential Manager provider reading generic credentials for current user.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowsCredentialManagerAuthorityProvider;
+
+impl OwnerAuthoritySecretProvider for WindowsCredentialManagerAuthorityProvider {
+    fn read_authority_secret(&self, target_name: &str) -> Result<Vec<u8>, ScmApiError> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Security::Credentials::{
+                CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+            };
+
+            if target_name.trim().is_empty() {
+                return Err(ScmApiError::AuthorizationNotIssued);
+            }
+
+            let mut wide_target: Vec<u16> =
+                std::ffi::OsStr::new(target_name).encode_wide().collect();
+            wide_target.push(0);
+
+            let mut cred_ptr: *mut CREDENTIALW = std::ptr::null_mut();
+            let ok =
+                unsafe { CredReadW(wide_target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred_ptr) };
+            if ok == 0 || cred_ptr.is_null() {
+                return Err(ScmApiError::AuthorizationNotIssued);
+            }
+
+            let cred = unsafe { &*cred_ptr };
+            if cred.CredentialBlobSize == 0 || cred.CredentialBlob.is_null() {
+                unsafe { CredFree(cred_ptr as *const core::ffi::c_void) };
+                return Err(ScmApiError::AuthorizationNotIssued);
+            }
+
+            let secret = unsafe {
+                std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize)
+                    .to_vec()
+            };
+            unsafe { CredFree(cred_ptr as *const core::ffi::c_void) };
+            Ok(secret)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = target_name;
+            Err(ScmApiError::AuthorizationNotIssued)
+        }
+    }
+}
+
+/// In-memory fake provider for sandbox tests without touching real Windows Credential Manager.
+#[derive(Clone, Debug, Default)]
+pub struct FakeCredentialManagerAuthorityProvider {
+    secrets: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+}
+
+impl FakeCredentialManagerAuthorityProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_secret(target: impl Into<String>, secret: impl Into<Vec<u8>>) -> Self {
+        let provider = Self::new();
+        provider.set_secret(target, secret);
+        provider
+    }
+
+    pub fn set_secret(&self, target: impl Into<String>, secret: impl Into<Vec<u8>>) {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(target.into(), secret.into());
+    }
+
+    pub fn remove_secret(&self, target: &str) {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(target);
+    }
+}
+
+impl OwnerAuthoritySecretProvider for FakeCredentialManagerAuthorityProvider {
+    fn read_authority_secret(&self, target_name: &str) -> Result<Vec<u8>, ScmApiError> {
+        let guard = self.secrets.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.get(target_name) {
+            Some(secret) if !secret.is_empty() => Ok(secret.clone()),
+            _ => Err(ScmApiError::AuthorizationNotIssued),
+        }
+    }
+}
+
 /// Authorized scope defining exact target and rights bound by Owner authorization.
 ///
 /// Implements P03 multi-dimensional binding preventing authorization confusion:
@@ -127,7 +229,7 @@ impl OwnerAuthorizationScope {
 /// 7. Bounded transaction ID (`transaction_id`)
 /// 8. Validity window (`not_before_epoch_seconds`, `expires_at_epoch_seconds`)
 /// 9. Single-use nonce (`nonce`)
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrustedOwnerAuthorizationRequest {
     pub service_name: String,
     pub image_token: String,
@@ -621,7 +723,7 @@ impl SharedAuthorizationLedger {
 /// plane possessing the Owner root authority secret. Callers cannot self-select
 /// tokens or manufacture valid vouchers without this authority.
 #[derive(Clone)]
-pub(crate) struct OwnerAuthorizationIssuer {
+pub struct OwnerAuthorizationIssuer {
     authority_secret: Vec<u8>,
     #[allow(dead_code)]
     clock: Arc<dyn TrustedClock>,
@@ -637,17 +739,14 @@ impl std::fmt::Debug for OwnerAuthorizationIssuer {
 
 #[allow(dead_code)]
 impl OwnerAuthorizationIssuer {
-    pub(crate) fn new(authority_secret: impl Into<Vec<u8>>) -> Self {
+    pub fn new(authority_secret: impl Into<Vec<u8>>) -> Self {
         Self {
             authority_secret: authority_secret.into(),
             clock: Arc::new(SystemClock),
         }
     }
 
-    pub(crate) fn with_clock(
-        authority_secret: impl Into<Vec<u8>>,
-        clock: Arc<dyn TrustedClock>,
-    ) -> Self {
+    pub fn with_clock(authority_secret: impl Into<Vec<u8>>, clock: Arc<dyn TrustedClock>) -> Self {
         Self {
             authority_secret: authority_secret.into(),
             clock,
@@ -705,7 +804,7 @@ impl OwnerAuthorizationIssuer {
     }
 
     /// Issue a signed authorization request for the specified 9-dimension scope.
-    pub(crate) fn issue_for_scope(
+    pub fn issue_for_scope(
         &self,
         scope: &OwnerAuthorizationScope,
         validity_duration_seconds: u64,
@@ -751,7 +850,7 @@ impl OwnerAuthorizationIssuer {
 
     /// Issue a signed authorization request for the specified parameters.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn issue(
+    pub fn issue(
         &self,
         service_name: impl Into<String>,
         image_token: impl Into<String>,
@@ -847,6 +946,49 @@ impl TokenValidatingOwnerVerifier {
             None,
             Arc::new(SystemClock),
             SharedAuthorizationLedger::global().clone(),
+        )
+    }
+
+    /// Constructs a verifier by reading the authority secret from an authority provider
+    /// (e.g. Windows Credential Manager or sandbox fake provider) for the specified target.
+    pub fn from_credential_provider(
+        scope: OwnerAuthorizationScope,
+        target_name: &str,
+        provider: &dyn OwnerAuthoritySecretProvider,
+    ) -> Result<Self, ScmApiError> {
+        Self::from_credential_provider_and_clock(
+            scope,
+            target_name,
+            provider,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// Constructs a verifier by reading the authority secret from an authority provider
+    /// with a custom trusted boundary clock.
+    pub fn from_credential_provider_and_clock(
+        scope: OwnerAuthorizationScope,
+        target_name: &str,
+        provider: &dyn OwnerAuthoritySecretProvider,
+        clock: Arc<dyn TrustedClock>,
+    ) -> Result<Self, ScmApiError> {
+        let secret = provider.read_authority_secret(target_name)?;
+        Ok(Self::with_clock_and_ledger(
+            &[],
+            scope,
+            Some(secret),
+            clock,
+            SharedAuthorizationLedger::global().clone(),
+        ))
+    }
+
+    /// Constructs a verifier bound to current user's Windows Credential Manager
+    /// target `runnermesh/owner-authority`. Fails closed if absent or unissued.
+    pub fn from_credential_manager(scope: OwnerAuthorizationScope) -> Result<Self, ScmApiError> {
+        Self::from_credential_provider(
+            scope,
+            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+            &WindowsCredentialManagerAuthorityProvider,
         )
     }
 
@@ -2800,9 +2942,18 @@ impl WindowsScmBackend {
         self.mutation_arm = None;
     }
 
-    /// Queries whether the mutation arm is currently armed.
+    /// Queries whether the mutation arm is currently armed and temporally valid.
     pub fn is_armed(&self) -> bool {
-        self.mutation_arm.is_some()
+        let Some(ref arm) = self.mutation_arm else {
+            return false;
+        };
+        if let Some(ref clock) = self.clock {
+            let now = clock.now_epoch_seconds();
+            now >= arm.not_before_epoch_seconds
+                && (arm.expires_at_epoch_seconds == 0 || now < arm.expires_at_epoch_seconds)
+        } else {
+            true
+        }
     }
 
     fn require_exact_name(service_name: &str) -> Result<(), ScmApiError> {
@@ -3436,9 +3587,23 @@ pub struct PrivilegedScmReport {
 pub struct PrivilegedScmHelper<B> {
     backend: B,
     gate: LiveScmExecutionGate,
+    active_gate: Arc<Mutex<Option<LiveScmExecutionGate>>>,
     clock: Arc<dyn TrustedClock>,
     target_host_token: String,
     candidate_commit: String,
+}
+
+impl<B: Clone> Clone for PrivilegedScmHelper<B> {
+    fn clone(&self) -> Self {
+        Self {
+            backend: self.backend.clone(),
+            gate: self.gate.clone(),
+            active_gate: Arc::clone(&self.active_gate),
+            clock: Arc::clone(&self.clock),
+            target_host_token: self.target_host_token.clone(),
+            candidate_commit: self.candidate_commit.clone(),
+        }
+    }
 }
 
 impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
@@ -3450,6 +3615,7 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             target_host_token,
             candidate_commit,
             gate,
+            active_gate: Arc::new(Mutex::new(None)),
             clock: Arc::new(SystemClock),
         }
     }
@@ -3471,6 +3637,22 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
         self.target_host_token = target_host_token.into();
         self.candidate_commit = candidate_commit.into();
         self
+    }
+
+    pub fn arm_with_gate(&self, gate: LiveScmExecutionGate) {
+        *self.active_gate.lock().unwrap_or_else(|p| p.into_inner()) = Some(gate);
+    }
+
+    pub fn disarm(&self) {
+        *self.active_gate.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    pub fn current_gate(&self) -> LiveScmExecutionGate {
+        self.active_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.gate.clone())
     }
 
     pub fn dispatch(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport {
@@ -3541,7 +3723,8 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             need_stop,
             need_config,
         };
-        if let Err(err) = self.gate.authorizes_context(&context, self.clock.as_ref()) {
+        let effective_gate = self.current_gate();
+        if let Err(err) = effective_gate.authorizes_context(&context, self.clock.as_ref()) {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
                 transaction_id: request.transaction_id.clone(),
@@ -3619,7 +3802,8 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
         }
 
         // 4. Perform narrow mutation
-        if let Err(err) = self.gate.authorizes_context(&context, self.clock.as_ref()) {
+        let effective_gate = self.current_gate();
+        if let Err(err) = effective_gate.authorizes_context(&context, self.clock.as_ref()) {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
                 transaction_id: request.transaction_id.clone(),

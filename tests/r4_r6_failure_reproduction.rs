@@ -2940,6 +2940,9 @@ fn regression_c5b_immutable_rc_sandbox_install_upgrade_rollback_uninstall() {
             .map(std::path::PathBuf::from)
             .ok(),
         Some(std::path::PathBuf::from(
+            r"..\..\runnermesh-160h-audit\2026-11-15\160H-REMAINING-CLOSEOUT-1e7123b\candidate\runnermesh-0.2.0-rc.2-windows-x64.zip",
+        )),
+        Some(std::path::PathBuf::from(
             r"target\artifacts\lrm-rc\runnermesh-0.2.0-rc.2-windows-x64.zip",
         )),
     ];
@@ -4410,6 +4413,11 @@ fn regression_s4_authentic_dual_package_upgrade_rollback() {
         .filter(|p| p.is_file())
     {
         std::fs::canonicalize(pkg_path).expect("canonicalize RUNNERMESH_RC_PACKAGE_PATH")
+    } else if let Some(pkg_path) = [
+        std::path::PathBuf::from(r"..\..\runnermesh-160h-audit\2026-11-15\160H-REMAINING-CLOSEOUT-1e7123b\candidate\runnermesh-0.2.0-rc.2-windows-x64.zip"),
+        std::path::PathBuf::from(r"target\artifacts\lrm-rc\runnermesh-0.2.0-rc.2-windows-x64.zip"),
+    ].into_iter().find(|p| p.is_file()) {
+        std::fs::canonicalize(pkg_path).expect("canonicalize candidate package")
     } else if let (Some(cli_str), Some(agent_str), Some(manifest_str), Some(commit_str)) = (
         std::env::var("RUNNERMESH_CANDIDATE_CLI_PATH").ok(),
         std::env::var("RUNNERMESH_CANDIDATE_AGENT_PATH").ok(),

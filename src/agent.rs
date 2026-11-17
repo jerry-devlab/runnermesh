@@ -350,6 +350,9 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
 
     /// Unregisters a runner target when forgotten.
     fn unregister_runner_target(&self, _local_runner_key: &str) {}
+
+    /// Arms the mutation gate for SCM control on this backend.
+    fn arm_scm_gate(&self, _gate: crate::windows_scm_executor::LiveScmExecutionGate) {}
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -449,6 +452,10 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
             .unwrap_or_else(|p| p.into_inner())
             .push((record.local_runner_key.clone(), action));
         Ok(true)
+    }
+
+    fn arm_scm_gate(&self, gate: crate::windows_scm_executor::LiveScmExecutionGate) {
+        self.helper.arm_with_gate(gate);
     }
 }
 
@@ -1641,6 +1648,10 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
             None => StandardSessionCoordinator::default().observe_session(record),
         }
     }
+
+    fn arm_scm_gate(&self, gate: crate::windows_scm_executor::LiveScmExecutionGate) {
+        self.helper.arm_with_gate(gate);
+    }
 }
 
 /// In-process single authority for `Observe -> Decide -> Reconcile`.
@@ -1658,6 +1669,7 @@ pub struct AgentCore<O, R, S> {
     last_runner_discovery: Option<DiscoveryReport>,
     multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     last_runner_reports: Vec<PrivilegedScmReport>,
+    authority_provider: Option<Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>>,
 }
 
 impl<O, R, S> AgentCore<O, R, S>
@@ -1719,7 +1731,25 @@ where
             last_runner_discovery: None,
             multi_runner_backend: None,
             last_runner_reports: Vec::new(),
+            authority_provider: None,
         })
+    }
+
+    /// Attaches an authority secret provider for owner authorization verification.
+    pub fn with_authority_provider(
+        mut self,
+        provider: Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>,
+    ) -> Self {
+        self.authority_provider = Some(provider);
+        self
+    }
+
+    /// Attaches an authority secret provider on an existing AgentCore.
+    pub fn set_authority_provider(
+        &mut self,
+        provider: Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>,
+    ) {
+        self.authority_provider = Some(provider);
     }
 
     /// Attaches a multi-runner lifecycle backend for runner observation,
@@ -2195,6 +2225,97 @@ where
             | AgentCommand::RunnersReconcile { .. }
             | AgentCommand::RunnersForget { .. }
             | AgentCommand::RunnersStatus { .. } => self.handle_runners_command(command),
+            AgentCommand::AuthorizeOwnerMutation { request } => {
+                self.handle_authorize_owner_mutation(request)
+            }
+        }
+    }
+
+    fn handle_authorize_owner_mutation(
+        &mut self,
+        request: crate::windows_scm_executor::TrustedOwnerAuthorizationRequest,
+    ) -> Result<AgentResponse, AgentCoreError> {
+        use crate::windows_scm_executor::{
+            OwnerAuthorizationScope, TokenValidatingOwnerVerifier,
+            TrustedOwnerAuthorizationVerifier, WindowsCredentialManagerAuthorityProvider,
+            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+        };
+
+        let target_name = DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET;
+        let default_provider = WindowsCredentialManagerAuthorityProvider;
+        let provider: &dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider = self
+            .authority_provider
+            .as_ref()
+            .map(|p| p.as_ref())
+            .unwrap_or(&default_provider);
+
+        let scope = OwnerAuthorizationScope {
+            service_name: request.service_name.clone(),
+            image_token: request.image_token.clone(),
+            execution_identity_token: request.execution_identity_token.clone(),
+            target_host_token: request.target_host_token.clone(),
+            candidate_commit: request.candidate_commit.clone(),
+            transaction_id: request.transaction_id.clone(),
+            allow_start: request.allow_start,
+            allow_stop: request.allow_stop,
+            allow_change_config: request.allow_change_config,
+        };
+
+        let verifier = match TokenValidatingOwnerVerifier::from_credential_provider(
+            scope,
+            target_name,
+            provider,
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(AgentResponse::OwnerAuthorization(
+                    crate::OwnerAuthorizationReport {
+                        authorized: false,
+                        transaction_id: request.transaction_id,
+                        service_name: request.service_name,
+                        expires_at_epoch_seconds: 0,
+                        reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
+                    },
+                ));
+            }
+        };
+
+        match verifier.verify(&request) {
+            Ok(gate) => {
+                if let Some(backend) = &self.multi_runner_backend {
+                    backend.arm_scm_gate(gate.clone());
+                }
+                Ok(AgentResponse::OwnerAuthorization(
+                    crate::OwnerAuthorizationReport {
+                        authorized: true,
+                        transaction_id: request.transaction_id,
+                        service_name: request.service_name,
+                        expires_at_epoch_seconds: request.expires_at_epoch_seconds,
+                        reason_code: None,
+                    },
+                ))
+            }
+            Err(err) => {
+                let reason = match err {
+                    crate::windows_scm_executor::ScmApiError::AccessDenied => {
+                        "owner-auth-access-denied"
+                    }
+                    crate::windows_scm_executor::ScmApiError::NameDrift => "owner-auth-name-drift",
+                    crate::windows_scm_executor::ScmApiError::IdentityMismatch => {
+                        "owner-auth-identity-mismatch"
+                    }
+                    _ => "owner-auth-verification-failed",
+                };
+                Ok(AgentResponse::OwnerAuthorization(
+                    crate::OwnerAuthorizationReport {
+                        authorized: false,
+                        transaction_id: request.transaction_id,
+                        service_name: request.service_name,
+                        expires_at_epoch_seconds: 0,
+                        reason_code: Some(ReasonCode::new(reason).unwrap()),
+                    },
+                ))
+            }
         }
     }
 
@@ -4801,5 +4922,72 @@ mod tests {
         assert_eq!(r2.presentation_status, RunnerPresentationStatus::Stopped);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_authorize_owner_mutation_command_with_fake_provider() {
+        use crate::windows_scm_executor::{
+            FakeCredentialManagerAuthorityProvider, OwnerAuthorizationIssuer,
+            OwnerAuthorizationScope, DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+        };
+
+        let observer = QueueObserver::new(vec![healthy_observation()]);
+        let reconciler = RecordingReconciler::default();
+        let store = MemoryConfigStore::default();
+        let mut core = AgentCore::new(observer, reconciler, store, build()).unwrap();
+
+        let fake_provider = Arc::new(FakeCredentialManagerAuthorityProvider::new());
+        let secret = b"offline-owner-qualification-key-32b-secret";
+        fake_provider.set_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET, secret);
+        core.set_authority_provider(fake_provider);
+
+        let scope = OwnerAuthorizationScope::new(
+            "actions.runner.auth-target",
+            "image-token-12345",
+            "identity-token-67890",
+            "host-token-abcde",
+            "028c7efba9ebd3d3925371b356a187eba428041d",
+            "tx-p03-qualification-001",
+            true,
+            true,
+            false,
+        );
+
+        let issuer = OwnerAuthorizationIssuer::new(secret);
+        let (request, _) = issuer.issue_for_scope(
+            &scope,
+            DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+            "nonce-ipc-auth-001",
+        );
+
+        // First attempt: authorized
+        let response = core
+            .handle_command(AgentCommand::AuthorizeOwnerMutation {
+                request: request.clone(),
+            })
+            .unwrap();
+
+        let AgentResponse::OwnerAuthorization(report) = response else {
+            panic!("expected OwnerAuthorization response");
+        };
+        assert!(report.authorized);
+        assert_eq!(report.transaction_id, "tx-p03-qualification-001");
+        assert_eq!(report.service_name, "actions.runner.auth-target");
+        assert!(report.reason_code.is_none());
+
+        // Second attempt: replay of same nonce is rejected
+        let replay_response = core
+            .handle_command(AgentCommand::AuthorizeOwnerMutation { request })
+            .unwrap();
+
+        let AgentResponse::OwnerAuthorization(replay_report) = replay_response else {
+            panic!("expected OwnerAuthorization response");
+        };
+        assert!(!replay_report.authorized);
+        assert_eq!(
+            replay_report.reason_code.as_ref().map(|r| r.as_str()),
+            Some("owner-auth-access-denied")
+        );
     }
 }

@@ -552,6 +552,19 @@ pub enum AgentCommand {
     RunnersStatus {
         local_runner_key: Option<String>,
     },
+    AuthorizeOwnerMutation {
+        request: crate::windows_scm_executor::TrustedOwnerAuthorizationRequest,
+    },
+}
+
+/// Typed report of an applied or rejected Owner authorization request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OwnerAuthorizationReport {
+    pub authorized: bool,
+    pub transaction_id: String,
+    pub service_name: String,
+    pub expires_at_epoch_seconds: u64,
+    pub reason_code: Option<ReasonCode>,
 }
 
 /// Typed response from the Agent. Errors use stable machine reason codes so
@@ -564,6 +577,7 @@ pub enum AgentResponse {
     Accepted { snapshot: AgentSnapshot },
     Rejected { reason_code: ReasonCode },
     Runners(crate::RunnerCommandReport),
+    OwnerAuthorization(OwnerAuthorizationReport),
 }
 
 #[cfg(test)]

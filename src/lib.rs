@@ -196,8 +196,8 @@ pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
     DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
     EffectiveUiPreferences, HardSafetyState, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
-    SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
+    OwnerAuthorizationReport, ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
+    RunnerPhase, SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
 };
 #[cfg(windows)]
 pub use runtime_binding::current_windows_identity_reference;
@@ -249,14 +249,17 @@ pub use windows_runner_discovery::{
 pub use windows_scm_executor::{
     map_service_lifecycle_from_process_observation, opaque_image_token,
     reconcile_interrupted_scm_journal, runner_service_binary_path, runner_service_image_token,
-    AdmissionSelectorObserver, DurableLedgerEntry, FakeGithubAdmissionBackend,
-    GatedWindowsScmBackend, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
+    AdmissionSelectorObserver, DurableLedgerEntry, FakeCredentialManagerAuthorityProvider,
+    FakeGithubAdmissionBackend, GatedWindowsScmBackend, LiveScmExecutionGate, MockClock,
+    MockScmBackend, MockServiceRecord, OwnerAuthoritySecretProvider, OwnerAuthorizationIssuer,
     OwnerAuthorizationScope, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
     PrivilegedScmRequest, ScmActionKind, ScmApiError, ScmControlBackend, ScmControlExecutor,
     ScmExactSnapshot, ScmMutationArm, ScmTransactionJournal, ScmTransactionReceipt,
     ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant, SystemClock,
     TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
-    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
+    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier,
+    WindowsCredentialManagerAuthorityProvider, WindowsScmBackend,
+    DEFAULT_AUTHORIZATION_VALIDITY_SECONDS, DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
     SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };
 #[cfg(windows)]

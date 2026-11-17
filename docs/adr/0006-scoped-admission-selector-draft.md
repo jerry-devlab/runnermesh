@@ -1,6 +1,6 @@
 # ADR 0006 (Draft): Per-runner scoped admission selectors
 
-- Status: **Draft — not accepted; does not amend ADR 0004/v0.1**
+- Status: **DEFERRED by Owner decision (2026-11-17) — continue using distinct scopes; same-scope dual managed admission remains refused**
 - Date: 2026-11-08
 - Relates: ADR 0004, ADR 0005, RM-LRM-PRODUCTIZATION-TRAIN-001
 

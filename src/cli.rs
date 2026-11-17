@@ -305,8 +305,10 @@ fn request_snapshot(
     match response {
         AgentResponse::Snapshot(snapshot) | AgentResponse::Accepted { snapshot } => Ok(snapshot),
         AgentResponse::Rejected { reason_code } => Err(CliError::AgentRejected(reason_code)),
-        AgentResponse::Doctor(_) | AgentResponse::Runners(_) => Err(CliError::UnexpectedResponse(
-            "a doctor/runners response for a snapshot command",
+        AgentResponse::Doctor(_)
+        | AgentResponse::Runners(_)
+        | AgentResponse::OwnerAuthorization(_) => Err(CliError::UnexpectedResponse(
+            "a doctor/runners/owner-auth response for a snapshot command",
         )),
     }
 }
@@ -318,11 +320,12 @@ fn request_runners(
     match send(transport, command)? {
         AgentResponse::Runners(report) => Ok(report),
         AgentResponse::Rejected { reason_code } => Err(CliError::AgentRejected(reason_code)),
-        AgentResponse::Snapshot(_) | AgentResponse::Accepted { .. } | AgentResponse::Doctor(_) => {
-            Err(CliError::UnexpectedResponse(
-                "a non-runners response for a runners command",
-            ))
-        }
+        AgentResponse::Snapshot(_)
+        | AgentResponse::Accepted { .. }
+        | AgentResponse::Doctor(_)
+        | AgentResponse::OwnerAuthorization(_) => Err(CliError::UnexpectedResponse(
+            "a non-runners response for a runners command",
+        )),
     }
 }
 
@@ -331,11 +334,12 @@ fn request_doctor(transport: &impl AgentTransport) -> Result<DoctorReport, CliEr
     match response {
         AgentResponse::Doctor(report) => Ok(report),
         AgentResponse::Rejected { reason_code } => Err(CliError::AgentRejected(reason_code)),
-        AgentResponse::Snapshot(_) | AgentResponse::Accepted { .. } | AgentResponse::Runners(_) => {
-            Err(CliError::UnexpectedResponse(
-                "a snapshot/runners response for a doctor command",
-            ))
-        }
+        AgentResponse::Snapshot(_)
+        | AgentResponse::Accepted { .. }
+        | AgentResponse::Runners(_)
+        | AgentResponse::OwnerAuthorization(_) => Err(CliError::UnexpectedResponse(
+            "a snapshot/runners/owner-auth response for a doctor command",
+        )),
     }
 }
 
