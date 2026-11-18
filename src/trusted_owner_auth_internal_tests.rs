@@ -9,16 +9,21 @@ use std::time::Duration;
 
 #[cfg(windows)]
 use crate::agent_runtime::{start_installed_agent_sandbox, InstalledAgentSandboxConfig};
+#[cfg(windows)]
 use crate::runner_service_backend::{ServiceObservation, ServiceStartMode};
 use crate::windows_scm_executor::test_support::{
     create_test_verifier_with_provider_and_clock, FakeCredentialManagerAuthorityProvider,
     OwnerAuthorizationIssuer,
 };
+#[cfg(windows)]
 use crate::windows_scm_executor::{
-    HostExecutionContext, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
-    OwnerAuthoritySecretProvider, OwnerAuthorizationScope, PrivilegedScmAction,
-    PrivilegedScmHelper, PrivilegedScmRequest, ScmActionKind, ScmApiError, ScmControlBackend,
-    DEFAULT_AUTHORIZATION_VALIDITY_SECONDS, DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+    HostExecutionContext, MockScmBackend, MockServiceRecord, PrivilegedScmAction,
+    PrivilegedScmHelper, PrivilegedScmRequest, ScmControlBackend,
+};
+use crate::windows_scm_executor::{
+    LiveScmExecutionGate, MockClock, OwnerAuthoritySecretProvider, OwnerAuthorizationScope,
+    ScmActionKind, ScmApiError, DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+    DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
 };
 #[cfg(windows)]
 use crate::{
