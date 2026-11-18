@@ -282,18 +282,6 @@ impl HostExecutionContext {
 }
 
 pub fn resolve_current_host_token() -> String {
-    if let Ok(token) = std::env::var("RUNNERMESH_TARGET_HOST_TOKEN") {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
-        }
-    }
-    if let Ok(computer_name) = std::env::var("COMPUTERNAME") {
-        let trimmed = computer_name.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
-        }
-    }
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::WindowsProgramming::GetComputerNameW;
@@ -3952,11 +3940,9 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                     refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
                 };
             }
-        } else if !request.target_host_token.is_empty()
-            && (request
-                .target_host_token
-                .eq_ignore_ascii_case("unspecified")
-                || request.target_host_token != self.target_host_token)
+        } else if request
+            .target_host_token
+            .eq_ignore_ascii_case("unspecified")
         {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
@@ -3981,10 +3967,7 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                     refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
                 };
             }
-        } else if !request.candidate_commit.is_empty()
-            && (request.candidate_commit.eq_ignore_ascii_case("unspecified")
-                || request.candidate_commit != self.candidate_commit)
-        {
+        } else if request.candidate_commit.eq_ignore_ascii_case("unspecified") {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
                 transaction_id: request.transaction_id.clone(),
@@ -4008,12 +3991,22 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                 refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
             };
         }
+        let host_for_context = if !self.target_host_token.is_empty() {
+            &self.target_host_token
+        } else {
+            &request.target_host_token
+        };
+        let commit_for_context = if !self.candidate_commit.is_empty() {
+            &self.candidate_commit
+        } else {
+            &request.candidate_commit
+        };
         let context = ScmExecutionContext {
             service_name: name,
             image_token: &request.expected_image_token,
             execution_identity_token: &request.expected_execution_identity_token,
-            target_host_token: &self.target_host_token,
-            candidate_commit: &self.candidate_commit,
+            target_host_token: host_for_context,
+            candidate_commit: commit_for_context,
             transaction_id: &request.transaction_id,
             need_start,
             need_stop,

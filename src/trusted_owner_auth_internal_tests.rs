@@ -29,8 +29,9 @@ use crate::windows_scm_executor::{
 use crate::{
     AgentCommand, AgentResponse, AuthoritativeMultiRunnerLifecycleBackend, DiscoveredLifecycle,
     EnrollmentState, GatedUserSessionProcessTransport, IpcClient, IpcEndpoint, IpcRequest,
-    IpcResponseBody, MultiRunnerLifecycleBackend, RegistryBackendBinding, RunnerRecord,
-    SandboxMultiRunnerLifecycleBackend, StandardSessionCoordinator, UserSessionProcessTransport,
+    IpcResponseBody, MultiRunnerLifecycleBackend, OpaqueIdentityReference, PerRunnerObservation,
+    RegistrationScope, RegistryBackendBinding, RunnerRecord, SandboxMultiRunnerLifecycleBackend,
+    StandardSessionCoordinator, UserMode, UserSessionProcessTransport,
 };
 
 fn test_scope() -> OwnerAuthorizationScope {
@@ -830,6 +831,382 @@ fn p03_execution_context_empty_or_unspecified_rejected_at_assembly_and_ipc() {
         rep4.reason_code.as_ref().map(|r| r.as_str()),
         Some("owner-auth-candidate-commit-mismatch")
     );
+
+    let _ = runtime.shutdown();
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn p03_f1_production_host_token_source_ignores_env_overrides_and_fails_closed() {
+    use crate::windows_scm_executor::{resolve_current_host_token, HostExecutionContext};
+
+    // 1. Verify environment overrides do not affect the native host token source
+    std::env::set_var(
+        "RUNNERMESH_TARGET_HOST_TOKEN",
+        "attacker-host-override-token",
+    );
+    std::env::set_var("COMPUTERNAME", "fake-computer-name-override");
+
+    let resolved = resolve_current_host_token();
+    // On Windows, resolve_current_host_token must query GetComputerNameW, ignoring the env vars
+    assert_ne!(
+        resolved, "attacker-host-override-token",
+        "production host token source must NEVER be overridden by RUNNERMESH_TARGET_HOST_TOKEN"
+    );
+    assert_ne!(
+        resolved, "fake-computer-name-override",
+        "production host token source must NEVER be overridden by COMPUTERNAME"
+    );
+    assert!(
+        !resolved.is_empty(),
+        "native GetComputerNameW must resolve non-empty host on Windows"
+    );
+
+    // Clean up env vars
+    std::env::remove_var("RUNNERMESH_TARGET_HOST_TOKEN");
+
+    // 2. Verify HostExecutionContext fails closed on empty or unspecified host
+    assert!(HostExecutionContext::new("", "028c7efba9ebd3d3925371b356a187eba428041d").is_err());
+    assert!(HostExecutionContext::new("   ", "028c7efba9ebd3d3925371b356a187eba428041d").is_err());
+    assert!(
+        HostExecutionContext::new("unspecified", "028c7efba9ebd3d3925371b356a187eba428041d")
+            .is_err()
+    );
+    assert!(
+        HostExecutionContext::new("UNSPECIFIED", "028c7efba9ebd3d3925371b356a187eba428041d")
+            .is_err()
+    );
+
+    // 3. Verify HostExecutionContext fails closed on empty or unspecified commit
+    assert!(HostExecutionContext::new("valid-host", "").is_err());
+    assert!(HostExecutionContext::new("valid-host", "   ").is_err());
+    assert!(HostExecutionContext::new("valid-host", "unspecified").is_err());
+    assert!(HostExecutionContext::new("valid-host", "UNSPECIFIED").is_err());
+
+    // 4. Verify valid inputs succeed
+    let ctx = HostExecutionContext::new("valid-host", "028c7efba9ebd3d3925371b356a187eba428041d");
+    assert!(ctx.is_ok());
+    let unwrapped = ctx.unwrap();
+    assert_eq!(unwrapped.target_host_token(), "valid-host");
+    assert_eq!(
+        unwrapped.candidate_commit(),
+        "028c7efba9ebd3d3925371b356a187eba428041d"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_and_readback() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rm-p03-f3-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let service_name = "actions.runner.p03-f3-target";
+    let runner_home = temp_dir.join("runner-home");
+    std::fs::create_dir_all(&runner_home).unwrap();
+    let image_token = crate::runner_service_image_token(&runner_home);
+
+    let mock_backend = MockScmBackend::new();
+    mock_backend.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: service_name.to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: image_token.clone(),
+        execution_identity_token: "identity-token-f3".to_string(),
+    });
+
+    let start_time: u64 = 300_000;
+    let clock = Arc::new(MockClock::new(start_time));
+    let running_commit = env!("RUNNERMESH_BUILD_COMMIT").to_string();
+    let host_token = "host-token-f3";
+    let context = HostExecutionContext::new(host_token, &running_commit).unwrap();
+
+    let helper = PrivilegedScmHelper::new(mock_backend.clone(), LiveScmExecutionGate::CLOSED)
+        .with_context(context.clone())
+        .with_clock(clock.clone());
+
+    let backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper));
+
+    // Register test runner record targeting the Windows Service
+    let runner_record = RunnerRecord {
+        local_runner_key: "runner-p03-f3".to_string(),
+        backend: RegistryBackendBinding::WindowsService {
+            service_name: service_name.to_string(),
+        },
+        runner_home: runner_home.clone(),
+        work_root: temp_dir.join("work"),
+        execution_identity_ref: OpaqueIdentityReference::new("provider", "identity-token-f3")
+            .unwrap(),
+        credential_ref: None,
+        desired_enabled: true,
+        registration_scope: RegistrationScope::Organization {
+            organization: "test-org".to_string(),
+        },
+        runner_id: 202,
+        expected_runner_name: "test-runner-f3".to_string(),
+        enrollment_state: EnrollmentState::Enrolled,
+        managed_admission: false,
+    };
+    {
+        use crate::runner_registry::RegistryStore;
+        let mut reg = crate::runner_registry::RunnerRegistry::default();
+        reg.records.push(runner_record.clone());
+        crate::runner_registry::FileRegistryStore::new(temp_dir.join("runners-registry.json"))
+            .save(&reg)
+            .unwrap();
+    }
+    backend.register_runner_record(&runner_record);
+
+    // Initial observation: service is listening, selector present, worker idle
+    backend.set_observations(vec![PerRunnerObservation {
+        local_runner_key: "runner-p03-f3".to_string(),
+        ownership_verified: true,
+        lifecycle: DiscoveredLifecycle::Listening,
+        worker_present: false,
+        selector_present: Some(true),
+        selector_observation_unknown: false,
+        legacy_generic_label_routing: false,
+        same_scope_managed_collision: false,
+    }]);
+
+    let ipc_endpoint = IpcEndpoint::for_test_scope(format!("p03-f3-pipe-{}", std::process::id()));
+
+    let sandbox_config = InstalledAgentSandboxConfig {
+        install_root: temp_dir.clone(),
+        ipc_endpoint: ipc_endpoint.clone(),
+        multi_runner_backend: Some(backend.clone()),
+        discovery_report: None,
+        poll_interval: Duration::from_millis(25),
+        enable_periodic_scheduler: false,
+    };
+
+    let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
+
+    let fake_provider = Arc::new(FakeCredentialManagerAuthorityProvider::new());
+    let secret = b"p03-f3-qualification-secret-32b";
+    fake_provider.set_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET, secret);
+    {
+        let mut core = runtime.core().lock().unwrap();
+        core.set_authority_provider_for_test(fake_provider, Some(clock.clone()));
+        core.set_hard_safety_for_test(crate::HardSafetyState::Clear);
+        core.set_execution_context(context);
+    }
+
+    let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
+
+    // Baseline mode: Set to Idle over IPC so policy allows capacity when enabled
+    let mode_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::SetMode {
+            mode: UserMode::Idle,
+        }))
+        .expect("SetMode IPC call must succeed");
+    assert!(matches!(
+        mode_resp.body,
+        IpcResponseBody::Success(ref boxed) if matches!(**boxed, AgentResponse::Accepted { .. })
+    ));
+
+    // 1. Prestate check: before authorization, execution arm is closed
+    assert!(!mock_backend.is_armed());
+
+    // 2. Authorize Owner Mutation via real Named Pipe IPC
+    let scope = OwnerAuthorizationScope::new(
+        service_name,
+        crate::runner_service_image_token(&runner_home),
+        "identity-token-f3",
+        host_token,
+        &running_commit,
+        "tx-f3-001",
+        true,
+        true,
+        false,
+    );
+    let issuer = OwnerAuthorizationIssuer::with_clock(secret, clock.clone());
+    let (auth_req, _) = issuer.issue_for_scope(
+        &scope,
+        DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+        "nonce-f3-001",
+    );
+    let auth_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+            request: auth_req,
+        }))
+        .expect("AuthorizeOwnerMutation over IPC must succeed");
+    let IpcResponseBody::Success(boxed_auth) = auth_resp.body else {
+        panic!("expected success response from IPC");
+    };
+    let AgentResponse::OwnerAuthorization(auth_report) = *boxed_auth else {
+        panic!("expected OwnerAuthorization");
+    };
+    assert!(auth_report.authorized);
+    assert!(mock_backend.is_armed());
+
+    // 3. Normal disable command sent over real Named Pipe IPC (NO manual PrivilegedScmRequest construction!)
+    let disable_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersDisable {
+            local_runner_key: "runner-p03-f3".to_string(),
+            when_idle: true,
+            prepare_only: false,
+        }))
+        .expect("RunnersDisable IPC call must succeed");
+    let IpcResponseBody::Success(boxed_disable) = disable_resp.body else {
+        panic!("expected success response");
+    };
+    let AgentResponse::Runners(disable_report) = *boxed_disable else {
+        panic!("expected Runners report");
+    };
+    assert!(disable_report.applied);
+
+    // 4. Update observations reflecting withdrawn selector and run ordinary cycle reconcile_multi_runners
+    backend.set_observations(vec![PerRunnerObservation {
+        local_runner_key: "runner-p03-f3".to_string(),
+        ownership_verified: true,
+        lifecycle: DiscoveredLifecycle::Listening,
+        worker_present: false,
+        selector_present: Some(false),
+        selector_observation_unknown: false,
+        legacy_generic_label_routing: false,
+        same_scope_managed_collision: false,
+    }]);
+
+    let scm_reports = runtime
+        .core()
+        .lock()
+        .unwrap()
+        .reconcile_and_dispatch_multi_runners("tx-f3-001");
+    assert_eq!(scm_reports.len(), 1, "reconcile must produce 1 SCM action");
+    assert!(
+        scm_reports[0].applied,
+        "stop action must be successfully applied through helper: {:?}",
+        scm_reports[0]
+    );
+    assert_eq!(scm_reports[0].achieved_state, DiscoveredLifecycle::Stopped);
+
+    // 5. Readback: verify real state in mock OS backend is Stopped
+    let readback_stopped = mock_backend.query_exact(service_name).unwrap();
+    assert_eq!(
+        readback_stopped.observation.state,
+        DiscoveredLifecycle::Stopped,
+        "post-action readback must confirm service is Stopped"
+    );
+
+    // 6. Normal enable command sent over real Named Pipe IPC
+    let enable_resp = ipc_client
+        .call(IpcRequest::new(AgentCommand::RunnersEnable {
+            local_runner_key: "runner-p03-f3".to_string(),
+            prepare_only: false,
+        }))
+        .expect("RunnersEnable IPC call must succeed");
+    let IpcResponseBody::Success(boxed_enable) = enable_resp.body else {
+        panic!("expected success response");
+    };
+    let AgentResponse::Runners(enable_report) = *boxed_enable else {
+        panic!("expected Runners report");
+    };
+    assert!(enable_report.applied);
+
+    // 7. Update observations reflecting Stopped state and selector advertised, run ordinary cycle reconcile_multi_runners
+    backend.set_observations(vec![PerRunnerObservation {
+        local_runner_key: "runner-p03-f3".to_string(),
+        ownership_verified: true,
+        lifecycle: DiscoveredLifecycle::Stopped,
+        worker_present: false,
+        selector_present: Some(true),
+        selector_observation_unknown: false,
+        legacy_generic_label_routing: false,
+        same_scope_managed_collision: false,
+    }]);
+
+    {
+        let mut core = runtime.core().lock().unwrap();
+        core.set_hard_safety_for_test(crate::HardSafetyState::Clear);
+    }
+
+    let scm_reports_start = runtime
+        .core()
+        .lock()
+        .unwrap()
+        .reconcile_and_dispatch_multi_runners("tx-f3-001");
+    assert_eq!(
+        scm_reports_start.len(),
+        1,
+        "reconcile must produce 1 SCM action"
+    );
+    assert!(
+        scm_reports_start[0].applied,
+        "start action must be successfully applied through helper"
+    );
+    assert_eq!(
+        scm_reports_start[0].achieved_state,
+        DiscoveredLifecycle::Listening
+    );
+
+    // 8. Readback: verify real state in mock OS backend is restored to Listening
+    let readback_listening = mock_backend.query_exact(service_name).unwrap();
+    assert_eq!(
+        readback_listening.observation.state,
+        DiscoveredLifecycle::Listening,
+        "post-action readback must confirm service is Listening"
+    );
+
+    // 9. Drift rejection verification: if execution context drifts, ordinary dispatch rejects fail-closed
+    {
+        let mut core = runtime.core().lock().unwrap();
+        core.set_execution_context(
+            HostExecutionContext::new("drifted-host", &running_commit).unwrap(),
+        );
+    }
+    // Attempt disable with drifted host context
+    let _ = ipc_client.call(IpcRequest::new(AgentCommand::RunnersDisable {
+        local_runner_key: "runner-p03-f3".to_string(),
+        when_idle: true,
+        prepare_only: false,
+    }));
+    backend.set_observations(vec![PerRunnerObservation {
+        local_runner_key: "runner-p03-f3".to_string(),
+        ownership_verified: true,
+        lifecycle: DiscoveredLifecycle::Listening,
+        worker_present: false,
+        selector_present: Some(false),
+        selector_observation_unknown: false,
+        legacy_generic_label_routing: false,
+        same_scope_managed_collision: false,
+    }]);
+    let drifted_reports = runtime
+        .core()
+        .lock()
+        .unwrap()
+        .reconcile_and_dispatch_multi_runners("tx-f3-001");
+    assert_eq!(drifted_reports.len(), 1);
+    assert!(
+        !drifted_reports[0].applied,
+        "drifted context must reject SCM dispatch"
+    );
+    assert_eq!(
+        drifted_reports[0].refusal_reason.as_deref(),
+        Some("scm.identity-mismatch")
+    );
+
+    // Service remains Listening (zero unauthorized mutation on drift)
+    let drift_readback = mock_backend.query_exact(service_name).unwrap();
+    assert_eq!(
+        drift_readback.observation.state,
+        DiscoveredLifecycle::Listening
+    );
+
+    // 10. Expiry write prohibition: advance clock past 1800s
+    clock.set_time(start_time + DEFAULT_AUTHORIZATION_VALIDITY_SECONDS + 1);
+    assert!(!mock_backend.is_armed());
 
     let _ = runtime.shutdown();
     let _ = std::fs::remove_dir_all(temp_dir);

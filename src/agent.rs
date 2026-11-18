@@ -1899,6 +1899,11 @@ where
             .admission_control
             .clone()
             .with_desired(DesiredAdmissionState::from_decision(&decision));
+        let execution_context =
+            crate::windows_scm_executor::HostExecutionContext::resolve_for_installed_runtime(
+                &build,
+            )
+            .ok();
 
         Ok(Self {
             observer,
@@ -1918,7 +1923,7 @@ where
             authority_provider: None,
             #[cfg(test)]
             authority_clock: None,
-            execution_context: None,
+            execution_context,
         })
     }
 
@@ -1941,6 +1946,12 @@ where
     ) {
         self.authority_provider = Some(provider);
         self.authority_clock = clock;
+    }
+
+    /// Overrides hard safety state on an existing AgentCore for tests.
+    #[cfg(test)]
+    pub fn set_hard_safety_for_test(&mut self, safety: crate::HardSafetyState) {
+        self.observation.hard_safety = safety;
     }
 
     pub fn set_execution_context(
@@ -2095,13 +2106,21 @@ where
                         let expected_execution_identity_token =
                             record.execution_identity_ref.key.clone();
 
+                        let (target_host_token, candidate_commit) = self
+                            .execution_context
+                            .as_ref()
+                            .map(|ctx| {
+                                (ctx.target_host_token.clone(), ctx.candidate_commit.clone())
+                            })
+                            .unwrap_or_default();
+
                         let request = PrivilegedScmRequest {
                             action,
                             service_name: service_name.clone(),
                             expected_image_token,
                             expected_execution_identity_token,
-                            target_host_token: String::new(),
-                            candidate_commit: String::new(),
+                            target_host_token,
+                            candidate_commit,
                             transaction_id: transaction_id.to_string(),
                         };
                         reports.push(backend.dispatch_scm(&request));
@@ -2256,13 +2275,19 @@ where
                 let expected_image_token = crate::runner_service_image_token(&record.runner_home);
                 let expected_execution_identity_token = record.execution_identity_ref.key.clone();
 
+                let (target_host_token, candidate_commit) = self
+                    .execution_context
+                    .as_ref()
+                    .map(|ctx| (ctx.target_host_token.clone(), ctx.candidate_commit.clone()))
+                    .unwrap_or_default();
+
                 let request = PrivilegedScmRequest {
                     action,
                     service_name,
                     expected_image_token,
                     expected_execution_identity_token,
-                    target_host_token: String::new(),
-                    candidate_commit: String::new(),
+                    target_host_token,
+                    candidate_commit,
                     transaction_id: transaction_id.to_string(),
                 };
                 reports.push(helper.dispatch(&request));
