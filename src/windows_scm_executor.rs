@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -98,11 +99,14 @@ impl OwnerAuthoritySecretProvider for WindowsCredentialManagerAuthorityProvider 
 }
 
 /// In-memory fake provider for sandbox tests without touching real Windows Credential Manager.
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub struct FakeCredentialManagerAuthorityProvider {
     secrets: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 impl FakeCredentialManagerAuthorityProvider {
     pub fn new() -> Self {
         Self::default()
@@ -129,6 +133,7 @@ impl FakeCredentialManagerAuthorityProvider {
     }
 }
 
+#[cfg(test)]
 impl OwnerAuthoritySecretProvider for FakeCredentialManagerAuthorityProvider {
     fn read_authority_secret(&self, target_name: &str) -> Result<Vec<u8>, ScmApiError> {
         let guard = self.secrets.lock().unwrap_or_else(|p| p.into_inner());
@@ -217,6 +222,96 @@ impl OwnerAuthorizationScope {
     }
 }
 
+/// Trusted execution context binding the authorized host machine and candidate commit.
+///
+/// Ensures both AgentCore and PrivilegedScmHelper share the exact same execution context
+/// resolved at the real installation assembly entry point.
+/// Rejects empty or "unspecified" values fail-closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostExecutionContext {
+    pub target_host_token: String,
+    pub candidate_commit: String,
+}
+
+impl HostExecutionContext {
+    pub fn new(
+        target_host_token: impl Into<String>,
+        candidate_commit: impl Into<String>,
+    ) -> Result<Self, &'static str> {
+        let host = target_host_token.into();
+        let commit = candidate_commit.into();
+        let host_trim = host.trim();
+        let commit_trim = commit.trim();
+        if host_trim.is_empty() || host_trim.eq_ignore_ascii_case("unspecified") {
+            return Err("execution-context.host-token-empty-or-unspecified");
+        }
+        if commit_trim.is_empty() || commit_trim.eq_ignore_ascii_case("unspecified") {
+            return Err("execution-context.commit-empty-or-unspecified");
+        }
+        Ok(Self {
+            target_host_token: host,
+            candidate_commit: commit,
+        })
+    }
+
+    /// Resolves the host execution context for the installed runtime from the environment
+    /// and build provenance. Fails closed if host or commit cannot be resolved, is empty,
+    /// or is "unspecified".
+    pub fn resolve_for_installed_runtime(build: &crate::BuildProvenance) -> Result<Self, String> {
+        let commit = build.commit.trim();
+        if commit.is_empty() || commit.eq_ignore_ascii_case("unspecified") {
+            return Err("installed runtime commit is empty or unspecified".to_owned());
+        }
+
+        let host = resolve_current_host_token();
+        let host_trim = host.trim();
+        if host_trim.is_empty() || host_trim.eq_ignore_ascii_case("unspecified") {
+            return Err("installed runtime target host token is empty or unspecified".to_owned());
+        }
+
+        Self::new(host, commit).map_err(|e| e.to_owned())
+    }
+
+    pub fn target_host_token(&self) -> &str {
+        &self.target_host_token
+    }
+
+    pub fn candidate_commit(&self) -> &str {
+        &self.candidate_commit
+    }
+}
+
+pub fn resolve_current_host_token() -> String {
+    if let Ok(token) = std::env::var("RUNNERMESH_TARGET_HOST_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    if let Ok(computer_name) = std::env::var("COMPUTERNAME") {
+        let trimmed = computer_name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::WindowsProgramming::GetComputerNameW;
+        let mut buffer = [0u16; 256];
+        let mut size = buffer.len() as u32;
+        let ok = unsafe { GetComputerNameW(buffer.as_mut_ptr(), &mut size) };
+        if ok != 0 && size > 0 {
+            if let Ok(name) = String::from_utf16(&buffer[..size as usize]) {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_owned();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 /// Request presented to a trusted Owner authorization verifier.
 ///
 /// Implements the P03 trusted SCM authorization contract binding all 9 dimensions:
@@ -265,7 +360,7 @@ impl std::fmt::Debug for TrustedOwnerAuthorizationRequest {
             .field("not_before_epoch_seconds", &self.not_before_epoch_seconds)
             .field("expires_at_epoch_seconds", &self.expires_at_epoch_seconds)
             .field("nonce", &self.nonce)
-            .field("owner_material", &"[REDACTED]")
+            .field("owner_material", &"<redacted>")
             .finish()
     }
 }
@@ -717,11 +812,12 @@ impl SharedAuthorizationLedger {
     }
 }
 
-/// Trusted boundary Owner authorization issuer.
+/// Trusted boundary Owner authorization issuer for test suites.
 ///
 /// In production, Owner vouchers are issued solely by an authorized control
 /// plane possessing the Owner root authority secret. Callers cannot self-select
 /// tokens or manufacture valid vouchers without this authority.
+#[cfg(test)]
 #[derive(Clone)]
 pub struct OwnerAuthorizationIssuer {
     authority_secret: Vec<u8>,
@@ -729,6 +825,7 @@ pub struct OwnerAuthorizationIssuer {
     clock: Arc<dyn TrustedClock>,
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for OwnerAuthorizationIssuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OwnerAuthorizationIssuer")
@@ -737,6 +834,7 @@ impl std::fmt::Debug for OwnerAuthorizationIssuer {
     }
 }
 
+#[cfg(test)]
 #[allow(dead_code)]
 impl OwnerAuthorizationIssuer {
     pub fn new(authority_secret: impl Into<Vec<u8>>) -> Self {
@@ -952,14 +1050,18 @@ impl TokenValidatingOwnerVerifier {
     /// Constructs a verifier bound to current user's Windows Credential Manager
     /// target `runnermesh/owner-authority`. Fails closed if absent or unissued.
     pub fn from_credential_manager(scope: OwnerAuthorizationScope) -> Result<Self, ScmApiError> {
-        Self::from_credential_provider_and_clock_internal(
+        let secret = WindowsCredentialManagerAuthorityProvider
+            .read_authority_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET)?;
+        Ok(Self::with_clock_and_ledger(
+            &[],
             scope,
-            DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
-            &WindowsCredentialManagerAuthorityProvider,
+            Some(secret),
             Arc::new(SystemClock),
-        )
+            SharedAuthorizationLedger::global().clone(),
+        ))
     }
 
+    #[cfg(test)]
     pub(crate) fn from_credential_provider_and_clock_internal(
         scope: OwnerAuthorizationScope,
         target_name: &str,
@@ -1068,8 +1170,8 @@ impl TokenValidatingOwnerVerifier {
     }
 }
 
-#[doc(hidden)]
-pub mod test_support {
+#[cfg(test)]
+pub(crate) mod test_support {
     use super::*;
 
     pub use super::FakeCredentialManagerAuthorityProvider;
@@ -1089,6 +1191,7 @@ pub mod test_support {
         )
     }
 
+    #[allow(dead_code)]
     pub fn create_test_verifier_with_provider(
         scope: OwnerAuthorizationScope,
         target_name: &str,
@@ -3762,6 +3865,12 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
         self
     }
 
+    pub fn with_context(mut self, context: HostExecutionContext) -> Self {
+        self.target_host_token = context.target_host_token;
+        self.candidate_commit = context.candidate_commit;
+        self
+    }
+
     pub fn target_host_token(&self) -> &str {
         &self.target_host_token
     }
@@ -3827,8 +3936,27 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             PrivilegedScmAction::StopService => (false, true, false),
             PrivilegedScmAction::ChangeStartMode { .. } => (false, false, true),
         };
-        if !request.target_host_token.is_empty()
-            && request.target_host_token != self.target_host_token
+        if !self.target_host_token.is_empty() {
+            if request.target_host_token.trim().is_empty()
+                || request
+                    .target_host_token
+                    .eq_ignore_ascii_case("unspecified")
+                || request.target_host_token != self.target_host_token
+            {
+                return PrivilegedScmReport {
+                    service_name: request.service_name.clone(),
+                    transaction_id: request.transaction_id.clone(),
+                    applied: false,
+                    achieved_state: DiscoveredLifecycle::Unknown,
+                    achieved_start_mode: ServiceStartMode::Disabled,
+                    refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+                };
+            }
+        } else if !request.target_host_token.is_empty()
+            && (request
+                .target_host_token
+                .eq_ignore_ascii_case("unspecified")
+                || request.target_host_token != self.target_host_token)
         {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
@@ -3839,7 +3967,37 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                 refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
             };
         }
-        if !request.candidate_commit.is_empty() && request.candidate_commit != self.candidate_commit
+        if !self.candidate_commit.is_empty() {
+            if request.candidate_commit.trim().is_empty()
+                || request.candidate_commit.eq_ignore_ascii_case("unspecified")
+                || request.candidate_commit != self.candidate_commit
+            {
+                return PrivilegedScmReport {
+                    service_name: request.service_name.clone(),
+                    transaction_id: request.transaction_id.clone(),
+                    applied: false,
+                    achieved_state: DiscoveredLifecycle::Unknown,
+                    achieved_start_mode: ServiceStartMode::Disabled,
+                    refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+                };
+            }
+        } else if !request.candidate_commit.is_empty()
+            && (request.candidate_commit.eq_ignore_ascii_case("unspecified")
+                || request.candidate_commit != self.candidate_commit)
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+            };
+        }
+        if request
+            .target_host_token
+            .eq_ignore_ascii_case("unspecified")
+            || request.candidate_commit.eq_ignore_ascii_case("unspecified")
         {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),

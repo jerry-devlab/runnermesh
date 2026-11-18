@@ -246,14 +246,12 @@ pub use windows_runner_discovery::{
     service_image_path_token, ConfiguredSessionDiscoverySource, DiscoveredRunnerProcesses,
     PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
-#[doc(hidden)]
-pub use windows_scm_executor::test_support;
 pub use windows_scm_executor::{
     map_service_lifecycle_from_process_observation, opaque_image_token,
     reconcile_interrupted_scm_journal, runner_service_binary_path, runner_service_image_token,
     AdmissionSelectorObserver, DurableLedgerEntry, FakeGithubAdmissionBackend,
-    GatedWindowsScmBackend, LiveScmExecutionGate, MockClock, MockScmBackend, MockServiceRecord,
-    OwnerAuthoritySecretProvider, OwnerAuthorizationScope, PrivilegedScmAction,
+    GatedWindowsScmBackend, HostExecutionContext, LiveScmExecutionGate, MockClock, MockScmBackend,
+    MockServiceRecord, OwnerAuthoritySecretProvider, OwnerAuthorizationScope, PrivilegedScmAction,
     PrivilegedScmHelper, PrivilegedScmReport, PrivilegedScmRequest, ScmActionKind, ScmApiError,
     ScmControlBackend, ScmControlExecutor, ScmExactSnapshot, ScmMutationArm, ScmTransactionJournal,
     ScmTransactionReceipt, ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant,
@@ -268,3 +266,6 @@ pub use windows_supervisor::{
     PreparedWindowsSupervisorAction, UserSessionLaunch, WindowsSupervisorReadiness,
     WindowsUserSessionSupervisorAdapter,
 };
+
+#[cfg(test)]
+mod trusted_owner_auth_internal_tests;

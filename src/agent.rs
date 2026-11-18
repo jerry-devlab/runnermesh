@@ -369,6 +369,15 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
     fn candidate_commit(&self) -> Option<&str> {
         None
     }
+
+    /// Returns the host execution context bound to this backend, if known.
+    fn execution_context(&self) -> Option<crate::windows_scm_executor::HostExecutionContext> {
+        if let (Some(h), Some(c)) = (self.target_host_token(), self.candidate_commit()) {
+            crate::windows_scm_executor::HostExecutionContext::new(h, c).ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -635,6 +644,8 @@ pub struct LiveSessionExecutionGate {
     bound_transaction_id: Option<String>,
     expires_at_epoch_seconds: u64,
     is_open: Option<Arc<AtomicBool>>,
+    allow_start: bool,
+    allow_stop: bool,
 }
 
 impl Default for LiveSessionExecutionGate {
@@ -651,6 +662,8 @@ impl LiveSessionExecutionGate {
         bound_transaction_id: None,
         expires_at_epoch_seconds: 0,
         is_open: None,
+        allow_start: false,
+        allow_stop: false,
     };
 
     /// Opens a synthetic test gate. Never authorizes live process execution.
@@ -662,6 +675,8 @@ impl LiveSessionExecutionGate {
             bound_transaction_id: Some(grant.transaction_id.clone()),
             expires_at_epoch_seconds: grant.expires_at_epoch_seconds,
             is_open: Some(Arc::new(AtomicBool::new(true))),
+            allow_start: true,
+            allow_stop: true,
         }
     }
 
@@ -676,8 +691,7 @@ impl LiveSessionExecutionGate {
         if !scm_gate.is_trusted_live() || !scm_gate.allows_mutation() {
             return Err(crate::windows_scm_executor::ScmApiError::GateClosed);
         }
-        // Stop-only authorizations must not be escalated to session launch authority.
-        if !request.allow_start {
+        if !request.allow_start && !request.allow_stop {
             return Err(crate::windows_scm_executor::ScmApiError::GateClosed);
         }
         Ok(Self::mint_trusted_live(
@@ -685,6 +699,8 @@ impl LiveSessionExecutionGate {
             &request.execution_identity_token,
             &request.transaction_id,
             request.expires_at_epoch_seconds,
+            request.allow_start,
+            request.allow_stop,
         ))
     }
 
@@ -693,6 +709,8 @@ impl LiveSessionExecutionGate {
         execution_identity_token: &str,
         transaction_id: &str,
         expires_at_epoch_seconds: u64,
+        allow_start: bool,
+        allow_stop: bool,
     ) -> Self {
         Self {
             grant_kind: SessionGrantKind::TrustedLive,
@@ -701,11 +719,29 @@ impl LiveSessionExecutionGate {
             bound_transaction_id: Some(transaction_id.to_string()),
             expires_at_epoch_seconds,
             is_open: Some(Arc::new(AtomicBool::new(true))),
+            allow_start,
+            allow_stop,
         }
     }
 
     pub fn bound_transaction_id(&self) -> Option<&str> {
         self.bound_transaction_id.as_deref()
+    }
+
+    pub fn allow_start(&self) -> bool {
+        self.allow_start
+    }
+
+    pub fn allow_stop(&self) -> bool {
+        self.allow_stop
+    }
+
+    pub fn allows_start(&self) -> bool {
+        self.is_open() && self.allow_start
+    }
+
+    pub fn allows_stop(&self) -> bool {
+        self.is_open() && self.allow_stop
     }
 
     pub fn is_trusted_live(&self) -> bool {
@@ -746,6 +782,30 @@ impl LiveSessionExecutionGate {
         }
         if self.bound_transaction_id.is_none() || self.bound_transaction_id.as_deref() == Some("") {
             return Err("session.transaction-unbound");
+        }
+        Ok(())
+    }
+
+    pub fn authorizes_start(
+        &self,
+        record: &RunnerRecord,
+        now_epoch_seconds: u64,
+    ) -> Result<(), &'static str> {
+        self.authorizes_runner(record, now_epoch_seconds)?;
+        if !self.allow_start {
+            return Err("session.start-not-authorized");
+        }
+        Ok(())
+    }
+
+    pub fn authorizes_stop(
+        &self,
+        record: &RunnerRecord,
+        now_epoch_seconds: u64,
+    ) -> Result<(), &'static str> {
+        self.authorizes_runner(record, now_epoch_seconds)?;
+        if !self.allow_stop {
+            return Err("session.stop-not-authorized");
         }
         Ok(())
     }
@@ -812,7 +872,7 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let gate = self.current_gate();
-        gate.authorizes_runner(record, now)
+        gate.authorizes_start(record, now)
             .map_err(|e| format!("session.transport-refused: {e}"))?;
 
         if !gate.is_trusted_live() {
@@ -864,7 +924,7 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let gate = self.current_gate();
-        gate.authorizes_runner(record, now)
+        gate.authorizes_stop(record, now)
             .map_err(|e| format!("session.transport-refused: {e}"))?;
 
         if !gate.is_trusted_live() {
@@ -1788,9 +1848,11 @@ pub struct AgentCore<O, R, S> {
     last_runner_discovery: Option<DiscoveryReport>,
     multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     last_runner_reports: Vec<PrivilegedScmReport>,
+    #[cfg(test)]
     authority_provider: Option<Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>>,
+    #[cfg(test)]
     authority_clock: Option<Arc<dyn crate::windows_scm_executor::TrustedClock>>,
-    expected_target_host_token: Option<String>,
+    execution_context: Option<crate::windows_scm_executor::HostExecutionContext>,
 }
 
 impl<O, R, S> AgentCore<O, R, S>
@@ -1852,14 +1914,16 @@ where
             last_runner_discovery: None,
             multi_runner_backend: None,
             last_runner_reports: Vec::new(),
+            #[cfg(test)]
             authority_provider: None,
+            #[cfg(test)]
             authority_clock: None,
-            expected_target_host_token: None,
+            execution_context: None,
         })
     }
 
     /// Attaches an authority secret provider for owner authorization verification in tests.
-    #[doc(hidden)]
+    #[cfg(test)]
     pub fn with_authority_provider_for_test(
         mut self,
         provider: Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>,
@@ -1869,7 +1933,7 @@ where
     }
 
     /// Attaches an authority secret provider on an existing AgentCore for tests.
-    #[doc(hidden)]
+    #[cfg(test)]
     pub fn set_authority_provider_for_test(
         &mut self,
         provider: Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>,
@@ -1879,10 +1943,15 @@ where
         self.authority_clock = clock;
     }
 
-    /// Sets the expected target host token for test verification.
-    #[doc(hidden)]
-    pub fn set_expected_target_host_token_for_test(&mut self, token: impl Into<String>) {
-        self.expected_target_host_token = Some(token.into());
+    pub fn set_execution_context(
+        &mut self,
+        context: crate::windows_scm_executor::HostExecutionContext,
+    ) {
+        self.execution_context = Some(context);
+    }
+
+    pub fn execution_context(&self) -> Option<&crate::windows_scm_executor::HostExecutionContext> {
+        self.execution_context.as_ref()
     }
 
     pub fn build(&self) -> &BuildProvenance {
@@ -1894,6 +1963,11 @@ where
     pub fn set_multi_runner_backend(&mut self, backend: Arc<dyn MultiRunnerLifecycleBackend>) {
         for record in self.runner_registry.registry().records.iter() {
             backend.register_runner_record(record);
+        }
+        if self.execution_context.is_none() {
+            if let Some(ctx) = backend.execution_context() {
+                self.execution_context = Some(ctx);
+            }
         }
         self.multi_runner_backend = Some(backend);
     }
@@ -2372,18 +2446,28 @@ where
         &mut self,
         request: crate::windows_scm_executor::TrustedOwnerAuthorizationRequest,
     ) -> Result<AgentResponse, AgentCoreError> {
+        #[cfg(test)]
+        use crate::windows_scm_executor::DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET;
         use crate::windows_scm_executor::{
             OwnerAuthorizationScope, TokenValidatingOwnerVerifier,
-            TrustedOwnerAuthorizationVerifier, DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+            TrustedOwnerAuthorizationVerifier,
         };
 
-        // 1. Verify candidate commit matches running binary provenance
-        if !self.build.commit.is_empty()
-            && self.build.commit != "unspecified"
-            && !request
+        // 1. Candidate commit verification against the trusted execution context
+        let trusted_commit = self
+            .execution_context
+            .as_ref()
+            .map(|c| c.candidate_commit.as_str())
+            .unwrap_or(self.build.commit.as_str());
+
+        if trusted_commit.trim().is_empty()
+            || trusted_commit.eq_ignore_ascii_case("unspecified")
+            || request.candidate_commit.trim().is_empty()
+            || request.candidate_commit.eq_ignore_ascii_case("unspecified")
+            || !request
                 .candidate_commit
                 .trim()
-                .eq_ignore_ascii_case(self.build.commit.trim())
+                .eq_ignore_ascii_case(trusted_commit.trim())
         {
             return Ok(AgentResponse::OwnerAuthorization(
                 crate::OwnerAuthorizationReport {
@@ -2398,31 +2482,42 @@ where
             ));
         }
 
-        // 2. Verify target host token matches current environment
-        let expected_host = self.expected_target_host_token.as_deref().or_else(|| {
-            self.multi_runner_backend
-                .as_ref()
-                .and_then(|b| b.target_host_token())
-        });
-        if let Some(expected) = expected_host {
-            if !expected.is_empty()
+        // 2. Target host token verification against the trusted execution context
+        let trusted_host = self
+            .execution_context
+            .as_ref()
+            .map(|c| c.target_host_token.as_str())
+            .or_else(|| {
+                self.multi_runner_backend
+                    .as_ref()
+                    .and_then(|b| b.target_host_token())
+            });
+
+        let host_token_valid = if let Some(expected) = trusted_host {
+            !expected.trim().is_empty()
+                && !expected.eq_ignore_ascii_case("unspecified")
+                && !request.target_host_token.trim().is_empty()
                 && !request
+                    .target_host_token
+                    .eq_ignore_ascii_case("unspecified")
+                && request
                     .target_host_token
                     .trim()
                     .eq_ignore_ascii_case(expected.trim())
-            {
-                return Ok(AgentResponse::OwnerAuthorization(
-                    crate::OwnerAuthorizationReport {
-                        authorized: false,
-                        transaction_id: request.transaction_id,
-                        service_name: request.service_name,
-                        expires_at_epoch_seconds: 0,
-                        reason_code: Some(
-                            ReasonCode::new("owner-auth-target-host-mismatch").unwrap(),
-                        ),
-                    },
-                ));
-            }
+        } else {
+            false
+        };
+
+        if !host_token_valid {
+            return Ok(AgentResponse::OwnerAuthorization(
+                crate::OwnerAuthorizationReport {
+                    authorized: false,
+                    transaction_id: request.transaction_id,
+                    service_name: request.service_name,
+                    expires_at_epoch_seconds: 0,
+                    reason_code: Some(ReasonCode::new("owner-auth-target-host-mismatch").unwrap()),
+                },
+            ));
         }
 
         let scope = OwnerAuthorizationScope {
@@ -2437,44 +2532,37 @@ where
             allow_change_config: request.allow_change_config,
         };
 
-        let verifier = if let Some(ref provider) = self.authority_provider {
+        #[cfg(test)]
+        let verifier_result = if let Some(ref provider) = self.authority_provider {
             let clock = self
                 .authority_clock
                 .clone()
                 .unwrap_or_else(|| Arc::new(crate::windows_scm_executor::SystemClock));
-            match crate::windows_scm_executor::test_support::create_test_verifier_with_provider_and_clock(
+            crate::windows_scm_executor::test_support::create_test_verifier_with_provider_and_clock(
                 scope,
                 DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
                 provider.as_ref(),
                 clock,
-            ) {
-                Ok(v) => v,
-                Err(_) => {
-                    return Ok(AgentResponse::OwnerAuthorization(
-                        crate::OwnerAuthorizationReport {
-                            authorized: false,
-                            transaction_id: request.transaction_id,
-                            service_name: request.service_name,
-                            expires_at_epoch_seconds: 0,
-                            reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
-                        },
-                    ));
-                }
-            }
+            )
         } else {
-            match TokenValidatingOwnerVerifier::from_credential_manager(scope) {
-                Ok(v) => v,
-                Err(_) => {
-                    return Ok(AgentResponse::OwnerAuthorization(
-                        crate::OwnerAuthorizationReport {
-                            authorized: false,
-                            transaction_id: request.transaction_id,
-                            service_name: request.service_name,
-                            expires_at_epoch_seconds: 0,
-                            reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
-                        },
-                    ));
-                }
+            TokenValidatingOwnerVerifier::from_credential_manager(scope)
+        };
+
+        #[cfg(not(test))]
+        let verifier_result = TokenValidatingOwnerVerifier::from_credential_manager(scope);
+
+        let verifier = match verifier_result {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(AgentResponse::OwnerAuthorization(
+                    crate::OwnerAuthorizationReport {
+                        authorized: false,
+                        transaction_id: request.transaction_id,
+                        service_name: request.service_name,
+                        expires_at_epoch_seconds: 0,
+                        reason_code: Some(ReasonCode::new("owner-auth-not-issued").unwrap()),
+                    },
+                ));
             }
         };
 
@@ -2482,15 +2570,15 @@ where
             Ok(gate) => {
                 if let Some(backend) = &self.multi_runner_backend {
                     backend.arm_scm_gate(gate.clone());
-                    if request.allow_start || request.allow_stop {
-                        let session_gate = LiveSessionExecutionGate::mint_trusted_live(
-                            &request.service_name,
-                            &request.execution_identity_token,
-                            &request.transaction_id,
-                            request.expires_at_epoch_seconds,
-                        );
-                        backend.arm_session_gate(session_gate);
-                    }
+                    let session_gate = LiveSessionExecutionGate::mint_trusted_live(
+                        &request.service_name,
+                        &request.execution_identity_token,
+                        &request.transaction_id,
+                        request.expires_at_epoch_seconds,
+                        request.allow_start,
+                        request.allow_stop,
+                    );
+                    backend.arm_session_gate(session_gate);
                 }
                 Ok(AgentResponse::OwnerAuthorization(
                     crate::OwnerAuthorizationReport {
@@ -5150,7 +5238,13 @@ mod tests {
         let secret = b"offline-owner-qualification-key-32b-secret";
         fake_provider.set_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET, secret);
         core.set_authority_provider_for_test(fake_provider, None);
-        core.set_expected_target_host_token_for_test("host-token-abcde");
+        core.set_execution_context(
+            crate::windows_scm_executor::HostExecutionContext::new(
+                "host-token-abcde",
+                &core.build().commit,
+            )
+            .unwrap(),
+        );
 
         let scope = OwnerAuthorizationScope::new(
             "actions.runner.auth-target",

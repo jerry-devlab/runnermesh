@@ -198,11 +198,20 @@ pub fn run_installed_agent(install_root: PathBuf) -> Result<(), AgentRunError> {
             "installed Agent state root is a reparse point".to_owned(),
         ));
     }
+    let build = build_provenance();
+    let context =
+        crate::windows_scm_executor::HostExecutionContext::resolve_for_installed_runtime(&build)
+            .map_err(|error| {
+                AgentRunError::Startup(format!("failed to resolve execution context: {error}"))
+            })?;
     let authoritative_backend = Arc::new(
-        AuthoritativeMultiRunnerLifecycleBackend::new(PrivilegedScmHelper::new(
-            WindowsScmBackend::mutation_inert(),
-            LiveScmExecutionGate::CLOSED,
-        ))
+        AuthoritativeMultiRunnerLifecycleBackend::new(
+            PrivilegedScmHelper::new(
+                WindowsScmBackend::mutation_inert(),
+                LiveScmExecutionGate::CLOSED,
+            )
+            .with_context(context),
+        )
         .with_session_coordinator(Arc::new(crate::StandardSessionCoordinator::new(
             Arc::new(crate::GatedUserSessionProcessTransport::closed()),
         ))),
@@ -234,14 +243,30 @@ pub fn assemble_installed_core(
         .parent()
         .map(|parent| parent.join("runners-registry.json"))
         .unwrap_or_else(|| PathBuf::from("runners-registry.json"));
+    let build = build_provenance();
     let mut core = AgentCore::with_registry_store(
         observer,
         reconciler,
         store,
-        build_provenance(),
+        build.clone(),
         Box::new(crate::FileRegistryStore::new(registry_path)),
     )
     .map_err(|error| error.to_string())?;
+
+    // In real installation assembly, obtain and pass the trusted execution context.
+    let context = if let Some(ref backend) = multi_runner_backend {
+        backend.execution_context().or_else(|| {
+            crate::windows_scm_executor::HostExecutionContext::resolve_for_installed_runtime(&build)
+                .ok()
+        })
+    } else {
+        crate::windows_scm_executor::HostExecutionContext::resolve_for_installed_runtime(&build)
+            .ok()
+    };
+    if let Some(ctx) = context {
+        core.set_execution_context(ctx);
+    }
+
     // Best-effort read-only host discovery at startup (never mutates Services).
     core.set_runner_discovery(crate::discover_local_runners_read_only(Vec::new()));
     if let Some(backend) = multi_runner_backend {
