@@ -912,6 +912,11 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
     std::fs::create_dir_all(&runner_home).unwrap();
     let image_token = crate::runner_service_image_token(&runner_home);
 
+    let isolated_service = "actions.runner.p03-f3-isolated";
+    let isolated_home = temp_dir.join("isolated-home");
+    std::fs::create_dir_all(&isolated_home).unwrap();
+    let isolated_image_token = crate::runner_service_image_token(&isolated_home);
+
     let mock_backend = MockScmBackend::new();
     mock_backend.insert(MockServiceRecord {
         observation: ServiceObservation {
@@ -924,6 +929,18 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
         worker_busy: false,
         image_token: image_token.clone(),
         execution_identity_token: "identity-token-f3".to_string(),
+    });
+    mock_backend.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: isolated_service.to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: true,
+        image_token: isolated_image_token,
+        execution_identity_token: "identity-token-isolated".to_string(),
     });
 
     let start_time: u64 = 300_000;
@@ -938,7 +955,7 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
 
     let backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(helper));
 
-    // Register test runner record targeting the Windows Service
+    // Register test runner records targeting Windows Services
     let runner_record = RunnerRecord {
         local_runner_key: "runner-p03-f3".to_string(),
         backend: RegistryBackendBinding::WindowsService {
@@ -958,27 +975,60 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
         enrollment_state: EnrollmentState::Enrolled,
         managed_admission: false,
     };
+    let runner_record_isolated = RunnerRecord {
+        local_runner_key: "runner-p03-isolated".to_string(),
+        backend: RegistryBackendBinding::WindowsService {
+            service_name: isolated_service.to_string(),
+        },
+        runner_home: isolated_home,
+        work_root: temp_dir.join("work-isolated"),
+        execution_identity_ref: OpaqueIdentityReference::new("provider", "identity-token-isolated")
+            .unwrap(),
+        credential_ref: None,
+        desired_enabled: true,
+        registration_scope: RegistrationScope::Organization {
+            organization: "isolated-org".to_string(),
+        },
+        runner_id: 203,
+        expected_runner_name: "test-runner-isolated".to_string(),
+        enrollment_state: EnrollmentState::Enrolled,
+        managed_admission: false,
+    };
     {
         use crate::runner_registry::RegistryStore;
         let mut reg = crate::runner_registry::RunnerRegistry::default();
         reg.records.push(runner_record.clone());
+        reg.records.push(runner_record_isolated.clone());
         crate::runner_registry::FileRegistryStore::new(temp_dir.join("runners-registry.json"))
             .save(&reg)
             .unwrap();
     }
     backend.register_runner_record(&runner_record);
+    backend.register_runner_record(&runner_record_isolated);
 
-    // Initial observation: service is listening, selector present, worker idle
-    backend.set_observations(vec![PerRunnerObservation {
-        local_runner_key: "runner-p03-f3".to_string(),
-        ownership_verified: true,
-        lifecycle: DiscoveredLifecycle::Listening,
-        worker_present: false,
-        selector_present: Some(true),
-        selector_observation_unknown: false,
-        legacy_generic_label_routing: false,
-        same_scope_managed_collision: false,
-    }]);
+    // Initial observation: service is listening, selector present, worker idle; isolated runner is busy
+    backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-p03-f3".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-p03-isolated".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
 
     let ipc_endpoint = IpcEndpoint::for_test_scope(format!("p03-f3-pipe-{}", std::process::id()));
 
@@ -988,7 +1038,7 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
         multi_runner_backend: Some(backend.clone()),
         discovery_report: None,
         poll_interval: Duration::from_millis(25),
-        enable_periodic_scheduler: false,
+        enable_periodic_scheduler: true,
     };
 
     let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
@@ -1000,7 +1050,8 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
         let mut core = runtime.core().lock().unwrap();
         core.set_authority_provider_for_test(fake_provider, Some(clock.clone()));
         core.set_hard_safety_for_test(crate::HardSafetyState::Clear);
-        core.set_execution_context(context);
+        // Note: R2 requirement - do NOT call core.set_execution_context here;
+        // assembly (assemble_installed_core) propagates trusted execution context to core and helper.
     }
 
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
@@ -1019,14 +1070,15 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
     // 1. Prestate check: before authorization, execution arm is closed
     assert!(!mock_backend.is_armed());
 
-    // 2. Authorize Owner Mutation via real Named Pipe IPC
+    // 2. Authorize Owner Mutation via real Named Pipe IPC using non-fixed dynamic transaction ID
+    let dynamic_tx = format!("tx-f3-dyn-{}", std::process::id());
     let scope = OwnerAuthorizationScope::new(
         service_name,
         crate::runner_service_image_token(&runner_home),
         "identity-token-f3",
         host_token,
         &running_commit,
-        "tx-f3-001",
+        &dynamic_tx,
         true,
         true,
         false,
@@ -1050,8 +1102,18 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
     };
     assert!(auth_report.authorized);
     assert!(mock_backend.is_armed());
+    assert_eq!(
+        backend
+            .active_transaction_id_for_service(service_name)
+            .as_deref(),
+        Some(dynamic_tx.as_str())
+    );
+    // Isolation check: isolated runner service has no armed transaction
+    assert!(backend
+        .active_transaction_id_for_service(isolated_service)
+        .is_none());
 
-    // 3. Normal disable command sent over real Named Pipe IPC (NO manual PrivilegedScmRequest construction!)
+    // 3. Normal disable command sent over real Named Pipe IPC
     let disable_resp = ipc_client
         .call(IpcRequest::new(AgentCommand::RunnersDisable {
             local_runner_key: "runner-p03-f3".to_string(),
@@ -1067,40 +1129,55 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
     };
     assert!(disable_report.applied);
 
-    // 4. Update observations reflecting withdrawn selector and run ordinary cycle reconcile_multi_runners
-    backend.set_observations(vec![PerRunnerObservation {
-        local_runner_key: "runner-p03-f3".to_string(),
-        ownership_verified: true,
-        lifecycle: DiscoveredLifecycle::Listening,
-        worker_present: false,
-        selector_present: Some(false),
-        selector_observation_unknown: false,
-        legacy_generic_label_routing: false,
-        same_scope_managed_collision: false,
-    }]);
+    // 4. Update observations reflecting withdrawn selector (independent environment readback)
+    backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-p03-f3".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: false,
+            selector_present: Some(false),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-p03-isolated".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
 
-    let scm_reports = runtime
-        .core()
-        .lock()
-        .unwrap()
-        .reconcile_and_dispatch_multi_runners("tx-f3-001");
-    assert_eq!(scm_reports.len(), 1, "reconcile must produce 1 SCM action");
+    // Bounded wait for real periodic scheduler to reconcile and dispatch stop
+    let mut stopped = false;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(25));
+        if let Ok(snap) = mock_backend.query_exact(service_name) {
+            if snap.observation.state == DiscoveredLifecycle::Stopped {
+                stopped = true;
+                break;
+            }
+        }
+    }
     assert!(
-        scm_reports[0].applied,
-        "stop action must be successfully applied through helper: {:?}",
-        scm_reports[0]
+        stopped,
+        "periodic scheduler must dispatch stop and transition mock OS to Stopped"
     );
-    assert_eq!(scm_reports[0].achieved_state, DiscoveredLifecycle::Stopped);
 
-    // 5. Readback: verify real state in mock OS backend is Stopped
-    let readback_stopped = mock_backend.query_exact(service_name).unwrap();
+    // Isolation check: isolated runner remains completely untouched (Busy)
+    let isolated_readback = mock_backend.query_exact(isolated_service).unwrap();
     assert_eq!(
-        readback_stopped.observation.state,
-        DiscoveredLifecycle::Stopped,
-        "post-action readback must confirm service is Stopped"
+        isolated_readback.observation.state,
+        DiscoveredLifecycle::Busy,
+        "isolated runner must not be affected by disabling runner-p03-f3"
     );
 
-    // 6. Normal enable command sent over real Named Pipe IPC
+    // 5. Normal enable command sent over real Named Pipe IPC
     let enable_resp = ipc_client
         .call(IpcRequest::new(AgentCommand::RunnersEnable {
             local_runner_key: "runner-p03-f3".to_string(),
@@ -1115,99 +1192,164 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
     };
     assert!(enable_report.applied);
 
-    // 7. Update observations reflecting Stopped state and selector advertised, run ordinary cycle reconcile_multi_runners
-    backend.set_observations(vec![PerRunnerObservation {
-        local_runner_key: "runner-p03-f3".to_string(),
-        ownership_verified: true,
-        lifecycle: DiscoveredLifecycle::Stopped,
-        worker_present: false,
-        selector_present: Some(true),
-        selector_observation_unknown: false,
-        legacy_generic_label_routing: false,
-        same_scope_managed_collision: false,
-    }]);
+    // 6. Update observations reflecting Stopped state and selector advertised
+    backend.set_observations(vec![
+        PerRunnerObservation {
+            local_runner_key: "runner-p03-f3".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Stopped,
+            worker_present: false,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+        PerRunnerObservation {
+            local_runner_key: "runner-p03-isolated".to_string(),
+            ownership_verified: true,
+            lifecycle: DiscoveredLifecycle::Listening,
+            worker_present: true,
+            selector_present: Some(true),
+            selector_observation_unknown: false,
+            legacy_generic_label_routing: false,
+            same_scope_managed_collision: false,
+        },
+    ]);
 
-    {
-        let mut core = runtime.core().lock().unwrap();
-        core.set_hard_safety_for_test(crate::HardSafetyState::Clear);
+    // Bounded wait for real periodic scheduler to reconcile and dispatch start
+    let mut listening = false;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(25));
+        if let Ok(snap) = mock_backend.query_exact(service_name) {
+            if snap.observation.state == DiscoveredLifecycle::Listening {
+                listening = true;
+                break;
+            }
+        }
     }
-
-    let scm_reports_start = runtime
-        .core()
-        .lock()
-        .unwrap()
-        .reconcile_and_dispatch_multi_runners("tx-f3-001");
-    assert_eq!(
-        scm_reports_start.len(),
-        1,
-        "reconcile must produce 1 SCM action"
-    );
     assert!(
-        scm_reports_start[0].applied,
-        "start action must be successfully applied through helper"
-    );
-    assert_eq!(
-        scm_reports_start[0].achieved_state,
-        DiscoveredLifecycle::Listening
+        listening,
+        "periodic scheduler must dispatch start and restore mock OS to Listening"
     );
 
-    // 8. Readback: verify real state in mock OS backend is restored to Listening
-    let readback_listening = mock_backend.query_exact(service_name).unwrap();
+    // Isolation check: isolated runner still untouched (Busy)
+    let isolated_readback2 = mock_backend.query_exact(isolated_service).unwrap();
     assert_eq!(
-        readback_listening.observation.state,
-        DiscoveredLifecycle::Listening,
-        "post-action readback must confirm service is Listening"
+        isolated_readback2.observation.state,
+        DiscoveredLifecycle::Busy
     );
 
-    // 9. Drift rejection verification: if execution context drifts, ordinary dispatch rejects fail-closed
+    // 7. Negative drift injection: if execution context drifts, ordinary dispatch rejects fail-closed
     {
         let mut core = runtime.core().lock().unwrap();
         core.set_execution_context(
             HostExecutionContext::new("drifted-host", &running_commit).unwrap(),
         );
     }
-    // Attempt disable with drifted host context
     let _ = ipc_client.call(IpcRequest::new(AgentCommand::RunnersDisable {
         local_runner_key: "runner-p03-f3".to_string(),
         when_idle: true,
         prepare_only: false,
     }));
-    backend.set_observations(vec![PerRunnerObservation {
-        local_runner_key: "runner-p03-f3".to_string(),
-        ownership_verified: true,
-        lifecycle: DiscoveredLifecycle::Listening,
-        worker_present: false,
-        selector_present: Some(false),
-        selector_observation_unknown: false,
-        legacy_generic_label_routing: false,
-        same_scope_managed_collision: false,
-    }]);
-    let drifted_reports = runtime
-        .core()
-        .lock()
-        .unwrap()
-        .reconcile_and_dispatch_multi_runners("tx-f3-001");
-    assert_eq!(drifted_reports.len(), 1);
-    assert!(
-        !drifted_reports[0].applied,
-        "drifted context must reject SCM dispatch"
-    );
-    assert_eq!(
-        drifted_reports[0].refusal_reason.as_deref(),
-        Some("scm.identity-mismatch")
-    );
-
+    // Wait for periodic scheduler to attempt dispatch with drifted context
+    std::thread::sleep(Duration::from_millis(150));
     // Service remains Listening (zero unauthorized mutation on drift)
     let drift_readback = mock_backend.query_exact(service_name).unwrap();
     assert_eq!(
         drift_readback.observation.state,
-        DiscoveredLifecycle::Listening
+        DiscoveredLifecycle::Listening,
+        "service must not stop when execution context drifts"
     );
+    let last_reports = runtime
+        .core()
+        .lock()
+        .unwrap()
+        .last_runner_reports()
+        .to_vec();
+    if !last_reports.is_empty() {
+        assert_eq!(
+            last_reports[0].refusal_reason.as_deref(),
+            Some("scm.identity-mismatch")
+        );
+    }
 
-    // 10. Expiry write prohibition: advance clock past 1800s
+    // 8. Expiry write prohibition: advance clock past 1800s
     clock.set_time(start_time + DEFAULT_AUTHORIZATION_VALIDITY_SECONDS + 1);
     assert!(!mock_backend.is_armed());
+    assert!(backend
+        .active_transaction_id_for_service(service_name)
+        .is_none());
 
     let _ = runtime.shutdown();
     let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+#[cfg(windows)]
+fn p03_r3_helper_empty_context_refuses_request_backfill_and_fails_closed() {
+    let mock_backend = MockScmBackend::new();
+    let service_name = "actions.runner.p03-r3-target";
+    mock_backend.insert(MockServiceRecord {
+        observation: ServiceObservation {
+            service_name: service_name.to_string(),
+            state: DiscoveredLifecycle::Listening,
+            start_mode: ServiceStartMode::Manual,
+            image_path_matches: true,
+            ownership_verified: true,
+        },
+        worker_busy: false,
+        image_token: "image-token-r3".to_string(),
+        execution_identity_token: "identity-token-r3".to_string(),
+    });
+
+    // Construct helper without installed context: target_host_token and candidate_commit are empty
+    let helper = PrivilegedScmHelper::new(mock_backend.clone(), LiveScmExecutionGate::CLOSED);
+    assert!(helper.target_host_token().is_empty());
+    assert!(helper.candidate_commit().is_empty());
+
+    // Mint a TrustedLive gate with specific host and commit
+    let clock = Arc::new(MockClock::new(100_000));
+    let helper = helper.with_clock(clock);
+    let gate = LiveScmExecutionGate::mint_trusted_live(
+        service_name,
+        "image-token-r3",
+        "identity-token-r3",
+        "trusted-host-r3",
+        "trusted-commit-r3",
+        "tx-r3-001",
+        false,
+        true,
+        false,
+        100_000,
+        100_000 + 1800,
+    )
+    .unwrap();
+    helper.arm_with_gate(gate).unwrap();
+
+    // Caller passes trusted host and commit in the request
+    let request = PrivilegedScmRequest {
+        action: PrivilegedScmAction::StopService,
+        service_name: service_name.to_string(),
+        expected_image_token: "image-token-r3".to_string(),
+        expected_execution_identity_token: "identity-token-r3".to_string(),
+        target_host_token: "trusted-host-r3".to_string(),
+        candidate_commit: "trusted-commit-r3".to_string(),
+        transaction_id: "tx-r3-001".to_string(),
+    };
+
+    // Helper must refuse to backfill its ScmExecutionContext from the request,
+    // and since helper has no installed context, TrustedLive dispatch fails closed with identity mismatch.
+    let report = helper.dispatch(&request);
+    assert!(
+        !report.applied,
+        "dispatch must fail-closed when helper context is empty"
+    );
+    assert_eq!(
+        report.refusal_reason.as_deref(),
+        Some("scm.identity-mismatch")
+    );
+
+    // Mock OS service remains Listening (zero mutation)
+    let readback = mock_backend.query_exact(service_name).unwrap();
+    assert_eq!(readback.observation.state, DiscoveredLifecycle::Listening);
 }

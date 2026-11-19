@@ -378,6 +378,16 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
             None
         }
     }
+
+    /// Returns the active authorized transaction ID bound to the specified service, if any.
+    fn active_transaction_id_for_service(&self, _service_name: &str) -> Option<String> {
+        None
+    }
+
+    /// Returns the active authorized transaction ID bound to the specified user session runner, if any.
+    fn active_transaction_id_for_session(&self, _runner_key: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Thread-safe sandbox multi-runner lifecycle backend for tests and simulated qualification.
@@ -517,6 +527,24 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
 
     fn candidate_commit(&self) -> Option<&str> {
         Some(self.helper.candidate_commit())
+    }
+
+    fn active_transaction_id_for_service(&self, service_name: &str) -> Option<String> {
+        self.helper.active_transaction_id_for_service(service_name)
+    }
+
+    fn active_transaction_id_for_session(&self, runner_key: &str) -> Option<String> {
+        let guard = self
+            .armed_session_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let gate = guard.as_ref()?;
+        if let Some(ref bound_key) = gate.bound_runner_key {
+            if !bound_key.eq_ignore_ascii_case(runner_key) {
+                return None;
+            }
+        }
+        gate.bound_transaction_id.clone()
     }
 }
 
@@ -1831,6 +1859,14 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
     fn candidate_commit(&self) -> Option<&str> {
         Some(self.helper.candidate_commit())
     }
+
+    fn active_transaction_id_for_service(&self, service_name: &str) -> Option<String> {
+        self.helper.active_transaction_id_for_service(service_name)
+    }
+
+    fn active_transaction_id_for_session(&self, _runner_key: &str) -> Option<String> {
+        None
+    }
 }
 
 /// In-process single authority for `Observe -> Decide -> Reconcile`.
@@ -2114,6 +2150,15 @@ where
                             })
                             .unwrap_or_default();
 
+                        let effective_tx =
+                            if transaction_id == "agent-cycle-tx" || transaction_id.is_empty() {
+                                backend
+                                    .active_transaction_id_for_service(service_name)
+                                    .unwrap_or_else(|| transaction_id.to_string())
+                            } else {
+                                transaction_id.to_string()
+                            };
+
                         let request = PrivilegedScmRequest {
                             action,
                             service_name: service_name.clone(),
@@ -2121,7 +2166,7 @@ where
                             expected_execution_identity_token,
                             target_host_token,
                             candidate_commit,
-                            transaction_id: transaction_id.to_string(),
+                            transaction_id: effective_tx,
                         };
                         reports.push(backend.dispatch_scm(&request));
                     }
@@ -2146,11 +2191,19 @@ where
                     };
 
                     if let Some(action) = session_action {
+                        let effective_tx =
+                            if transaction_id == "agent-cycle-tx" || transaction_id.is_empty() {
+                                backend
+                                    .active_transaction_id_for_session(&record.local_runner_key)
+                                    .unwrap_or_else(|| transaction_id.to_string())
+                            } else {
+                                transaction_id.to_string()
+                            };
                         let res = backend.dispatch_session(record, action.clone());
                         let rep = match res {
                             Ok(applied) => PrivilegedScmReport {
                                 service_name: format!("session:{}", record.local_runner_key),
-                                transaction_id: transaction_id.to_string(),
+                                transaction_id: effective_tx,
                                 applied,
                                 achieved_state: if applied {
                                     backend
@@ -2281,6 +2334,15 @@ where
                     .map(|ctx| (ctx.target_host_token.clone(), ctx.candidate_commit.clone()))
                     .unwrap_or_default();
 
+                let effective_tx =
+                    if transaction_id == "agent-cycle-tx" || transaction_id.is_empty() {
+                        helper
+                            .active_transaction_id_for_service(&service_name)
+                            .unwrap_or_else(|| transaction_id.to_string())
+                    } else {
+                        transaction_id.to_string()
+                    };
+
                 let request = PrivilegedScmRequest {
                     action,
                     service_name,
@@ -2288,7 +2350,7 @@ where
                     expected_execution_identity_token,
                     target_host_token,
                     candidate_commit,
-                    transaction_id: transaction_id.to_string(),
+                    transaction_id: effective_tx,
                 };
                 reports.push(helper.dispatch(&request));
             }

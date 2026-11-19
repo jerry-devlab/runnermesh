@@ -3890,6 +3890,26 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             .unwrap_or_else(|| self.gate.clone())
     }
 
+    pub fn active_transaction_id_for_service(&self, service_name: &str) -> Option<String> {
+        let guard = self.active_gate.lock().unwrap_or_else(|p| p.into_inner());
+        let gate = guard.as_ref()?;
+        let now = self.clock.now_epoch_seconds();
+        if now < gate.not_before_epoch_seconds()
+            || (gate.expires_at_epoch_seconds() != 0 && now >= gate.expires_at_epoch_seconds())
+        {
+            return None;
+        }
+        if !gate.bound_service_name().is_empty()
+            && !gate.bound_service_name().eq_ignore_ascii_case(service_name)
+        {
+            return None;
+        }
+        if gate.bound_transaction_id().trim().is_empty() {
+            return None;
+        }
+        Some(gate.bound_transaction_id().to_string())
+    }
+
     pub fn dispatch(&self, request: &PrivilegedScmRequest) -> PrivilegedScmReport {
         let name = request.service_name.trim();
         if name.is_empty()
@@ -3924,25 +3944,16 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
             PrivilegedScmAction::StopService => (false, true, false),
             PrivilegedScmAction::ChangeStartMode { .. } => (false, false, true),
         };
-        if !self.target_host_token.is_empty() {
-            if request.target_host_token.trim().is_empty()
-                || request
-                    .target_host_token
-                    .eq_ignore_ascii_case("unspecified")
-                || request.target_host_token != self.target_host_token
-            {
-                return PrivilegedScmReport {
-                    service_name: request.service_name.clone(),
-                    transaction_id: request.transaction_id.clone(),
-                    applied: false,
-                    achieved_state: DiscoveredLifecycle::Unknown,
-                    achieved_start_mode: ServiceStartMode::Disabled,
-                    refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
-                };
-            }
-        } else if request
-            .target_host_token
-            .eq_ignore_ascii_case("unspecified")
+        let effective_gate = self.current_gate();
+
+        // R3: Helper installed execution context is an independent boundary.
+        // If helper host/commit is empty, execution requiring TrustedLive MUST be rejected fail-closed,
+        // without backfilling from the request.
+        if matches!(effective_gate.grant_kind, ScmGrantKind::TrustedLive)
+            && (self.target_host_token.trim().is_empty()
+                || self.target_host_token.eq_ignore_ascii_case("unspecified")
+                || self.candidate_commit.trim().is_empty()
+                || self.candidate_commit.eq_ignore_ascii_case("unspecified"))
         {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
@@ -3953,21 +3964,14 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                 refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
             };
         }
-        if !self.candidate_commit.is_empty() {
-            if request.candidate_commit.trim().is_empty()
-                || request.candidate_commit.eq_ignore_ascii_case("unspecified")
-                || request.candidate_commit != self.candidate_commit
-            {
-                return PrivilegedScmReport {
-                    service_name: request.service_name.clone(),
-                    transaction_id: request.transaction_id.clone(),
-                    applied: false,
-                    achieved_state: DiscoveredLifecycle::Unknown,
-                    achieved_start_mode: ServiceStartMode::Disabled,
-                    refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
-                };
-            }
-        } else if request.candidate_commit.eq_ignore_ascii_case("unspecified") {
+
+        if !self.target_host_token.is_empty()
+            && (request.target_host_token.trim().is_empty()
+                || request
+                    .target_host_token
+                    .eq_ignore_ascii_case("unspecified")
+                || request.target_host_token != self.target_host_token)
+        {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
                 transaction_id: request.transaction_id.clone(),
@@ -3977,6 +3981,22 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                 refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
             };
         }
+
+        if !self.candidate_commit.is_empty()
+            && (request.candidate_commit.trim().is_empty()
+                || request.candidate_commit.eq_ignore_ascii_case("unspecified")
+                || request.candidate_commit != self.candidate_commit)
+        {
+            return PrivilegedScmReport {
+                service_name: request.service_name.clone(),
+                transaction_id: request.transaction_id.clone(),
+                applied: false,
+                achieved_state: DiscoveredLifecycle::Unknown,
+                achieved_start_mode: ServiceStartMode::Disabled,
+                refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
+            };
+        }
+
         if request
             .target_host_token
             .eq_ignore_ascii_case("unspecified")
@@ -3991,28 +4011,17 @@ impl<B: ScmControlBackend> PrivilegedScmHelper<B> {
                 refusal_reason: Some(ScmApiError::IdentityMismatch.as_str().to_owned()),
             };
         }
-        let host_for_context = if !self.target_host_token.is_empty() {
-            &self.target_host_token
-        } else {
-            &request.target_host_token
-        };
-        let commit_for_context = if !self.candidate_commit.is_empty() {
-            &self.candidate_commit
-        } else {
-            &request.candidate_commit
-        };
         let context = ScmExecutionContext {
             service_name: name,
             image_token: &request.expected_image_token,
             execution_identity_token: &request.expected_execution_identity_token,
-            target_host_token: host_for_context,
-            candidate_commit: commit_for_context,
+            target_host_token: &self.target_host_token,
+            candidate_commit: &self.candidate_commit,
             transaction_id: &request.transaction_id,
             need_start,
             need_stop,
             need_config,
         };
-        let effective_gate = self.current_gate();
         if let Err(err) = effective_gate.authorizes_context(&context, self.clock.as_ref()) {
             return PrivilegedScmReport {
                 service_name: request.service_name.clone(),
