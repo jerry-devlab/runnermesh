@@ -154,7 +154,8 @@ impl OwnerAuthoritySecretProvider for FakeCredentialManagerAuthorityProvider {
 /// 5. `candidate_commit`: exact 40-character git commit SHA of candidate under review
 /// 6. `transaction_id`: unique bounded transaction identifier
 /// 7. `allow_start` / `allow_stop` / `allow_change_config`: rights bitset
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OwnerAuthorizationScope {
     pub service_name: String,
     pub image_token: String,
@@ -191,6 +192,89 @@ impl OwnerAuthorizationScope {
             allow_stop,
             allow_change_config,
         }
+    }
+
+    /// Issues a 30-minute, start/stop-only voucher using an Owner-held key, offline.
+    /// This does not provision trust or arm any local backend.
+    pub fn issue_scm_voucher(
+        &self,
+        authority_key: &[u8; 32],
+        nonce: String,
+    ) -> Result<TrustedOwnerAuthorizationRequest, ScmApiError> {
+        let exact_token = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value == value.trim()
+                && !value.chars().any(char::is_control)
+                && !value.eq_ignore_ascii_case("unspecified")
+        };
+        if !self.service_name.starts_with("actions.runner.")
+            || self.service_name.len() == "actions.runner.".len()
+            || !self
+                .service_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+            || ![
+                self.service_name.as_str(),
+                &self.image_token,
+                &self.execution_identity_token,
+                &self.target_host_token,
+                &self.transaction_id,
+                &nonce,
+            ]
+            .into_iter()
+            .all(exact_token)
+            || self.candidate_commit.len() != 40
+            || !self
+                .candidate_commit
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || self.allow_change_config
+            || !(self.allow_start || self.allow_stop)
+            || authority_key.iter().all(|byte| *byte == 0)
+        {
+            return Err(ScmApiError::AccessDenied);
+        }
+        let now = SystemClock.now_epoch_seconds();
+        if now == 0 {
+            return Err(ScmApiError::AccessDenied);
+        }
+        Ok(self.signed_request(
+            authority_key,
+            nonce,
+            now,
+            now + DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+        ))
+    }
+
+    fn signed_request(
+        &self,
+        authority_secret: &[u8],
+        nonce: String,
+        not_before: u64,
+        expires_at: u64,
+    ) -> TrustedOwnerAuthorizationRequest {
+        let mut request = TrustedOwnerAuthorizationRequest {
+            service_name: self.service_name.clone(),
+            image_token: self.image_token.clone(),
+            execution_identity_token: self.execution_identity_token.clone(),
+            target_host_token: self.target_host_token.clone(),
+            candidate_commit: self.candidate_commit.clone(),
+            allow_start: self.allow_start,
+            allow_stop: self.allow_stop,
+            allow_change_config: self.allow_change_config,
+            transaction_id: self.transaction_id.clone(),
+            not_before_epoch_seconds: not_before,
+            expires_at_epoch_seconds: expires_at,
+            nonce,
+            owner_material: Vec::new(),
+        };
+
+        request.owner_material = owner_authorization_mac(authority_secret, &request)
+            .finalize()
+            .into_bytes()
+            .to_vec();
+        request
     }
 
     #[cfg(test)]
@@ -331,6 +415,37 @@ pub struct TrustedOwnerAuthorizationRequest {
     pub nonce: String,
     /// Opaque cryptographic Owner voucher material (never logged).
     pub owner_material: Vec<u8>,
+}
+
+fn owner_authorization_mac(
+    authority_secret: &[u8],
+    request: &TrustedOwnerAuthorizationRequest,
+) -> HmacSha256 {
+    let mut mac = HmacSha256::new_from_slice(authority_secret)
+        .expect("HMAC-SHA256 supports arbitrary key lengths");
+    mac.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
+    mac.update(request.service_name.as_bytes());
+    mac.update(b"\0");
+    mac.update(request.image_token.as_bytes());
+    mac.update(b"\0");
+    mac.update(request.execution_identity_token.as_bytes());
+    mac.update(b"\0");
+    mac.update(request.target_host_token.as_bytes());
+    mac.update(b"\0");
+    mac.update(request.candidate_commit.as_bytes());
+    mac.update(b"\0");
+    mac.update(&[
+        request.allow_start as u8,
+        request.allow_stop as u8,
+        request.allow_change_config as u8,
+    ]);
+    mac.update(b"\0");
+    mac.update(request.transaction_id.as_bytes());
+    mac.update(b"\0");
+    mac.update(&request.not_before_epoch_seconds.to_le_bytes());
+    mac.update(&request.expires_at_epoch_seconds.to_le_bytes());
+    mac.update(request.nonce.as_bytes());
+    mac
 }
 
 impl std::fmt::Debug for TrustedOwnerAuthorizationRequest {
@@ -597,18 +712,20 @@ impl SharedAuthorizationLedger {
     /// and atomically writes newly consumed records to disk before accepting them.
     pub fn with_durable_file(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
+        crate::installation::guard_existing_directories(&path)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let mut consumed_tokens = std::collections::BTreeSet::new();
         let mut consumed_nonces = std::collections::BTreeSet::new();
 
-        if path.exists() {
-            if crate::installation::is_reparse_point(&path)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("refusing reparse ledger file {}", path.display()),
-                ));
-            }
+        if crate::installation::is_reparse_point(&path)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing reparse authorization ledger",
+            ));
+        }
+        if path.try_exists()? {
             let bytes = fs::read(&path)?;
             if bytes.is_empty() {
                 return Err(io::Error::new(
@@ -658,6 +775,12 @@ impl SharedAuthorizationLedger {
 
         if let Some(ref path) = durable_path {
             let lock_path = path.with_extension("lock");
+            if crate::installation::guard_existing_directories(path).is_err()
+                || crate::installation::is_reparse_point(&lock_path).unwrap_or(true)
+                || crate::installation::is_reparse_point(path).unwrap_or(true)
+            {
+                return false;
+            }
             let _lock = match ProcessFileLock::acquire(&lock_path) {
                 Ok(l) => l,
                 Err(_) => return false,
@@ -665,10 +788,11 @@ impl SharedAuthorizationLedger {
 
             // 1. Re-read on-disk entries inside the cross-process lock
             let mut entries: Vec<DurableLedgerEntry> = Vec::new();
-            if path.exists() {
-                if crate::installation::is_reparse_point(path).unwrap_or(true) {
-                    return false;
-                }
+            let exists = match path.try_exists() {
+                Ok(exists) => exists,
+                Err(_) => return false,
+            };
+            if exists {
                 match fs::read(path) {
                     Ok(b) if !b.is_empty() => {
                         match serde_json::from_slice::<Vec<DurableLedgerEntry>>(&b) {
@@ -839,50 +963,6 @@ impl OwnerAuthorizationIssuer {
         }
     }
 
-    /// Computes cryptographic HMAC-SHA256 voucher binding all 9 P03 dimensions.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn compute_voucher(
-        &self,
-        service_name: &str,
-        image_token: &str,
-        execution_identity_token: &str,
-        target_host_token: &str,
-        candidate_commit: &str,
-        allow_start: bool,
-        allow_stop: bool,
-        allow_change_config: bool,
-        transaction_id: &str,
-        not_before: u64,
-        expires_at: u64,
-        nonce: &str,
-    ) -> Vec<u8> {
-        let mut mac = HmacSha256::new_from_slice(&self.authority_secret)
-            .expect("HMAC-SHA256 supports arbitrary key lengths");
-        mac.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
-        mac.update(service_name.as_bytes());
-        mac.update(b"\0");
-        mac.update(image_token.as_bytes());
-        mac.update(b"\0");
-        mac.update(execution_identity_token.as_bytes());
-        mac.update(b"\0");
-        mac.update(target_host_token.as_bytes());
-        mac.update(b"\0");
-        mac.update(candidate_commit.as_bytes());
-        mac.update(b"\0");
-        mac.update(&[
-            allow_start as u8,
-            allow_stop as u8,
-            allow_change_config as u8,
-        ]);
-        mac.update(b"\0");
-        mac.update(transaction_id.as_bytes());
-        mac.update(b"\0");
-        mac.update(&not_before.to_le_bytes());
-        mac.update(&expires_at.to_le_bytes());
-        mac.update(nonce.as_bytes());
-        mac.finalize().into_bytes().to_vec()
-    }
-
     /// Verifies whether two cryptographic vouchers are equal in constant time.
     #[allow(dead_code)]
     pub(crate) fn verify_voucher_constant_time(&self, actual: &[u8], expected: &[u8]) -> bool {
@@ -900,38 +980,9 @@ impl OwnerAuthorizationIssuer {
         let not_before = self.clock.now_epoch_seconds();
         let expires_at = not_before + validity_duration_seconds;
 
-        let voucher = self.compute_voucher(
-            &scope.service_name,
-            &scope.image_token,
-            &scope.execution_identity_token,
-            &scope.target_host_token,
-            &scope.candidate_commit,
-            scope.allow_start,
-            scope.allow_stop,
-            scope.allow_change_config,
-            &scope.transaction_id,
-            not_before,
-            expires_at,
-            &nonce,
-        );
-
-        let req = TrustedOwnerAuthorizationRequest {
-            service_name: scope.service_name.clone(),
-            image_token: scope.image_token.clone(),
-            execution_identity_token: scope.execution_identity_token.clone(),
-            target_host_token: scope.target_host_token.clone(),
-            candidate_commit: scope.candidate_commit.clone(),
-            allow_start: scope.allow_start,
-            allow_stop: scope.allow_stop,
-            allow_change_config: scope.allow_change_config,
-            transaction_id: scope.transaction_id.clone(),
-            not_before_epoch_seconds: not_before,
-            expires_at_epoch_seconds: expires_at,
-            nonce,
-            owner_material: voucher.clone(),
-        };
-
-        (req, voucher)
+        let request = scope.signed_request(&self.authority_secret, nonce, not_before, expires_at);
+        let voucher = request.owner_material.clone();
+        (request, voucher)
     }
 
     /// Issue a signed authorization request for the specified parameters.
@@ -1037,7 +1088,12 @@ impl TokenValidatingOwnerVerifier {
 
     /// Constructs a verifier bound to current user's Windows Credential Manager
     /// target `runnermesh/owner-authority`. Fails closed if absent or unissued.
-    pub fn from_credential_manager(scope: OwnerAuthorizationScope) -> Result<Self, ScmApiError> {
+    pub fn from_credential_manager(
+        scope: OwnerAuthorizationScope,
+        ledger_path: &Path,
+    ) -> Result<Self, ScmApiError> {
+        let ledger = SharedAuthorizationLedger::with_durable_file(ledger_path)
+            .map_err(|_| ScmApiError::AccessDenied)?;
         let secret = WindowsCredentialManagerAuthorityProvider
             .read_authority_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET)?;
         Ok(Self::with_clock_and_ledger(
@@ -1045,7 +1101,7 @@ impl TokenValidatingOwnerVerifier {
             scope,
             Some(secret),
             Arc::new(SystemClock),
-            SharedAuthorizationLedger::global().clone(),
+            ledger,
         ))
     }
 
@@ -1287,33 +1343,10 @@ impl TrustedOwnerAuthorizationVerifier for TokenValidatingOwnerVerifier {
 
         // 11. Cryptographic HMAC-SHA256 voucher verification with constant-time check
         if let Some(ref authority_secret) = self.authority_secret {
-            let mut mac = HmacSha256::new_from_slice(authority_secret)
-                .map_err(|_| ScmApiError::AccessDenied)?;
-            mac.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
-            mac.update(request.service_name.as_bytes());
-            mac.update(b"\0");
-            mac.update(request.image_token.as_bytes());
-            mac.update(b"\0");
-            mac.update(request.execution_identity_token.as_bytes());
-            mac.update(b"\0");
-            mac.update(request.target_host_token.as_bytes());
-            mac.update(b"\0");
-            mac.update(request.candidate_commit.as_bytes());
-            mac.update(b"\0");
-            mac.update(&[
-                request.allow_start as u8,
-                request.allow_stop as u8,
-                request.allow_change_config as u8,
-            ]);
-            mac.update(b"\0");
-            mac.update(request.transaction_id.as_bytes());
-            mac.update(b"\0");
-            mac.update(&request.not_before_epoch_seconds.to_le_bytes());
-            mac.update(&request.expires_at_epoch_seconds.to_le_bytes());
-            mac.update(request.nonce.as_bytes());
-
-            // Constant-time verification interface provided by digest/Mac trait
-            if mac.verify_slice(&request.owner_material).is_err() {
+            if owner_authorization_mac(authority_secret, request)
+                .verify_slice(&request.owner_material)
+                .is_err()
+            {
                 return Err(ScmApiError::AccessDenied);
             }
         } else {

@@ -352,7 +352,12 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
     fn unregister_runner_target(&self, _local_runner_key: &str) {}
 
     /// Arms the mutation gate for SCM control on this backend.
-    fn arm_scm_gate(&self, _gate: crate::windows_scm_executor::LiveScmExecutionGate) {}
+    fn arm_scm_gate(
+        &self,
+        _gate: crate::windows_scm_executor::LiveScmExecutionGate,
+    ) -> Result<(), crate::windows_scm_executor::ScmApiError> {
+        Err(crate::windows_scm_executor::ScmApiError::GateClosed)
+    }
 
     /// Arms the mutation gate for owned user session control on this backend.
     fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
@@ -502,8 +507,11 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         Ok(true)
     }
 
-    fn arm_scm_gate(&self, gate: crate::windows_scm_executor::LiveScmExecutionGate) {
-        let _ = self.helper.arm_with_gate(gate);
+    fn arm_scm_gate(
+        &self,
+        gate: crate::windows_scm_executor::LiveScmExecutionGate,
+    ) -> Result<(), crate::windows_scm_executor::ScmApiError> {
+        self.helper.arm_with_gate(gate)
     }
 
     fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
@@ -1835,8 +1843,11 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         }
     }
 
-    fn arm_scm_gate(&self, gate: crate::windows_scm_executor::LiveScmExecutionGate) {
-        let _ = self.helper.arm_with_gate(gate);
+    fn arm_scm_gate(
+        &self,
+        gate: crate::windows_scm_executor::LiveScmExecutionGate,
+    ) -> Result<(), crate::windows_scm_executor::ScmApiError> {
+        self.helper.arm_with_gate(gate)
     }
 
     fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
@@ -1884,6 +1895,7 @@ pub struct AgentCore<O, R, S> {
     last_runner_discovery: Option<DiscoveryReport>,
     multi_runner_backend: Option<Arc<dyn MultiRunnerLifecycleBackend>>,
     last_runner_reports: Vec<PrivilegedScmReport>,
+    owner_authorization_ledger_path: Option<std::path::PathBuf>,
     #[cfg(test)]
     authority_provider: Option<Arc<dyn crate::windows_scm_executor::OwnerAuthoritySecretProvider>>,
     #[cfg(test)]
@@ -1955,6 +1967,7 @@ where
             last_runner_discovery: None,
             multi_runner_backend: None,
             last_runner_reports: Vec::new(),
+            owner_authorization_ledger_path: None,
             #[cfg(test)]
             authority_provider: None,
             #[cfg(test)]
@@ -1988,6 +2001,11 @@ where
     #[cfg(test)]
     pub fn set_hard_safety_for_test(&mut self, safety: crate::HardSafetyState) {
         self.observation.hard_safety = safety;
+    }
+
+    pub(crate) fn bind_owner_authorization_ledger(&mut self, state_root: &std::path::Path) {
+        self.owner_authorization_ledger_path =
+            Some(state_root.join("owner-authorization-ledger.json"));
     }
 
     pub fn set_execution_context(
@@ -2619,24 +2637,58 @@ where
             allow_change_config: request.allow_change_config,
         };
 
+        let Some(backend) = self.multi_runner_backend.as_ref() else {
+            return Ok(AgentResponse::OwnerAuthorization(
+                crate::OwnerAuthorizationReport {
+                    authorized: false,
+                    transaction_id: request.transaction_id,
+                    service_name: request.service_name,
+                    expires_at_epoch_seconds: 0,
+                    reason_code: Some(ReasonCode::new("owner-auth-arm-failed").unwrap()),
+                },
+            ));
+        };
+
+        let production_verifier = || {
+            let path = self
+                .owner_authorization_ledger_path
+                .as_deref()
+                .ok_or(crate::windows_scm_executor::ScmApiError::AuthorizationNotIssued)?;
+            TokenValidatingOwnerVerifier::from_credential_manager(scope.clone(), path)
+        };
+
         #[cfg(test)]
         let verifier_result = if let Some(ref provider) = self.authority_provider {
             let clock = self
                 .authority_clock
                 .clone()
                 .unwrap_or_else(|| Arc::new(crate::windows_scm_executor::SystemClock));
-            crate::windows_scm_executor::test_support::create_test_verifier_with_provider_and_clock(
-                scope,
-                DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
-                provider.as_ref(),
-                clock,
-            )
+            if let Some(ledger_path) = &self.owner_authorization_ledger_path {
+                provider
+                    .read_authority_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET)
+                    .and_then(|key| {
+                        TokenValidatingOwnerVerifier::with_durable_ledger(
+                            key,
+                            scope.clone(),
+                            clock,
+                            ledger_path,
+                        )
+                        .map_err(|_| crate::windows_scm_executor::ScmApiError::AccessDenied)
+                    })
+            } else {
+                crate::windows_scm_executor::test_support::create_test_verifier_with_provider_and_clock(
+                    scope.clone(),
+                    DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+                    provider.as_ref(),
+                    clock,
+                )
+            }
         } else {
-            TokenValidatingOwnerVerifier::from_credential_manager(scope)
+            production_verifier()
         };
 
         #[cfg(not(test))]
-        let verifier_result = TokenValidatingOwnerVerifier::from_credential_manager(scope);
+        let verifier_result = production_verifier();
 
         let verifier = match verifier_result {
             Ok(v) => v,
@@ -2655,8 +2707,25 @@ where
 
         match verifier.verify(&request) {
             Ok(gate) => {
-                if let Some(backend) = &self.multi_runner_backend {
-                    backend.arm_scm_gate(gate.clone());
+                if request
+                    .service_name
+                    .to_ascii_lowercase()
+                    .starts_with("actions.runner.")
+                {
+                    if backend.arm_scm_gate(gate).is_err() {
+                        return Ok(AgentResponse::OwnerAuthorization(
+                            crate::OwnerAuthorizationReport {
+                                authorized: false,
+                                transaction_id: request.transaction_id,
+                                service_name: request.service_name,
+                                expires_at_epoch_seconds: 0,
+                                reason_code: Some(
+                                    ReasonCode::new("owner-auth-arm-failed").unwrap(),
+                                ),
+                            },
+                        ));
+                    }
+                } else {
                     let session_gate = LiveSessionExecutionGate::mint_trusted_live(
                         &request.service_name,
                         &request.execution_identity_token,
@@ -5320,6 +5389,13 @@ mod tests {
         let reconciler = RecordingReconciler::default();
         let store = MemoryConfigStore::default();
         let mut core = AgentCore::new(observer, reconciler, store, build()).unwrap();
+
+        core.set_multi_runner_backend(Arc::new(crate::SandboxMultiRunnerLifecycleBackend::new(
+            crate::PrivilegedScmHelper::new(
+                crate::MockScmBackend::new(),
+                crate::LiveScmExecutionGate::CLOSED,
+            ),
+        )));
 
         let fake_provider = Arc::new(FakeCredentialManagerAuthorityProvider::new());
         let secret = b"offline-owner-qualification-key-32b-secret";

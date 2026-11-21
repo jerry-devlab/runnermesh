@@ -133,6 +133,87 @@ fn p03_fake_credential_manager_30min_temporal_window_and_single_use_nonce() {
 
 #[test]
 #[cfg(windows)]
+fn p03_offline_voucher_is_refused_by_restarted_agent_over_named_pipe() {
+    let root = std::env::temp_dir().join(format!(
+        "rm-p03-restart-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let key = [0x53; 32];
+    let mut scope = test_scope();
+    let receipt = scope
+        .issue_scm_voucher(&key, "restart-fixture".to_owned())
+        .unwrap();
+    scope.allow_change_config = true;
+    assert!(scope
+        .issue_scm_voucher(&key, "excess-rights".to_owned())
+        .is_err());
+    scope.allow_change_config = false;
+
+    // Development builds have a development commit marker. Inject the
+    // same exact context into each sandbox rather than using a live Agent.
+    let context =
+        HostExecutionContext::new(&scope.target_host_token, &scope.candidate_commit).unwrap();
+    for (generation, expected) in [(1, true), (2, false)] {
+        let os = MockScmBackend::new();
+        let backend = Arc::new(SandboxMultiRunnerLifecycleBackend::new(
+            PrivilegedScmHelper::new(os.clone(), LiveScmExecutionGate::CLOSED)
+                .with_context(context.clone()),
+        ));
+        let endpoint =
+            IpcEndpoint::for_test_scope(format!("p03-restart-{}-{generation}", std::process::id()));
+        let mut runtime = start_installed_agent_sandbox(InstalledAgentSandboxConfig {
+            install_root: root.clone(),
+            ipc_endpoint: endpoint.clone(),
+            multi_runner_backend: Some(backend),
+            discovery_report: None,
+            poll_interval: Duration::from_millis(25),
+            enable_periodic_scheduler: false,
+        })
+        .unwrap();
+        let provider = FakeCredentialManagerAuthorityProvider::new();
+        provider.set_secret(DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET, key);
+        runtime
+            .core()
+            .lock()
+            .unwrap()
+            .set_authority_provider_for_test(Arc::new(provider), None);
+        let client = IpcClient::new(endpoint, Duration::from_secs(3));
+        let response = client
+            .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+                request: receipt.clone(),
+            }))
+            .unwrap();
+        let IpcResponseBody::Success(response) = response.body else {
+            panic!("expected an Owner authorization response");
+        };
+        let AgentResponse::OwnerAuthorization(report) = *response else {
+            panic!("expected an Owner authorization report");
+        };
+        assert_eq!(report.authorized, expected, "{report:?}");
+        assert_eq!(
+            report.reason_code.as_ref().map(|code| code.as_str()),
+            if expected {
+                None
+            } else {
+                Some("owner-auth-access-denied")
+            }
+        );
+        assert_eq!(os.is_armed(), expected);
+        assert!(os.service_actions(&scope.service_name).is_empty());
+        assert!(root
+            .join("agent_state/owner-authorization-ledger.json")
+            .is_file());
+        runtime.shutdown().unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
 fn p03_end_to_end_controlled_execution_chain_via_ipc_with_fake_credentials_and_os_boundary() {
     let temp_dir = std::env::temp_dir().join(format!(
         "rm-p03-e2e-{}",
@@ -238,20 +319,9 @@ fn p03_end_to_end_controlled_execution_chain_via_ipc_with_fake_credentials_and_o
         start_time + DEFAULT_AUTHORIZATION_VALIDITY_SECONDS
     );
 
-    // 4. Verification that execution arm and session door were genuinely armed
-    assert!(
-        mock_backend.is_armed(),
-        "underlying SCM execution arm must be armed after valid authorization"
-    );
-    assert!(
-        backend.armed_session_gate().is_some(),
-        "session gate door must be armed"
-    );
-    let session_gate = backend.armed_session_gate().unwrap();
-    assert!(
-        session_gate.is_trusted_live(),
-        "session gate door must be TrustedLive"
-    );
+    // A service authorization arms only the SCM backend.
+    assert!(mock_backend.is_armed());
+    assert!(backend.armed_session_gate().is_none());
 
     // 5. Action: Stop service via armed execution arm
     let stop_req = PrivilegedScmRequest {
@@ -483,7 +553,7 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
     ));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    let service_name = "actions.runner.p03-session-gate";
+    let runner_key = "session-runner-p03";
     let mock_backend = MockScmBackend::new();
     let start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -528,7 +598,7 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
     let issuer = OwnerAuthorizationIssuer::with_clock(secret, clock.clone());
 
     let fake_record = RunnerRecord {
-        local_runner_key: service_name.to_string(),
+        local_runner_key: runner_key.to_string(),
         registration_scope: crate::RegistrationScope::Repository {
             owner: "o".to_string(),
             repository: "r".to_string(),
@@ -548,7 +618,7 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
 
     // Case A: Start-only authorization (allow_start = true, allow_stop = false)
     let start_only_scope = OwnerAuthorizationScope::new(
-        service_name,
+        runner_key,
         "image-token-12345",
         "identity-token-67890",
         "host-token-abcde",
@@ -590,7 +660,7 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
 
     // Case B: Stop-only authorization (allow_start = false, allow_stop = true)
     let stop_only_scope = OwnerAuthorizationScope::new(
-        service_name,
+        runner_key,
         "image-token-12345",
         "identity-token-67890",
         "host-token-abcde",

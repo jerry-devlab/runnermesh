@@ -69,7 +69,10 @@ fn unissued_verifier_refuses_all_external_requests() {
 fn external_caller_token_validating_verifier_refuses_without_authority() {
     let scope = test_scope();
 
-    let verifier_result = TokenValidatingOwnerVerifier::from_credential_manager(scope);
+    let verifier_result = TokenValidatingOwnerVerifier::from_credential_manager(
+        scope,
+        &std::env::temp_dir().join("runnermesh-unprovisioned-test-ledger.json"),
+    );
     assert!(
         matches!(verifier_result, Err(ScmApiError::AuthorizationNotIssued)),
         "unprovisioned environment must return AuthorizationNotIssued"
@@ -310,7 +313,10 @@ fn default_release_api_refuses_arbitrary_key_minting_trusted_live_for_native_ope
     // 1. The public production constructor from_credential_manager strictly queries
     // Windows Credential Manager target runnermesh/owner-authority. When no secret is stored,
     // it fails closed with AuthorizationNotIssued.
-    let verifier_result = TokenValidatingOwnerVerifier::from_credential_manager(scope.clone());
+    let verifier_result = TokenValidatingOwnerVerifier::from_credential_manager(
+        scope.clone(),
+        &std::env::temp_dir().join("runnermesh-unprovisioned-test-ledger.json"),
+    );
     assert!(
         matches!(verifier_result, Err(ScmApiError::AuthorizationNotIssued)),
         "default release API without credential manager entry must fail closed with AuthorizationNotIssued"

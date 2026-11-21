@@ -814,6 +814,7 @@ pub fn start_installed_agent_sandbox(
         reconciler,
         config.multi_runner_backend,
     )?;
+    core.bind_owner_authorization_ledger(&state_root);
     if let Some(discovery) = config.discovery_report {
         core.set_runner_discovery(discovery);
     }
@@ -913,6 +914,7 @@ pub fn run_agent_with_shutdown_timeout(
     ));
     let mut core = assemble_installed_core(config_path, observer, reconciler, multi_runner_backend)
         .map_err(AgentRunError::Startup)?;
+    core.bind_owner_authorization_ledger(&runtime_state_root);
     if let Some(binding) = runtime_binding {
         core.migrate_v01_binding_if_needed(binding, None)
             .map_err(|error| {
