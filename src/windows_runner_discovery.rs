@@ -134,7 +134,7 @@ fn current_user_identity_optional() -> Option<OpaqueIdentityReference> {
 }
 
 #[cfg(any(windows, test))]
-fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
+pub(crate) fn opaque_from_account_name(account: &str) -> Option<OpaqueIdentityReference> {
     let normalized = account.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return None;

@@ -3438,8 +3438,6 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
         let config = &*config_ptr;
         let image = wide_to_string(config.lpBinaryPathName);
         let start_name = wide_to_string(config.lpServiceStartName);
-        let image_token = opaque_image_token(&image);
-        let execution_identity_token = opaque_image_token(&start_name);
         let start_mode = map_start_type(config.dwStartType);
 
         let clean_image = crate::windows_runner_discovery::service_image_path_token(&image);
@@ -3464,17 +3462,35 @@ fn windows_query_exact(service_name: &str) -> Result<ScmExactSnapshot, ScmApiErr
         }
 
         let _ = ERROR_SERVICE_DOES_NOT_EXIST;
-        Ok(ScmExactSnapshot {
-            observation: ServiceObservation {
-                service_name: service_name.to_owned(),
-                state,
-                start_mode,
-                image_path_matches: !image.trim().is_empty(),
-                ownership_verified: !start_name.trim().is_empty(),
-            },
-            image_token,
-            execution_identity_token,
-        })
+        Ok(service_snapshot_from_scm_config(
+            service_name,
+            &image,
+            &start_name,
+            state,
+            start_mode,
+        ))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn service_snapshot_from_scm_config(
+    service_name: &str,
+    image: &str,
+    account: &str,
+    state: DiscoveredLifecycle,
+    start_mode: ServiceStartMode,
+) -> ScmExactSnapshot {
+    let identity = crate::windows_runner_discovery::opaque_from_account_name(account);
+    ScmExactSnapshot {
+        observation: ServiceObservation {
+            service_name: service_name.to_owned(),
+            state,
+            start_mode,
+            image_path_matches: !image.trim().is_empty(),
+            ownership_verified: identity.is_some(),
+        },
+        image_token: opaque_image_token(image),
+        execution_identity_token: identity.map(|identity| identity.key).unwrap_or_default(),
     }
 }
 
@@ -5452,6 +5468,32 @@ mod tests {
             backend.change_start_mode("fixture.scm.a", ServiceStartMode::Manual),
             Err(ScmApiError::GateClosed)
         ));
+    }
+
+    #[test]
+    fn scm_snapshot_matches_discovery_for_service_accounts_with_spaces() {
+        let account = r"NT AUTHORITY\NETWORK SERVICE";
+        let snapshot = |account| {
+            service_snapshot_from_scm_config(
+                "actions.runner.fixture",
+                r#""C:\fixture runner\bin\RunnerService.exe""#,
+                account,
+                DiscoveredLifecycle::Listening,
+                ServiceStartMode::Automatic,
+            )
+        };
+        let discovered =
+            crate::windows_runner_discovery::opaque_from_account_name(account).unwrap();
+        let observed = snapshot(account);
+        assert!(observed.observation.ownership_verified);
+        assert_eq!(observed.execution_identity_token, discovered.key);
+        assert_ne!(
+            observed.execution_identity_token,
+            snapshot(r"NT AUTHORITY\LOCAL SERVICE").execution_identity_token
+        );
+        let missing = snapshot("");
+        assert!(!missing.observation.ownership_verified);
+        assert!(missing.execution_identity_token.is_empty());
     }
 
     #[cfg(windows)]
