@@ -434,6 +434,7 @@ pub fn run_hux2_synthetic_failure_matrix() -> Vec<(&'static str, SyntheticDispos
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-hux2-synth".to_owned(),
+            target_kind: crate::OwnerAuthorizationTargetKind::WindowsService,
             owner_material: b"attempt".to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,

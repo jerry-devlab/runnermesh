@@ -11,10 +11,10 @@ use std::{
 };
 
 use runnermesh::{
-    AgentCommand, AgentResponse, AgentTransport, Installation, InstalledRuntimeBinding, IpcRequest,
-    IpcResponseBody, LocalAgentTransport, OwnerAuthorizationScope, PackageInput, PackageProvenance,
-    PackageVerifier, TrustedOwnerAuthorizationRequest, VersionManifest, IPC_PROTOCOL_VERSION,
-    WINDOWS_X64_TARGET,
+    AgentCommand, AgentResponse, AgentTransport, Installation, InstalledRuntimeBinding, IpcClient,
+    IpcEndpoint, IpcRequest, IpcResponseBody, LocalAgentTransport, OwnerAuthorizationScope,
+    PackageInput, PackageProvenance, PackageVerifier, TrustedOwnerAuthorizationRequest,
+    VersionManifest, IPC_PROTOCOL_VERSION, WINDOWS_X64_TARGET,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -71,10 +71,33 @@ fn run(arguments: &[OsString]) -> Result<Value, String> {
             configure_autostart(action, install_root)
         }
         [command] if command == "owner-issue" => issue_owner_voucher(),
-        [command] if command == "owner-submit" => {
+        [command, archive, accepted_sha, install_root] if command == "owner-submit" => {
             let provenance = accepted_operator_provenance()?;
+            let archive = PathBuf::from(archive);
+            let root = PathBuf::from(install_root);
+            if !archive.is_absolute() || !root.is_absolute() {
+                return Err("owner-submit requires absolute paths".to_owned());
+            }
+            let (manifest, actual_sha) =
+                PackageVerifier::verify_with_hash(&archive).map_err(|error| error.to_string())?;
+            if accepted_sha.to_str() != Some(&actual_sha) || manifest.provenance != provenance {
+                return Err("accepted archive digest or provenance mismatch".to_owned());
+            }
+            let image_sha256 = manifest
+                .files
+                .get("runnermesh-agent.exe")
+                .ok_or_else(|| "accepted archive has no Agent image".to_owned())?;
+            let image = Installation::new(root)
+                .owner_submission_agent()
+                .map_err(|error| error.to_string())?;
+            let client = IpcClient::new(
+                IpcEndpoint::for_current_user().map_err(|error| error.to_string())?,
+                Duration::from_secs(10),
+            );
             submit_owner_voucher(
-                &LocalAgentTransport::new(Duration::from_secs(10)),
+                &client,
+                &image,
+                image_sha256,
                 &provenance,
                 read_private_input()?,
             )
@@ -246,36 +269,24 @@ fn issue_owner_voucher() -> Result<Value, String> {
 }
 
 fn submit_owner_voucher(
-    transport: &impl AgentTransport,
+    client: &IpcClient,
+    image: &Path,
+    image_sha256: &str,
     provenance: &PackageProvenance,
     request: TrustedOwnerAuthorizationRequest,
 ) -> Result<Value, String> {
     if request.candidate_commit != provenance.commit {
         return Err("voucher and immutable helper commit differ".to_owned());
     }
-    let snapshot = transport
-        .call(IpcRequest::new(AgentCommand::GetSnapshot))
-        .map_err(|_| "could not read Agent provenance".to_owned())?;
-    if snapshot.protocol_version != IPC_PROTOCOL_VERSION
-        || snapshot.request_id != 1
-        || !matches!(snapshot.body, IpcResponseBody::Success(response)
-            if matches!(*response, AgentResponse::Snapshot(ref snapshot)
-                if snapshot_matches(snapshot, provenance)))
-    {
-        return Err(
-            "active Agent provenance differs from the immutable operator helper".to_owned(),
-        );
+    if request.target_kind != runnermesh::OwnerAuthorizationTargetKind::WindowsService {
+        return Err("owner-submit expects an SCM voucher".to_owned());
     }
     let transaction_id = request.transaction_id.clone();
     let service_name = request.service_name.clone();
     let expires_at = request.expires_at_epoch_seconds;
-    let response = transport
-        .call(IpcRequest {
-            protocol_version: IPC_PROTOCOL_VERSION,
-            request_id: 2,
-            command: AgentCommand::AuthorizeOwnerMutation { request },
-        })
-        .map_err(|_| "authorization submission result unavailable".to_owned())?;
+    let response = client
+        .submit_owner_authorization(image, image_sha256, provenance, request)
+        .map_err(|error| format!("authorization submission unavailable: {error}"))?;
     if response.protocol_version != IPC_PROTOCOL_VERSION || response.request_id != 2 {
         return Err("mismatched authorization response".to_owned());
     }
@@ -470,7 +481,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: runnermesh-package identity | create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive> | extract <absolute-archive> <new-absolute-sandbox-directory> | install <absolute-archive> <accepted-archive-sha256> <new-absolute-staging-directory> <absolute-install-root> | bind <absolute-install-root> <absolute-binding-json> <accepted-binding-sha256> | autostart <enable|disable> <absolute-install-root> | owner-issue (private JSON stdin and stdout) | owner-submit (private voucher stdin) | stop-after-drain | uninstall <absolute-install-root>"
+    "usage: runnermesh-package identity | create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive> | extract <absolute-archive> <new-absolute-sandbox-directory> | install <absolute-archive> <accepted-archive-sha256> <new-absolute-staging-directory> <absolute-install-root> | bind <absolute-install-root> <absolute-binding-json> <accepted-binding-sha256> | autostart <enable|disable> <absolute-install-root> | owner-issue (private JSON stdin and stdout) | owner-submit <absolute-archive> <accepted-archive-sha256> <absolute-install-root> (private voucher stdin) | stop-after-drain | uninstall <absolute-install-root>"
 }
 
 #[cfg(test)]

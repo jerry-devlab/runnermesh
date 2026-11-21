@@ -57,6 +57,7 @@ fn unissued_verifier_refuses_all_external_requests() {
         not_before_epoch_seconds: 1000,
         expires_at_epoch_seconds: 2800,
         nonce: "test-nonce-001".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: b"forged-voucher-signature-bytes".to_vec(),
     };
 
@@ -94,6 +95,7 @@ fn external_caller_cannot_mint_trusted_live_with_any_token_or_root() {
         not_before_epoch_seconds: 1000,
         expires_at_epoch_seconds: 2800,
         nonce: "test-nonce-002".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: b"completely-arbitrary-bytes".to_vec(),
     };
 
@@ -125,6 +127,7 @@ fn sensitive_material_is_redacted_in_debug() {
         not_before_epoch_seconds: 1000,
         expires_at_epoch_seconds: 2800,
         nonce: "secret-nonce".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: b"super-secret-voucher-hmac-material".to_vec(),
     };
 
@@ -337,6 +340,7 @@ fn default_release_api_refuses_arbitrary_key_minting_trusted_live_for_native_ope
         not_before_epoch_seconds: 1000,
         expires_at_epoch_seconds: 2800,
         nonce: "forged-nonce-001".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: b"attacker-arbitrary-hmac-material-0123456789".to_vec(),
     };
 

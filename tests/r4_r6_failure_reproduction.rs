@@ -64,6 +64,7 @@ fn regression_r4_external_caller_self_selected_token_refused() {
         not_before_epoch_seconds: 100,
         expires_at_epoch_seconds: 2_000_000_000,
         nonce: "repro-nonce-new".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: raw_token.to_vec(),
     };
 
@@ -103,6 +104,7 @@ fn regression_r4_external_caller_unissued_verifier_refuses_all_requests() {
         not_before_epoch_seconds: 100,
         expires_at_epoch_seconds: 2_000_000_000,
         nonce: "repro-nonce-forged".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: caller_secret.to_vec(),
     };
 
@@ -4062,6 +4064,7 @@ fn regression_s2_gated_session_trusted_authorization_and_close() {
         not_before_epoch_seconds: now - 10,
         expires_at_epoch_seconds: now + 100,
         nonce: "nonce-1".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: Vec::new(),
     };
 
@@ -4120,6 +4123,7 @@ fn regression_s2_gated_session_trusted_authorization_and_close() {
         not_before_epoch_seconds: now - 10,
         expires_at_epoch_seconds: now + 100,
         nonce: "nonce-stop".to_string(),
+        target_kind: runnermesh::OwnerAuthorizationTargetKind::WindowsService,
         owner_material: Vec::new(),
     };
     let escalate_res = runnermesh::LiveSessionExecutionGate::from_trusted_owner_authorization(

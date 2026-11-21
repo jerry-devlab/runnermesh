@@ -48,6 +48,60 @@ fn test_scope() -> OwnerAuthorizationScope {
     )
 }
 
+pub(crate) fn owner_test_record(
+    scope: &OwnerAuthorizationScope,
+    root: &std::path::Path,
+    session: bool,
+) -> crate::RunnerRecord {
+    crate::RunnerRecord {
+        local_runner_key: if session {
+            scope.service_name.clone()
+        } else {
+            "owner-fixture".into()
+        },
+        registration_scope: crate::RegistrationScope::Repository {
+            owner: "fixture".into(),
+            repository: "fixture".into(),
+        },
+        runner_id: 991,
+        expected_runner_name: "owner-test".into(),
+        runner_home: root.join("runner"),
+        work_root: root.join("work"),
+        execution_identity_ref: crate::OpaqueIdentityReference::new(
+            "fixture",
+            &scope.execution_identity_token,
+        )
+        .unwrap(),
+        backend: if session {
+            crate::RegistryBackendBinding::UserSession
+        } else {
+            crate::RegistryBackendBinding::WindowsService {
+                service_name: scope.service_name.clone(),
+            }
+        },
+        desired_enabled: true,
+        enrollment_state: crate::EnrollmentState::Enrolled,
+        credential_ref: None,
+        managed_admission: false,
+    }
+}
+
+#[cfg(windows)]
+fn persist_owner_test_target(
+    scope: &OwnerAuthorizationScope,
+    root: &std::path::Path,
+    session: bool,
+) {
+    use crate::runner_registry::RegistryStore;
+    let registry = crate::RunnerRegistry {
+        records: vec![owner_test_record(scope, root, session)],
+        ..Default::default()
+    };
+    crate::FileRegistryStore::new(root.join("runners-registry.json"))
+        .save(&registry)
+        .unwrap();
+}
+
 #[test]
 fn p03_fake_credential_manager_30min_temporal_window_and_single_use_nonce() {
     let fake_provider = FakeCredentialManagerAuthorityProvider::new();
@@ -153,6 +207,9 @@ fn p03_offline_voucher_is_refused_by_restarted_agent_over_named_pipe() {
         .is_err());
     scope.allow_change_config = false;
 
+    std::fs::create_dir_all(&root).unwrap();
+    persist_owner_test_target(&scope, &root, false);
+
     // Development builds have a development commit marker. Inject the
     // same exact context into each sandbox rather than using a live Agent.
     let context =
@@ -182,8 +239,30 @@ fn p03_offline_voucher_is_refused_by_restarted_agent_over_named_pipe() {
             .unwrap()
             .set_authority_provider_for_test(Arc::new(provider), None);
         let client = IpcClient::new(endpoint, Duration::from_secs(3));
+        if generation == 1 {
+            let expected = crate::PackageProvenance {
+                version: "unused".into(),
+                commit: receipt.candidate_commit.clone(),
+                channel: "unused".into(),
+                target: crate::WINDOWS_X64_TARGET.into(),
+            };
+            let result = client.submit_owner_authorization(
+                &std::env::current_exe().unwrap(),
+                &"0".repeat(64),
+                &expected,
+                receipt.clone(),
+            );
+            assert!(matches!(
+                result,
+                Err(crate::IpcTransportError::UnauthorizedClient)
+            ));
+            assert!(!root
+                .join("agent_state/owner-authorization-ledger.json")
+                .exists());
+        }
+
         let response = client
-            .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+            .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
                 request: receipt.clone(),
             }))
             .unwrap();
@@ -259,6 +338,18 @@ fn p03_end_to_end_controlled_execution_chain_via_ipc_with_fake_credentials_and_o
         enable_periodic_scheduler: false,
     };
 
+    let fixture_scope = OwnerAuthorizationScope::new(
+        service_name,
+        "image-token-12345",
+        "identity-token-67890",
+        "host-token-abcde",
+        &running_commit,
+        "fixture-init",
+        true,
+        true,
+        false,
+    );
+    persist_owner_test_target(&fixture_scope, &temp_dir, false);
     let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
 
     let fake_provider = Arc::new(FakeCredentialManagerAuthorityProvider::new());
@@ -301,7 +392,7 @@ fn p03_end_to_end_controlled_execution_chain_via_ipc_with_fake_credentials_and_o
     // 3. Send AuthorizeOwnerMutation over real Named Pipe IPC
     let ipc_client = IpcClient::new(ipc_endpoint, Duration::from_secs(3));
     let resp = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: auth_req,
         }))
         .expect("AuthorizeOwnerMutation over IPC must succeed");
@@ -463,7 +554,7 @@ fn p03_controlled_execution_chain_candidate_commit_and_host_token_drift_rejected
         "nonce-drift-commit-001",
     );
     let resp = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: drifted_commit_req,
         }))
         .expect("AuthorizeOwnerMutation call must succeed");
@@ -506,7 +597,7 @@ fn p03_controlled_execution_chain_candidate_commit_and_host_token_drift_rejected
         "nonce-drift-host-002",
     );
     let resp2 = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: drifted_host_req,
         }))
         .expect("AuthorizeOwnerMutation call must succeed");
@@ -553,7 +644,7 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
     ));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    let runner_key = "session-runner-p03";
+    let runner_key = "actions.runner.session-runner-p03";
     let mock_backend = MockScmBackend::new();
     let start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -584,6 +675,18 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
         enable_periodic_scheduler: false,
     };
 
+    let fixture_scope = OwnerAuthorizationScope::new(
+        runner_key,
+        "image-token-12345",
+        "identity-token-67890",
+        "host-token-abcde",
+        &running_commit,
+        "fixture-init",
+        true,
+        true,
+        false,
+    );
+    persist_owner_test_target(&fixture_scope, &temp_dir, true);
     let mut runtime = start_installed_agent_sandbox(sandbox_config).unwrap();
 
     let fake_provider = Arc::new(FakeCredentialManagerAuthorityProvider::new());
@@ -628,13 +731,62 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
         false, // allow_stop
         false,
     );
-    let (start_only_req, _) = issuer.issue_for_scope(
+    // A service voucher cannot be used against this enrolled Session key.
+    let (wrong_kind, _) = issuer.issue_for_scope(
         &start_only_scope,
         DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
         "nonce-start-only-001",
     );
+    let response = ipc_client
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+            request: wrong_kind,
+        }))
+        .unwrap();
+    let IpcResponseBody::Success(response) = response.body else {
+        panic!("expected authorization response");
+    };
+    let AgentResponse::OwnerAuthorization(report) = *response else {
+        panic!("expected authorization report");
+    };
+    assert!(!report.authorized);
+    assert_eq!(
+        report.reason_code.as_ref().map(|code| code.as_str()),
+        Some("owner-auth-target-unbound-or-ambiguous")
+    );
+    assert!(!session_transport.current_gate().is_open());
+    assert!(!mock_backend.is_armed());
+
+    let (mut changed_kind, _) = issuer.issue_for_scope(
+        &start_only_scope,
+        DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+        "nonce-start-only-001",
+    );
+    changed_kind.target_kind = crate::OwnerAuthorizationTargetKind::UserSession;
+    let response = ipc_client
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+            request: changed_kind,
+        }))
+        .unwrap();
+    let IpcResponseBody::Success(response) = response.body else {
+        panic!("expected authorization response");
+    };
+    let AgentResponse::OwnerAuthorization(report) = *response else {
+        panic!("expected authorization report");
+    };
+    assert!(!report.authorized);
+    assert_eq!(
+        report.reason_code.as_ref().map(|code| code.as_str()),
+        Some("owner-auth-access-denied")
+    );
+
+    let (start_only_req, _) = issuer.issue_for_target(
+        &start_only_scope,
+        crate::OwnerAuthorizationTargetKind::UserSession,
+        DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
+        "nonce-start-only-001",
+    );
     let resp = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: start_only_req,
         }))
         .expect("AuthorizeOwnerMutation over IPC must succeed");
@@ -670,13 +822,14 @@ fn p03_session_gate_start_only_cannot_stop_and_stop_only_cannot_start() {
         true,  // allow_stop
         false,
     );
-    let (stop_only_req, _) = issuer.issue_for_scope(
+    let (stop_only_req, _) = issuer.issue_for_target(
         &stop_only_scope,
+        crate::OwnerAuthorizationTargetKind::UserSession,
         DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
         "nonce-stop-only-002",
     );
     let resp2 = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: stop_only_req,
         }))
         .expect("AuthorizeOwnerMutation over IPC must succeed");
@@ -784,7 +937,7 @@ fn p03_execution_context_empty_or_unspecified_rejected_at_assembly_and_ipc() {
         "nonce-unspec-001",
     );
     let resp = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: empty_host_req,
         }))
         .unwrap();
@@ -818,7 +971,7 @@ fn p03_execution_context_empty_or_unspecified_rejected_at_assembly_and_ipc() {
         "nonce-unspec-002",
     );
     let resp2 = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: unspec_host_req,
         }))
         .unwrap();
@@ -852,7 +1005,7 @@ fn p03_execution_context_empty_or_unspecified_rejected_at_assembly_and_ipc() {
         "nonce-unspec-003",
     );
     let resp3 = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: empty_commit_req,
         }))
         .unwrap();
@@ -886,7 +1039,7 @@ fn p03_execution_context_empty_or_unspecified_rejected_at_assembly_and_ipc() {
         "nonce-unspec-004",
     );
     let resp4 = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: unspec_commit_req,
         }))
         .unwrap();
@@ -1160,7 +1313,7 @@ fn p03_f3_ordinary_ipc_runners_disable_enable_reconcile_full_chain_with_helper_a
         "nonce-f3-001",
     );
     let auth_resp = ipc_client
-        .call(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
+        .submit_owner_fixture(IpcRequest::new(AgentCommand::AuthorizeOwnerMutation {
             request: auth_req,
         }))
         .expect("AuthorizeOwnerMutation over IPC must succeed");

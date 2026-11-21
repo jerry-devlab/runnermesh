@@ -240,6 +240,24 @@ impl Installation {
         Ok(state)
     }
 
+    /// Returns the verified stable Agent path for credential submission.
+    /// An activation or uninstall transaction must be resolved separately.
+    pub fn owner_submission_agent(&self) -> Result<PathBuf, InstallError> {
+        self.assert_runtime_root_safe()?;
+        let guards = self.guard_owned_directories()?;
+        guards.verify()?;
+        if self.read_uninstall_transaction()?.is_some() {
+            return Err(InstallError::UninstallInProgress);
+        }
+        if self.read_transaction()?.is_some() {
+            return Err(InstallError::UnreconciledTransaction);
+        }
+        let state = self.read_state_file()?;
+        self.verify_state(&state)?;
+        state.active_version.ok_or(InstallError::NoActiveVersion)?;
+        Ok(self.stable_agent_entry())
+    }
+
     pub fn active_agent_path(&self) -> Result<PathBuf, InstallError> {
         let state = self.state()?;
         let version = state.active_version.ok_or(InstallError::NoActiveVersion)?;
@@ -2324,16 +2342,13 @@ fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
 pub(crate) fn is_reparse_point(path: &Path) -> Result<bool, InstallError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Ok(true);
-            }
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
-                Ok(metadata.file_attributes() & 0x400 != 0)
+                Ok(metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0)
             }
             #[cfg(not(windows))]
-            Ok(false)
+            Ok(metadata.file_type().is_symlink())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(InstallError::io(error)),

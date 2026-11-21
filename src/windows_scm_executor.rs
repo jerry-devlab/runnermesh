@@ -241,6 +241,7 @@ impl OwnerAuthorizationScope {
         }
         Ok(self.signed_request(
             authority_key,
+            OwnerAuthorizationTargetKind::WindowsService,
             nonce,
             now,
             now + DEFAULT_AUTHORIZATION_VALIDITY_SECONDS,
@@ -250,6 +251,7 @@ impl OwnerAuthorizationScope {
     fn signed_request(
         &self,
         authority_secret: &[u8],
+        target_kind: OwnerAuthorizationTargetKind,
         nonce: String,
         not_before: u64,
         expires_at: u64,
@@ -267,6 +269,7 @@ impl OwnerAuthorizationScope {
             not_before_epoch_seconds: not_before,
             expires_at_epoch_seconds: expires_at,
             nonce,
+            target_kind,
             owner_material: Vec::new(),
         };
 
@@ -384,9 +387,17 @@ pub fn resolve_current_host_token() -> String {
     String::new()
 }
 
+/// Runner backend authorized by the signed voucher.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OwnerAuthorizationTargetKind {
+    WindowsService,
+    UserSession,
+}
+
 /// Request presented to a trusted Owner authorization verifier.
 ///
-/// Implements the P03 trusted SCM authorization contract binding all 9 dimensions:
+/// Implements the P03 trusted SCM authorization contract binding the following fields:
 /// 1. Exact SCM service name (`service_name`)
 /// 2. Opaque image token (`image_token`)
 /// 3. Opaque execution identity token (`execution_identity_token`)
@@ -396,6 +407,7 @@ pub fn resolve_current_host_token() -> String {
 /// 7. Bounded transaction ID (`transaction_id`)
 /// 8. Validity window (`not_before_epoch_seconds`, `expires_at_epoch_seconds`)
 /// 9. Single-use nonce (`nonce`)
+/// 10. Backend kind (`target_kind`)
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TrustedOwnerAuthorizationRequest {
     pub service_name: String,
@@ -415,6 +427,7 @@ pub struct TrustedOwnerAuthorizationRequest {
     pub nonce: String,
     /// Opaque cryptographic Owner voucher material (never logged).
     pub owner_material: Vec<u8>,
+    pub target_kind: OwnerAuthorizationTargetKind,
 }
 
 fn owner_authorization_mac(
@@ -423,7 +436,11 @@ fn owner_authorization_mac(
 ) -> HmacSha256 {
     let mut mac = HmacSha256::new_from_slice(authority_secret)
         .expect("HMAC-SHA256 supports arbitrary key lengths");
-    mac.update(b"RUNNERMESH_OWNER_AUTH_V1\0");
+    mac.update(b"RUNNERMESH_OWNER_AUTH_V2\0");
+    mac.update(&[match request.target_kind {
+        OwnerAuthorizationTargetKind::WindowsService => 1,
+        OwnerAuthorizationTargetKind::UserSession => 2,
+    }]);
     mac.update(request.service_name.as_bytes());
     mac.update(b"\0");
     mac.update(request.image_token.as_bytes());
@@ -460,6 +477,7 @@ impl std::fmt::Debug for TrustedOwnerAuthorizationRequest {
             .field("allow_stop", &self.allow_stop)
             .field("allow_change_config", &self.allow_change_config)
             .field("transaction_id", &self.transaction_id)
+            .field("target_kind", &self.target_kind)
             .field("not_before_epoch_seconds", &self.not_before_epoch_seconds)
             .field("expires_at_epoch_seconds", &self.expires_at_epoch_seconds)
             .field("nonce", &self.nonce)
@@ -487,6 +505,7 @@ impl TrustedOwnerAuthorizationRequest {
             allow_stop,
             allow_change_config,
             transaction_id: "tx-test-fixture".into(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material,
             not_before_epoch_seconds: 1_700_000_000,
             expires_at_epoch_seconds: 1_800_000_000,
@@ -976,11 +995,32 @@ impl OwnerAuthorizationIssuer {
         validity_duration_seconds: u64,
         nonce: impl Into<String>,
     ) -> (TrustedOwnerAuthorizationRequest, Vec<u8>) {
+        self.issue_for_target(
+            scope,
+            OwnerAuthorizationTargetKind::WindowsService,
+            validity_duration_seconds,
+            nonce,
+        )
+    }
+
+    pub(crate) fn issue_for_target(
+        &self,
+        scope: &OwnerAuthorizationScope,
+        target_kind: OwnerAuthorizationTargetKind,
+        validity_duration_seconds: u64,
+        nonce: impl Into<String>,
+    ) -> (TrustedOwnerAuthorizationRequest, Vec<u8>) {
         let nonce = nonce.into();
         let not_before = self.clock.now_epoch_seconds();
         let expires_at = not_before + validity_duration_seconds;
 
-        let request = scope.signed_request(&self.authority_secret, nonce, not_before, expires_at);
+        let request = scope.signed_request(
+            &self.authority_secret,
+            target_kind,
+            nonce,
+            not_before,
+            expires_at,
+        );
         let voucher = request.owner_material.clone();
         (request, voucher)
     }
@@ -4504,6 +4544,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-unissued-test".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: b"not-a-real-token".to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4592,6 +4633,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: String::new(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: Vec::new(),
             not_before_epoch_seconds: 0,
             expires_at_epoch_seconds: 0,
@@ -4612,6 +4654,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: vec![1, 2, 3, 4, 5],
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4682,6 +4725,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: Vec::new(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4703,6 +4747,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: b"tampered-forged-token".to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4724,6 +4769,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4745,6 +4791,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4766,6 +4813,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4787,6 +4835,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4808,6 +4857,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4829,6 +4879,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4850,6 +4901,7 @@ mod tests {
             allow_stop: false,
             allow_change_config: false,
             transaction_id: "tx-wrong-id".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4880,6 +4932,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4901,6 +4954,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4922,6 +4976,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 2_000,
             expires_at_epoch_seconds: 1_000,
@@ -4944,6 +4999,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -4966,6 +5022,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: raw_token.to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,
@@ -5047,6 +5104,7 @@ mod tests {
             allow_stop: true,
             allow_change_config: true,
             transaction_id: "tx-fixture-1".to_owned(),
+            target_kind: OwnerAuthorizationTargetKind::WindowsService,
             owner_material: b"caller-arbitrary-chosen-token".to_vec(),
             not_before_epoch_seconds: 1_000,
             expires_at_epoch_seconds: 2_000,

@@ -6,7 +6,7 @@ existing Owner authorization protocol.
 | Command | Private input | Output |
 |---|---|---|
 | owner-issue | One JSON value with scope, nonce and authority_key | Signed voucher on redirected standard output |
-| owner-submit | One signed voucher on redirected standard input | Transaction ID, expiry and authorization result |
+| owner-submit with absolute accepted ZIP, approved ZIP SHA-256 and absolute installation root | One signed voucher on redirected standard input | Transaction ID, expiry and authorization result |
 
 Run owner-issue offline under Owner custody. Supply the exact scope and a unique
 nonce through a private input stream. The key is 32 bytes encoded as a JSON byte
@@ -22,14 +22,16 @@ at least one Start or Stop permission, refuses ChangeConfig and uses a
 30-minute window on the issuer clock. It requires the scope commit to match
 the immutable helper's build commit.
 
-Owner-submit checks the connected same-user Agent's version, commit, channel
-and target before sending the signed request. The Agent validates the request
+Owner-submit verifies the approved archive and the same-user pipe server's
+installed Agent image against its manifest. Build provenance and voucher
+submission use one connection. The SCM target kind is signed and matched to one
+enrolled registry record before consumption. The Agent validates the request
 against its host, commit, trusted clock and configured authority. It records
-consumption in the authorization ledger under the installation's Agent state
-directory before arming the SCM backend. A service voucher arms only SCM.
-An unreadable or malformed ledger prevents
+consumption in the ledger under the installation's Agent state directory
+before arming the selected backend. An unreadable or malformed ledger prevents
 authorization. An ambiguous submission response requires readback before any
 further action.
+
 
 Credential Manager provisioning, access to real key material, real issuance,
 access to an installed runtime and service transactions require their own Owner

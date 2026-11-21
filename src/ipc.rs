@@ -210,6 +210,147 @@ impl IpcClient {
             Err(IpcTransportError::UnsupportedPlatform)
         }
     }
+    /// Sends one voucher only to the verified Agent, on the same pipe used
+    /// to obtain and check its build provenance.
+    pub fn submit_owner_authorization(
+        &self,
+        image: &std::path::Path,
+        image_sha256: &str,
+        provenance: &crate::PackageProvenance,
+        request: crate::TrustedOwnerAuthorizationRequest,
+    ) -> Result<IpcResponse, IpcTransportError> {
+        #[cfg(windows)]
+        {
+            let mut pipe = connect_pipe(&self.endpoint, self.timeout)?;
+            let _peer = authenticate_owner_peer(&pipe, image, image_sha256)?;
+            owner_exchange(&mut pipe, request, |snapshot| {
+                snapshot.build.version == provenance.version
+                    && snapshot.build.commit == provenance.commit
+                    && snapshot.build.channel == provenance.channel
+                    && snapshot.build.target == provenance.target
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (image, image_sha256, provenance, request);
+            Err(IpcTransportError::UnsupportedPlatform)
+        }
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn submit_owner_fixture(
+        &self,
+        request: IpcRequest,
+    ) -> Result<IpcResponse, IpcTransportError> {
+        let AgentCommand::AuthorizeOwnerMutation { request } = request.command else {
+            panic!("expected fixture authorization");
+        };
+        let mut pipe = connect_pipe(&self.endpoint, self.timeout)?;
+        use sha2::{Digest, Sha256};
+        let image = std::env::current_exe()?;
+        let hash = format!("{:x}", Sha256::digest(std::fs::read(&image)?));
+        let _peer = authenticate_owner_peer(&pipe, &image, &hash)?;
+        owner_exchange(&mut pipe, request, |_| true)
+    }
+}
+
+#[cfg(windows)]
+fn owner_exchange(
+    stream: &mut (impl Read + Write),
+    request: crate::TrustedOwnerAuthorizationRequest,
+    verify_snapshot: impl FnOnce(&crate::AgentSnapshot) -> bool,
+) -> Result<IpcResponse, IpcTransportError> {
+    let mut reader = BufReader::new(stream);
+    write_frame(
+        reader.get_mut(),
+        &IpcRequest::new(AgentCommand::GetOwnerAuthorizationSnapshot),
+    )?;
+    let snapshot: IpcResponse = read_frame(&mut reader)?;
+    if snapshot.protocol_version != IPC_PROTOCOL_VERSION
+        || snapshot.request_id != 1
+        || !matches!(snapshot.body, IpcResponseBody::Success(response)
+            if matches!(*response, AgentResponse::Snapshot(ref snapshot) if verify_snapshot(snapshot)))
+    {
+        return Err(IpcTransportError::UnauthorizedClient);
+    }
+    write_frame(
+        reader.get_mut(),
+        &IpcRequest {
+            protocol_version: IPC_PROTOCOL_VERSION,
+            request_id: 2,
+            command: AgentCommand::AuthorizeOwnerMutation { request },
+        },
+    )?;
+    read_frame(&mut reader)
+}
+
+#[cfg(windows)]
+fn authenticate_owner_peer(
+    pipe: &std::fs::File,
+    expected_image: &std::path::Path,
+    expected_sha256: &str,
+) -> Result<(std::os::windows::io::OwnedHandle, std::fs::File), IpcTransportError> {
+    use sha2::{Digest, Sha256};
+    use std::{
+        ffi::OsString,
+        os::windows::{
+            ffi::OsStringExt,
+            fs::OpenOptionsExt,
+            io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+        },
+    };
+    use windows_sys::Win32::{
+        Storage::FileSystem::FILE_SHARE_READ,
+        System::{
+            Pipes::GetNamedPipeServerProcessId,
+            Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    };
+
+    let mut pid = 0;
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as _, &mut pid) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(io::Error::last_os_error().into());
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process as RawHandle) };
+    if !process_matches_current_user(process.as_raw_handle() as _)? {
+        return Err(IpcTransportError::UnauthorizedClient);
+    }
+
+    // Hold the exact installed binary open without write/delete sharing.
+    let mut image = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(expected_image)?;
+    let mut name = vec![0u16; 32768];
+    let mut length = name.len() as u32;
+    if unsafe {
+        QueryFullProcessImageNameW(
+            process.as_raw_handle() as _,
+            PROCESS_NAME_WIN32,
+            name.as_mut_ptr(),
+            &mut length,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    let observed_image = OsString::from_wide(&name[..length as usize]);
+    if std::fs::canonicalize(observed_image)? != std::fs::canonicalize(expected_image)? {
+        return Err(IpcTransportError::UnauthorizedClient);
+    }
+    let mut digest = Sha256::new();
+    io::copy(&mut image, &mut digest)?;
+    if format!("{:x}", digest.finalize()) != expected_sha256 {
+        return Err(IpcTransportError::UnauthorizedClient);
+    }
+    Ok((process, image))
 }
 
 /// Listener side of the single Agent authority boundary.
@@ -344,11 +485,29 @@ fn serve_stream<S>(
 where
     S: Read + Write,
 {
-    let request: IpcRequest = {
-        let mut reader = BufReader::new(&mut *stream);
-        read_frame(&mut reader)?
-    };
-    let response = if request.protocol_version != IPC_PROTOCOL_VERSION {
+    let mut reader = BufReader::new(stream);
+    let request: IpcRequest = read_frame(&mut reader)?;
+    let owner_handshake = matches!(request.command, AgentCommand::GetOwnerAuthorizationSnapshot);
+    let response = command_response(request, handle_command, false);
+    let ready = owner_handshake
+        && matches!(&response.body, IpcResponseBody::Success(response)
+        if matches!(**response, AgentResponse::Snapshot(_)));
+    write_frame(reader.get_mut(), &response)?;
+    if ready {
+        let request: IpcRequest = read_frame(&mut reader)?;
+        let response = command_response(request, handle_command, true);
+        write_frame(reader.get_mut(), &response)?;
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn command_response(
+    request: IpcRequest,
+    handle_command: &mut impl FnMut(AgentCommand) -> Result<AgentResponse, ReasonCode>,
+    owner_submission: bool,
+) -> IpcResponse {
+    if request.protocol_version != IPC_PROTOCOL_VERSION {
         IpcResponse {
             protocol_version: IPC_PROTOCOL_VERSION,
             request_id: request.request_id,
@@ -359,7 +518,14 @@ where
             }),
         }
     } else {
-        let body = match handle_command(request.command) {
+        let result = if owner_submission
+            != matches!(request.command, AgentCommand::AuthorizeOwnerMutation { .. })
+        {
+            Err(static_reason("owner-authorization-exchange-required"))
+        } else {
+            handle_command(request.command)
+        };
+        let body = match result {
             Ok(response) => IpcResponseBody::Success(Box::new(response)),
             Err(reason_code) => IpcResponseBody::Failure(IpcError {
                 code: IpcErrorCode::AgentUnavailable,
@@ -372,8 +538,7 @@ where
             request_id: request.request_id,
             body,
         }
-    };
-    write_frame(stream, &response)
+    }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -635,12 +800,9 @@ fn client_matches_current_user(
 ) -> Result<bool, IpcTransportError> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
-        Security::{EqualSid, TOKEN_QUERY},
         System::{
             Pipes::GetNamedPipeClientProcessId,
-            Threading::{
-                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-            },
+            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         },
     };
 
@@ -653,33 +815,44 @@ fn client_matches_current_user(
         return Err(IpcTransportError::Io(io::Error::last_os_error()));
     }
 
-    let result = (|| {
-        let mut client_token = std::ptr::null_mut();
-        if unsafe { OpenProcessToken(client_process, TOKEN_QUERY, &mut client_token) } == 0 {
-            return Err(IpcTransportError::Io(io::Error::last_os_error()));
-        }
-        let mut current_token = std::ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current_token) } == 0 {
-            unsafe {
-                CloseHandle(client_token);
-            }
-            return Err(IpcTransportError::Io(io::Error::last_os_error()));
-        }
-        let comparison = with_token_user_sid(client_token, |client_sid| {
-            with_token_user_sid(current_token, |current_sid| {
-                Ok(unsafe { EqualSid(client_sid, current_sid) } != 0)
-            })
-        });
-        unsafe {
-            CloseHandle(current_token);
-            CloseHandle(client_token);
-        }
-        comparison
-    })();
+    let result = process_matches_current_user(client_process);
     unsafe {
         CloseHandle(client_process);
     }
     result
+}
+
+#[cfg(windows)]
+fn process_matches_current_user(
+    client_process: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<bool, IpcTransportError> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        Security::{EqualSid, TOKEN_QUERY},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let mut client_token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(client_process, TOKEN_QUERY, &mut client_token) } == 0 {
+        return Err(IpcTransportError::Io(io::Error::last_os_error()));
+    }
+    let mut current_token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current_token) } == 0 {
+        unsafe {
+            CloseHandle(client_token);
+        }
+        return Err(IpcTransportError::Io(io::Error::last_os_error()));
+    }
+    let comparison = with_token_user_sid(client_token, |client_sid| {
+        with_token_user_sid(current_token, |current_sid| {
+            Ok(unsafe { EqualSid(client_sid, current_sid) } != 0)
+        })
+    });
+    unsafe {
+        CloseHandle(current_token);
+        CloseHandle(client_token);
+    }
+    comparison
 }
 
 #[cfg(windows)]

@@ -360,7 +360,9 @@ pub trait MultiRunnerLifecycleBackend: Send + Sync {
     }
 
     /// Arms the mutation gate for owned user session control on this backend.
-    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
+    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) -> bool {
+        false
+    }
 
     /// Disarms all lifecycle mutation gates.
     fn disarm_lifecycle_gates(&self) {}
@@ -514,11 +516,12 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         self.helper.arm_with_gate(gate)
     }
 
-    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) -> bool {
         *self
             .armed_session_gate
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(gate);
+        true
     }
 
     fn disarm_lifecycle_gates(&self) {
@@ -598,7 +601,9 @@ pub trait MultiRunnerSessionCoordinator: Send + Sync {
         None
     }
 
-    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
+    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) -> bool {
+        false
+    }
     fn disarm_session_gate(&self) {}
 }
 
@@ -615,7 +620,9 @@ pub trait UserSessionProcessTransport: Send + Sync {
         None
     }
 
-    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) {}
+    fn arm_session_gate(&self, _gate: LiveSessionExecutionGate) -> bool {
+        false
+    }
     fn disarm_session_gate(&self) {}
 }
 
@@ -1047,8 +1054,9 @@ impl UserSessionProcessTransport for GatedUserSessionProcessTransport {
         }
     }
 
-    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) -> bool {
         self.arm_with_gate(gate);
+        true
     }
 
     fn disarm_session_gate(&self) {
@@ -1257,8 +1265,8 @@ impl MultiRunnerSessionCoordinator for StandardSessionCoordinator {
         self.transport.observe_session_for_key(key)
     }
 
-    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
-        self.transport.arm_session_gate(gate);
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) -> bool {
+        self.transport.arm_session_gate(gate)
     }
 
     fn disarm_session_gate(&self) {
@@ -1850,10 +1858,10 @@ impl<B: ScmControlBackend + Send + Sync + 'static> MultiRunnerLifecycleBackend
         self.helper.arm_with_gate(gate)
     }
 
-    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) {
-        if let Some(session) = &self.session {
-            session.arm_session_gate(gate);
-        }
+    fn arm_session_gate(&self, gate: LiveSessionExecutionGate) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.arm_session_gate(gate))
     }
 
     fn disarm_lifecycle_gates(&self) {
@@ -2003,6 +2011,7 @@ where
         self.observation.hard_safety = safety;
     }
 
+    #[cfg(windows)]
     pub(crate) fn bind_owner_authorization_ledger(&mut self, state_root: &std::path::Path) {
         self.owner_authorization_ledger_path =
             Some(state_root.join("owner-authorization-ledger.json"));
@@ -2489,7 +2498,8 @@ where
         command: AgentCommand,
     ) -> Result<AgentResponse, AgentCoreError> {
         match command {
-            AgentCommand::GetSnapshot
+            AgentCommand::GetOwnerAuthorizationSnapshot
+            | AgentCommand::GetSnapshot
             | AgentCommand::GetRunnerStatus
             | AgentCommand::GetVersion => Ok(AgentResponse::Snapshot(self.snapshot())),
             AgentCommand::RunDoctor => Ok(AgentResponse::Doctor(self.doctor_report())),
@@ -2649,6 +2659,51 @@ where
             ));
         };
 
+        let mut targets = self
+            .runner_registry
+            .registry()
+            .records
+            .iter()
+            .filter(|record| {
+                record.enrollment_state == crate::EnrollmentState::Enrolled
+                    && match &record.backend {
+                        RegistryBackendBinding::WindowsService { service_name } => {
+                            service_name.eq_ignore_ascii_case(&request.service_name)
+                        }
+                        RegistryBackendBinding::UserSession => record
+                            .local_runner_key
+                            .eq_ignore_ascii_case(&request.service_name),
+                    }
+            });
+        let Some(target) = targets.next().filter(|target| {
+            targets.next().is_none()
+                && matches!(
+                    (&target.backend, request.target_kind),
+                    (
+                        RegistryBackendBinding::WindowsService { .. },
+                        crate::OwnerAuthorizationTargetKind::WindowsService
+                    ) | (
+                        RegistryBackendBinding::UserSession,
+                        crate::OwnerAuthorizationTargetKind::UserSession
+                    )
+                )
+                && target.execution_identity_ref.key == request.execution_identity_token
+                && (!matches!(target.backend, RegistryBackendBinding::UserSession)
+                    || target.local_runner_key == request.service_name)
+        }) else {
+            return Ok(AgentResponse::OwnerAuthorization(
+                crate::OwnerAuthorizationReport {
+                    authorized: false,
+                    transaction_id: request.transaction_id,
+                    service_name: request.service_name,
+                    expires_at_epoch_seconds: 0,
+                    reason_code: Some(
+                        ReasonCode::new("owner-auth-target-unbound-or-ambiguous").unwrap(),
+                    ),
+                },
+            ));
+        };
+
         let production_verifier = || {
             let path = self
                 .owner_authorization_ledger_path
@@ -2707,34 +2762,31 @@ where
 
         match verifier.verify(&request) {
             Ok(gate) => {
-                if request
-                    .service_name
-                    .to_ascii_lowercase()
-                    .starts_with("actions.runner.")
-                {
-                    if backend.arm_scm_gate(gate).is_err() {
-                        return Ok(AgentResponse::OwnerAuthorization(
-                            crate::OwnerAuthorizationReport {
-                                authorized: false,
-                                transaction_id: request.transaction_id,
-                                service_name: request.service_name,
-                                expires_at_epoch_seconds: 0,
-                                reason_code: Some(
-                                    ReasonCode::new("owner-auth-arm-failed").unwrap(),
-                                ),
-                            },
-                        ));
+                let armed = match target.backend {
+                    RegistryBackendBinding::WindowsService { .. } => {
+                        backend.arm_scm_gate(gate).is_ok()
                     }
-                } else {
-                    let session_gate = LiveSessionExecutionGate::mint_trusted_live(
-                        &request.service_name,
-                        &request.execution_identity_token,
-                        &request.transaction_id,
-                        request.expires_at_epoch_seconds,
-                        request.allow_start,
-                        request.allow_stop,
-                    );
-                    backend.arm_session_gate(session_gate);
+                    RegistryBackendBinding::UserSession => {
+                        backend.arm_session_gate(LiveSessionExecutionGate::mint_trusted_live(
+                            &request.service_name,
+                            &request.execution_identity_token,
+                            &request.transaction_id,
+                            request.expires_at_epoch_seconds,
+                            request.allow_start,
+                            request.allow_stop,
+                        ))
+                    }
+                };
+                if !armed {
+                    return Ok(AgentResponse::OwnerAuthorization(
+                        crate::OwnerAuthorizationReport {
+                            authorized: false,
+                            transaction_id: request.transaction_id,
+                            service_name: request.service_name,
+                            expires_at_epoch_seconds: 0,
+                            reason_code: Some(ReasonCode::new("owner-auth-arm-failed").unwrap()),
+                        },
+                    ));
                 }
                 Ok(AgentResponse::OwnerAuthorization(
                     crate::OwnerAuthorizationReport {
@@ -5420,6 +5472,15 @@ mod tests {
             true,
             false,
         );
+
+        let root = std::env::temp_dir().join("runnermesh-owner-registry-fixture");
+        let target =
+            crate::trusted_owner_auth_internal_tests::owner_test_record(&scope, &root, false);
+        core.runner_registry = crate::RunnerRegistryEditor::new(crate::RunnerRegistry {
+            records: vec![target],
+            ..Default::default()
+        })
+        .unwrap();
 
         let issuer = OwnerAuthorizationIssuer::new(secret);
         let (request, _) = issuer.issue_for_scope(

@@ -486,6 +486,7 @@ pub struct DoctorReport {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum AgentCommand {
     GetSnapshot,
+    GetOwnerAuthorizationSnapshot,
     RunDoctor,
     SetMode {
         mode: UserMode,
