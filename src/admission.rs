@@ -204,6 +204,22 @@ pub trait AdmissionControlBackend {
     fn withdraw_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError>;
 }
 
+impl<T: ?Sized + AdmissionControlBackend> AdmissionControlBackend for Box<T> {
+    fn observe_admission_selector(
+        &mut self,
+    ) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        (**self).observe_admission_selector()
+    }
+
+    fn advertise_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        (**self).advertise_capacity()
+    }
+
+    fn withdraw_capacity(&mut self) -> Result<RemoteAdmissionObservation, AdmissionBackendError> {
+        (**self).withdraw_capacity()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RetryPolicy {
     pub max_attempts: u8,
@@ -566,7 +582,7 @@ impl fmt::Display for AdmissionBackendError {
 
 impl std::error::Error for AdmissionBackendError {}
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RegistrationScope {
     Organization { organization: String },
@@ -574,7 +590,7 @@ pub enum RegistrationScope {
 }
 
 impl RegistrationScope {
-    fn validate(&self) -> bool {
+    pub fn validate(&self) -> bool {
         match self {
             Self::Organization { organization } => valid_path_component(organization),
             Self::Repository { owner, repository } => {

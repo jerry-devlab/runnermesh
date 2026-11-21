@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    aggregate_runner_memory, DiscoveryReport, EnrollmentState, ReasonCode, RegistryError,
-    RunnerMemorySample, RunnerRecord, RunnerRegistry, RunnerRegistryEditor,
-    RunnerResourceAggregate,
+    aggregate_runner_memory, DiscoveredLifecycle, DiscoveryEnumerationStatus, DiscoveryReport,
+    EnrollmentState, ReasonCode, RegistryError, RunnerMemorySample, RunnerRecord, RunnerRegistry,
+    RunnerRegistryEditor, RunnerResourceAggregate,
 };
 
 /// Presentation vocabulary for Tray/CLI. Stable non-localized values.
@@ -41,6 +41,8 @@ pub struct RunnerRecordView {
     #[serde(default)]
     pub memory_samples: Vec<RunnerMemorySample>,
     #[serde(default)]
+    pub resource_samples: Vec<crate::runner_resource::RunnerResourceSample>,
+    #[serde(default)]
     pub item_applied: Option<bool>,
     #[serde(default)]
     pub item_reason_code: Option<ReasonCode>,
@@ -67,6 +69,7 @@ impl From<&RunnerRecord> for RunnerRecordView {
             },
             presentation_status: presentation_status_for(record),
             memory_samples: Vec::new(),
+            resource_samples: Vec::new(),
             item_applied: None,
             item_reason_code: None,
         }
@@ -79,6 +82,19 @@ fn presentation_status_for(record: &RunnerRecord) -> RunnerPresentationStatus {
         EnrollmentState::Enrolled if record.desired_enabled => RunnerPresentationStatus::Enabled,
         EnrollmentState::Enrolled => RunnerPresentationStatus::Disabled,
     }
+}
+
+/// Privacy-safe discovery candidate summary for Tray/CLI (no paths/IDs leaked).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveredCandidateView {
+    pub local_discovery_key: String,
+    pub backend_kind: String,
+    pub disposition: String,
+    #[serde(default)]
+    pub refusal_reason: Option<String>,
+    pub enrollment_eligible: bool,
+    pub same_scope_collision: bool,
 }
 
 /// Authoritative runners command report shared by CLI/IPC.
@@ -97,6 +113,9 @@ pub struct RunnerCommandReport {
     pub resource_aggregate: Option<RunnerResourceAggregate>,
     #[serde(default)]
     pub partial_failure: bool,
+    /// Optional privacy-safe discovery rows (present on discover responses).
+    #[serde(default)]
+    pub discovered_candidates: Vec<DiscoveredCandidateView>,
 }
 
 impl RunnerCommandReport {
@@ -125,6 +144,7 @@ impl RunnerCommandReport {
             same_scope_collisions,
             resource_aggregate: None,
             partial_failure: false,
+            discovered_candidates: Vec::new(),
         }
     }
 
@@ -145,6 +165,35 @@ impl RunnerCommandReport {
             }
         }
         self.resource_aggregate = Some(aggregate_runner_memory(&flat, sampled_at_unix_ms));
+        self
+    }
+
+    /// Attaches comprehensive resource samples (with PID, CPU, TTL, and attribution) for presentation.
+    pub fn with_full_resource_samples(
+        mut self,
+        samples_by_key: &[(String, Vec<crate::runner_resource::RunnerResourceSample>)],
+        sampled_at_unix_ms: u64,
+    ) -> Self {
+        let mut flat_res = Vec::new();
+        let mut flat_mem = Vec::new();
+        for record in &mut self.records {
+            if let Some((_, samples)) = samples_by_key
+                .iter()
+                .find(|(key, _)| key == &record.local_runner_key)
+            {
+                record.resource_samples = samples.clone();
+                let memory_samples: Vec<RunnerMemorySample> = samples
+                    .iter()
+                    .map(|s| s.to_memory_sample(sampled_at_unix_ms))
+                    .collect();
+                record.memory_samples = memory_samples.clone();
+                flat_res.extend(samples.iter().cloned());
+                flat_mem.extend(memory_samples);
+            }
+        }
+        let agg_snapshot =
+            crate::runner_resource::aggregate_runner_resources(&flat_res, sampled_at_unix_ms);
+        self.resource_aggregate = Some(agg_snapshot.to_memory_aggregate());
         self
     }
 
@@ -227,6 +276,11 @@ pub fn handle_runners_command(
                 // Unavailable/Incomplete host evidence is a partial observation,
                 // never a clean empty success.
                 partial_failure: report.is_incomplete(),
+                discovered_candidates: report
+                    .candidates
+                    .iter()
+                    .map(discovered_candidate_view)
+                    .collect(),
             })
         }
         crate::AgentCommand::RunnersInspect { local_runner_key } => {
@@ -251,6 +305,7 @@ pub fn handle_runners_command(
                 same_scope_collisions: 0,
                 resource_aggregate: None,
                 partial_failure: false,
+                discovered_candidates: Vec::new(),
             })
         }
         crate::AgentCommand::RunnersStatus { local_runner_key } => {
@@ -277,24 +332,29 @@ pub fn handle_runners_command(
                 same_scope_collisions: 0,
                 resource_aggregate: None,
                 partial_failure: false,
+                discovered_candidates: Vec::new(),
             })
         }
         crate::AgentCommand::RunnersEnroll {
             local_runner_key,
             prepare_only,
         } => {
-            let candidate = discovery
-                .and_then(|report| {
-                    report
-                        .candidates
-                        .iter()
-                        .find(|candidate| candidate.local_discovery_key == *local_runner_key)
-                })
+            let report = discovery.ok_or(RegistryError::NotFound)?;
+            if report.process_observation != DiscoveryEnumerationStatus::Ok {
+                return Err(RegistryError::ProcessEvidenceIncomplete);
+            }
+            let candidate = report
+                .candidates
+                .iter()
+                .find(|candidate| candidate.local_discovery_key == *local_runner_key)
                 .ok_or(RegistryError::NotFound)?;
+            if candidate.observed_lifecycle == DiscoveredLifecycle::Unknown {
+                return Err(RegistryError::ProcessEvidenceIncomplete);
+            }
+            if !candidate.capabilities.enrollment_eligible {
+                return Err(RegistryError::NotEnrollmentEligible);
+            }
             if *prepare_only {
-                if !candidate.capabilities.enrollment_eligible {
-                    return Err(RegistryError::NotEnrollmentEligible);
-                }
                 return Ok(RunnerCommandReport::from_registry(
                     editor.registry(),
                     false,
@@ -337,6 +397,104 @@ pub fn handle_runners_command(
             *prepare_only,
             "runners-disable",
         ),
+        crate::AgentCommand::RunnersDisableAll { prepare_only, .. } => {
+            let keys: Vec<String> = editor
+                .registry()
+                .active_records()
+                .map(|r| r.local_runner_key.clone())
+                .collect();
+            let mut report = RunnerCommandReport::from_registry(
+                editor.registry(),
+                false,
+                *prepare_only,
+                !*prepare_only && !keys.is_empty(),
+                if *prepare_only {
+                    Some(static_reason("runners-disable-all-prepared"))
+                } else {
+                    Some(static_reason("runners-disable-all-applied"))
+                },
+                Vec::new(),
+                0,
+            );
+            if !*prepare_only {
+                for key in &keys {
+                    if let Err(_e) = editor.set_desired_enabled(key, false) {
+                        report = report.with_item_outcome(
+                            key,
+                            false,
+                            Some(static_reason("runners-item-failed")),
+                        );
+                    } else {
+                        report = report.with_item_outcome(key, true, None);
+                    }
+                }
+                let updated = editor.registry();
+                for r in &mut report.records {
+                    if let Some(record) = updated.get(&r.local_runner_key) {
+                        r.desired_enabled = record.desired_enabled;
+                        r.presentation_status = presentation_status_for(record);
+                    }
+                }
+            } else {
+                for key in &keys {
+                    report = report.with_item_outcome(
+                        key,
+                        true,
+                        Some(static_reason("runners-disable-prepared")),
+                    );
+                }
+            }
+            Ok(report)
+        }
+        crate::AgentCommand::RunnersEnableAll { prepare_only } => {
+            let keys: Vec<String> = editor
+                .registry()
+                .active_records()
+                .map(|r| r.local_runner_key.clone())
+                .collect();
+            let mut report = RunnerCommandReport::from_registry(
+                editor.registry(),
+                false,
+                *prepare_only,
+                !*prepare_only && !keys.is_empty(),
+                if *prepare_only {
+                    Some(static_reason("runners-enable-all-prepared"))
+                } else {
+                    Some(static_reason("runners-enable-all-applied"))
+                },
+                Vec::new(),
+                0,
+            );
+            if !*prepare_only {
+                for key in &keys {
+                    if let Err(_e) = editor.set_desired_enabled(key, true) {
+                        report = report.with_item_outcome(
+                            key,
+                            false,
+                            Some(static_reason("runners-item-failed")),
+                        );
+                    } else {
+                        report = report.with_item_outcome(key, true, None);
+                    }
+                }
+                let updated = editor.registry();
+                for r in &mut report.records {
+                    if let Some(record) = updated.get(&r.local_runner_key) {
+                        r.desired_enabled = record.desired_enabled;
+                        r.presentation_status = presentation_status_for(record);
+                    }
+                }
+            } else {
+                for key in &keys {
+                    report = report.with_item_outcome(
+                        key,
+                        true,
+                        Some(static_reason("runners-enable-prepared")),
+                    );
+                }
+            }
+            Ok(report)
+        }
         crate::AgentCommand::RunnersReconcile {
             local_runner_key,
             prepare_only,
@@ -432,6 +590,25 @@ fn static_reason(code: &str) -> ReasonCode {
     ReasonCode::new(code.to_owned()).expect("runners reason codes are static kebab tokens")
 }
 
+fn discovered_candidate_view(candidate: &crate::DiscoveredRunner) -> DiscoveredCandidateView {
+    DiscoveredCandidateView {
+        local_discovery_key: candidate.local_discovery_key.clone(),
+        backend_kind: match candidate.backend {
+            crate::RunnerBackendKind::WindowsService => "windows-service".to_owned(),
+            crate::RunnerBackendKind::UserSession => "user-session".to_owned(),
+            crate::RunnerBackendKind::ScheduledTask => "scheduled-task".to_owned(),
+            crate::RunnerBackendKind::Unknown => "unknown".to_owned(),
+        },
+        disposition: match candidate.disposition {
+            crate::DiscoveryDisposition::ObservedOnly => "OBSERVED_ONLY".to_owned(),
+            crate::DiscoveryDisposition::Refused => "REFUSED".to_owned(),
+        },
+        refusal_reason: candidate.refusal.map(|reason| reason.as_str().to_owned()),
+        enrollment_eligible: candidate.capabilities.enrollment_eligible,
+        same_scope_collision: candidate.same_scope_collision,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,7 +683,35 @@ mod tests {
         .unwrap();
         assert!(discovered.read_only);
         assert_eq!(discovered.discovered_keys, vec!["key-a".to_owned()]);
+        assert_eq!(discovered.discovered_candidates.len(), 1);
+        assert_eq!(
+            discovered.discovered_candidates[0].disposition,
+            "OBSERVED_ONLY"
+        );
+        assert!(discovered.discovered_candidates[0].enrollment_eligible);
         assert!(editor.registry().records.is_empty());
+    }
+
+    #[test]
+    fn discover_surfaces_refused_candidates_without_enrollment() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut discovery = discovery_report();
+        discovery.candidates[0].disposition = DiscoveryDisposition::Refused;
+        discovery.candidates[0].refusal = Some(crate::DiscoveryRefusalReason::DuplicateHome);
+        discovery.candidates[0].capabilities.enrollment_eligible = false;
+        let discovered = handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersDiscover,
+        )
+        .unwrap();
+        let refused = &discovered.discovered_candidates[0];
+        assert_eq!(refused.disposition, "REFUSED");
+        assert_eq!(
+            refused.refusal_reason.as_deref(),
+            Some("discovery.duplicate-home")
+        );
+        assert!(!refused.enrollment_eligible);
     }
 
     #[test]
@@ -550,5 +755,153 @@ mod tests {
         .unwrap();
         assert!(disabled.applied);
         assert!(!editor.registry().get("key-a").unwrap().desired_enabled);
+    }
+
+    #[test]
+    fn batch_item_outcomes_mark_partial_failure_without_claiming_full_success() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut discovery = discovery_report();
+        let mut second = discovery.candidates[0].clone();
+        second.local_discovery_key = "key-b".to_owned();
+        second.identity.runner_id = Some(8);
+        second.identity.expected_runner_name = Some("fixture-8".to_owned());
+        second.identity.runner_home = PathBuf::from(r"C:\fixture\runners\b");
+        second.identity.work_root = Some(PathBuf::from(r"C:\fixture\runners\b\_work"));
+        second.identity.registration_scope = Some(RegistrationScope::Repository {
+            owner: "fixture-owner".to_owned(),
+            repository: "repo-b".to_owned(),
+        });
+        discovery.candidates.push(second);
+
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-a".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-b".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+
+        let report = RunnerCommandReport::from_registry(
+            editor.registry(),
+            false,
+            false,
+            true,
+            None,
+            Vec::new(),
+            0,
+        )
+        .with_item_outcome("key-a", true, None)
+        .with_item_outcome(
+            "key-b",
+            false,
+            Some(ReasonCode::new("runners-item-failed".to_owned()).unwrap()),
+        );
+        assert!(report.partial_failure);
+        assert_eq!(
+            report.reason_code.as_ref().map(|code| code.as_str()),
+            Some("runners-partial-failure")
+        );
+        let a = report
+            .records
+            .iter()
+            .find(|item| item.local_runner_key == "key-a")
+            .unwrap();
+        let b = report
+            .records
+            .iter()
+            .find(|item| item.local_runner_key == "key-b")
+            .unwrap();
+        assert_eq!(a.item_applied, Some(true));
+        assert_eq!(b.item_applied, Some(false));
+        assert_eq!(
+            b.item_reason_code.as_ref().map(|code| code.as_str()),
+            Some("runners-item-failed")
+        );
+        // Optimistic batch apply flag must not erase per-item failure evidence.
+        assert!(report.applied);
+        assert!(report.partial_failure);
+    }
+
+    #[test]
+    fn disable_all_sets_all_active_runners_to_disabled_with_item_receipts() {
+        let mut editor = RunnerRegistryEditor::empty();
+        let mut discovery = discovery_report();
+        let mut second = discovery.candidates[0].clone();
+        second.local_discovery_key = "key-b".to_owned();
+        second.identity.runner_id = Some(8);
+        second.identity.expected_runner_name = Some("fixture-8".to_owned());
+        second.identity.runner_home = PathBuf::from(r"C:\fixture\runners\b");
+        second.identity.work_root = Some(PathBuf::from(r"C:\fixture\runners\b\_work"));
+        second.identity.registration_scope = Some(RegistrationScope::Repository {
+            owner: "fixture-owner".to_owned(),
+            repository: "repo-b".to_owned(),
+        });
+        discovery.candidates.push(second);
+
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-a".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+        handle_runners_command(
+            &mut editor,
+            Some(&discovery),
+            &AgentCommand::RunnersEnroll {
+                local_runner_key: "key-b".to_owned(),
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+
+        assert!(editor.registry().get("key-a").unwrap().desired_enabled);
+        assert!(editor.registry().get("key-b").unwrap().desired_enabled);
+
+        // Dry-run prepare
+        let prepared = handle_runners_command(
+            &mut editor,
+            None,
+            &AgentCommand::RunnersDisableAll {
+                when_idle: true,
+                prepare_only: true,
+            },
+        )
+        .unwrap();
+        assert!(prepared.prepare_only);
+        assert!(!prepared.applied);
+        assert!(editor.registry().get("key-a").unwrap().desired_enabled);
+        assert!(editor.registry().get("key-b").unwrap().desired_enabled);
+
+        // Actual apply
+        let applied = handle_runners_command(
+            &mut editor,
+            None,
+            &AgentCommand::RunnersDisableAll {
+                when_idle: true,
+                prepare_only: false,
+            },
+        )
+        .unwrap();
+        assert!(applied.applied);
+        assert!(!applied.prepare_only);
+        assert!(!editor.registry().get("key-a").unwrap().desired_enabled);
+        assert!(!editor.registry().get("key-b").unwrap().desired_enabled);
+        assert_eq!(applied.records.len(), 2);
+        assert!(applied.records.iter().all(|r| !r.desired_enabled));
+        assert!(applied.records.iter().all(|r| r.item_applied == Some(true)));
     }
 }

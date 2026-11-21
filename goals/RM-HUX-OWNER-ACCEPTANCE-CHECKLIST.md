@@ -72,3 +72,15 @@ INDEPENDENT_SECURITY_REVIEW=PENDING
 
 Blocked until independent security review PASS + sealed Owner proof. See
 `RM-HUX-2-OWNER-SERVICE-GATE-PLAN.md` and `RM-HUX-2-READINESS-PACKAGE.md`.
+
+## HUX-3 (multi-runner)
+
+```text
+HUX3_LIVE=NOT_AUTHORIZED
+R4_PREREQUISITE=WAITING_FOR_OWNER
+ADR0006_DECISION=WAITING_FOR_OWNER
+```
+
+Blocked until R4 (HUX-2 live SCM gate) PASS + Owner disposition on ADR 0006 +
+two exact enrolled test runners. See `RM-HUX-3-READINESS-PACKAGE.md` and
+`RM-160H-R5-ADR006-OWNER-BRIEF.md`.

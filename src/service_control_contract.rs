@@ -149,7 +149,7 @@ pub fn next_control_phase_with_admission(
             if managed_admission && !admission_selector_absent {
                 return ServiceControlPhase::WithdrawAdmission;
             }
-            if worker_busy {
+            if worker_busy || matches!(observed.state, DiscoveredLifecycle::Busy) {
                 return if matches!(desired, DesiredServiceLifecycle::DrainThenStop)
                     || managed_admission
                 {

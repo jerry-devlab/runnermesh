@@ -31,6 +31,16 @@ From a clean, committed candidate:
 python tools/dev/train.py candidate --base <accepted-main> --portability auto
 ```
 
+The candidate command enforces a strict worktree boundary: all tracked files
+must be clean. A single explicitly approved untracked directory
+(`goals/RM-160H-DELIVERY-PROGRAM-001/`) is permitted, protected by deterministic
+fingerprinting across the run to detect tampering, path traversal, or modification.
+All other untracked paths, dirty modifications, and symlinks are refused.
+
+An optional `--check-evidence` flag (or `--evidence-index <path>`) mechanically
+validates evidence bindings, SHAs, package artifact checksums/bytes, and audit
+reports via `tools/dev/evidence_check.py`.
+
 On a governed Windows host where the `python` app alias is disabled, use
 `conda run -n base python`. The command reuses
 `tools/quality/fast_gate.py --full`; it does not repeat the same Cargo test
