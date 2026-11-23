@@ -806,14 +806,13 @@ fn path_kind_state(path: &Path, directory: bool) -> EvidenceState {
 }
 
 fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
-    if windows_file_attributes_are_reparse(metadata.file_attributes()) {
-        return true;
+    {
+        metadata.file_type().is_symlink()
+            || windows_file_attributes_are_reparse(metadata.file_attributes())
     }
-    false
+    #[cfg(not(windows))]
+    metadata.file_type().is_symlink()
 }
 
 #[cfg(windows)]

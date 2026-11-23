@@ -4,15 +4,16 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::OpenOptions,
-    io::Read,
+    io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
     process,
     time::Duration,
 };
 
 use runnermesh::{
-    AgentCommand, AgentResponse, AgentTransport, Installation, InstalledRuntimeBinding, IpcRequest,
-    IpcResponseBody, LocalAgentTransport, PackageInput, PackageProvenance, PackageVerifier,
+    AgentCommand, AgentResponse, AgentTransport, Installation, InstalledRuntimeBinding, IpcClient,
+    IpcEndpoint, IpcRequest, IpcResponseBody, LocalAgentTransport, OwnerAuthorizationScope,
+    PackageInput, PackageProvenance, PackageVerifier, TrustedOwnerAuthorizationRequest,
     VersionManifest, IPC_PROTOCOL_VERSION, WINDOWS_X64_TARGET,
 };
 use serde_json::{json, Value};
@@ -68,6 +69,38 @@ fn run(arguments: &[OsString]) -> Result<Value, String> {
         }
         [command, action, install_root] if command == "autostart" => {
             configure_autostart(action, install_root)
+        }
+        [command] if command == "owner-issue" => issue_owner_voucher(),
+        [command, archive, accepted_sha, install_root] if command == "owner-submit" => {
+            let provenance = accepted_operator_provenance()?;
+            let archive = PathBuf::from(archive);
+            let root = PathBuf::from(install_root);
+            if !archive.is_absolute() || !root.is_absolute() {
+                return Err("owner-submit requires absolute paths".to_owned());
+            }
+            let (manifest, actual_sha) =
+                PackageVerifier::verify_with_hash(&archive).map_err(|error| error.to_string())?;
+            if accepted_sha.to_str() != Some(&actual_sha) || manifest.provenance != provenance {
+                return Err("accepted archive digest or provenance mismatch".to_owned());
+            }
+            let image_sha256 = manifest
+                .files
+                .get("runnermesh-agent.exe")
+                .ok_or_else(|| "accepted archive has no Agent image".to_owned())?;
+            let image = Installation::new(root)
+                .owner_submission_agent()
+                .map_err(|error| error.to_string())?;
+            let client = IpcClient::new(
+                IpcEndpoint::for_current_user().map_err(|error| error.to_string())?,
+                Duration::from_secs(10),
+            );
+            submit_owner_voucher(
+                &client,
+                &image,
+                image_sha256,
+                &provenance,
+                read_private_input()?,
+            )
         }
         [command] if command == "stop-after-drain" => request_stop_after_drain(),
         [command, install_root] if command == "uninstall" => uninstall(install_root),
@@ -184,6 +217,103 @@ fn configure_autostart(action: &OsStr, install_root: &OsStr) -> Result<Value, St
 #[cfg(not(windows))]
 fn configure_autostart(_action: &OsStr, _install_root: &OsStr) -> Result<Value, String> {
     Err("current-user autostart is supported only on Windows".to_owned())
+}
+
+/// The input/output streams are supplied by the Owner's private channel.
+const MAX_OWNER_INPUT_BYTES: u64 = 16 * 1024;
+
+fn read_private_input<T: serde::de::DeserializeOwned>() -> Result<T, String> {
+    let input = io::stdin();
+    if input.is_terminal() {
+        return Err("Owner material requires private redirected input".to_owned());
+    }
+    let mut bytes = Vec::new();
+    let read = input
+        .lock()
+        .take(MAX_OWNER_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes);
+    let parsed = match read {
+        Ok(size) if size as u64 <= MAX_OWNER_INPUT_BYTES => {
+            serde_json::from_slice(&bytes).map_err(|_| "invalid Owner input".to_owned())
+        }
+        _ => Err("Owner input exceeds the bound or could not be read".to_owned()),
+    };
+    bytes.fill(0);
+    parsed
+}
+
+fn issue_owner_voucher() -> Result<Value, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct IssueInput {
+        scope: OwnerAuthorizationScope,
+        nonce: String,
+        authority_key: [u8; 32],
+    }
+
+    if io::stdout().is_terminal() {
+        return Err("voucher issuance requires a private redirected output".to_owned());
+    }
+    let provenance = accepted_operator_provenance()?;
+    let mut input: IssueInput = read_private_input()?;
+    let issued = if input.scope.candidate_commit == provenance.commit {
+        input
+            .scope
+            .issue_scm_voucher(&input.authority_key, input.nonce)
+            .map_err(|_| "Owner scope refused".to_owned())
+    } else {
+        Err("Owner scope and immutable helper commit differ".to_owned())
+    };
+    input.authority_key.fill(0);
+    serde_json::to_value(issued?).map_err(|_| "could not serialize voucher".to_owned())
+}
+
+fn submit_owner_voucher(
+    client: &IpcClient,
+    image: &Path,
+    image_sha256: &str,
+    provenance: &PackageProvenance,
+    request: TrustedOwnerAuthorizationRequest,
+) -> Result<Value, String> {
+    if request.candidate_commit != provenance.commit {
+        return Err("voucher and immutable helper commit differ".to_owned());
+    }
+    if request.target_kind != runnermesh::OwnerAuthorizationTargetKind::WindowsService {
+        return Err("owner-submit expects an SCM voucher".to_owned());
+    }
+    let transaction_id = request.transaction_id.clone();
+    let service_name = request.service_name.clone();
+    let expires_at = request.expires_at_epoch_seconds;
+    let response = client
+        .submit_owner_authorization(image, image_sha256, provenance, request)
+        .map_err(|error| format!("authorization submission unavailable: {error}"))?;
+    if response.protocol_version != IPC_PROTOCOL_VERSION || response.request_id != 2 {
+        return Err("mismatched authorization response".to_owned());
+    }
+    if let IpcResponseBody::Success(response) = response.body {
+        if let AgentResponse::OwnerAuthorization(report) = *response {
+            if report.transaction_id == transaction_id && report.service_name == service_name {
+                if report.authorized && report.expires_at_epoch_seconds == expires_at {
+                    return Ok(json!({
+                        "result": "authorized",
+                        "transaction_id": transaction_id,
+                        "expires_at_epoch_seconds": expires_at,
+                    }));
+                }
+                if !report.authorized {
+                    return Err(format!(
+                        "Owner authorization rejected: {}",
+                        report
+                            .reason_code
+                            .as_ref()
+                            .map(|code| code.as_str())
+                            .unwrap_or("no-reason")
+                    ));
+                }
+            }
+        }
+    }
+    Err("unexpected authorization response".to_owned())
 }
 
 fn request_stop_after_drain() -> Result<Value, String> {
@@ -351,7 +481,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: runnermesh-package identity | create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive> | extract <absolute-archive> <new-absolute-sandbox-directory> | install <absolute-archive> <accepted-archive-sha256> <new-absolute-staging-directory> <absolute-install-root> | bind <absolute-install-root> <absolute-binding-json> <accepted-binding-sha256> | autostart <enable|disable> <absolute-install-root> | stop-after-drain | uninstall <absolute-install-root>"
+    "usage: runnermesh-package identity | create <absolute-output-dir> <version> <exact-40-hex-commit> <channel> <absolute-runnermesh.exe> <absolute-runnermesh-agent.exe> <absolute-runnermesh-agent.manifest> | verify <absolute-archive> | extract <absolute-archive> <new-absolute-sandbox-directory> | install <absolute-archive> <accepted-archive-sha256> <new-absolute-staging-directory> <absolute-install-root> | bind <absolute-install-root> <absolute-binding-json> <accepted-binding-sha256> | autostart <enable|disable> <absolute-install-root> | owner-issue (private JSON stdin and stdout) | owner-submit <absolute-archive> <accepted-archive-sha256> <absolute-install-root> (private voucher stdin) | stop-after-drain | uninstall <absolute-install-root>"
 }
 
 #[cfg(test)]

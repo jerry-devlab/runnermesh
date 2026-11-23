@@ -137,10 +137,9 @@ target\debug\runnermesh.exe runners discover
 
 ## Fixture
 
-- registry schema: {schema}
+- registry schema: {RUNNER_REGISTRY_SCHEMA_VERSION}
 - runners: sandbox-runner-a (desired_enabled=true), sandbox-runner-b (desired_enabled=false)
-"#,
-        schema = RUNNER_REGISTRY_SCHEMA_VERSION,
+"#
     );
     fs::write(&layout.acceptance_md, acceptance).map_err(|error| error.to_string())?;
     Ok(layout)

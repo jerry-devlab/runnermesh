@@ -152,6 +152,7 @@ pub fn run_lrm_synthetic_matrix(sampled_at_unix_ms: u64) -> LrmSyntheticMatrixRe
         same_scope_collisions: 0,
         resource_aggregate: Some(resource_aggregate.clone()),
         partial_failure: false,
+        discovered_candidates: Vec::new(),
     };
     command_report = command_report.with_resource_samples(&samples, sampled_at_unix_ms);
     // Simulate a batch disable where one item applies and one fails closed.

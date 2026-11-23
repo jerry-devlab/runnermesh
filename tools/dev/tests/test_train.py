@@ -1,6 +1,7 @@
 import argparse
 import io
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,19 +9,23 @@ from typing import Mapping, Sequence
 from unittest import mock
 
 from tools.dev.train import (
+    APPROVED_CANDIDATE_UNTRACKED_DIR,
     CI_GATE_NAME,
     EXPECTED_REPOSITORY,
     CommandResult,
     GithubClient,
     Repository,
+    SubprocessRunner,
     TimingStore,
     ToolError,
     build_merge_command,
     calculate_timing_fields,
+    check_candidate_worktree,
     command_candidate,
     command_merge,
     command_wait_main,
     command_wait_pr,
+    fingerprint_directory,
     _main_run_health,
     normalize_repository_identity,
     next_merge_allowed,
@@ -771,6 +776,51 @@ class TimingAndAvailabilityTests(unittest.TestCase):
         self.assertIn("candidate_start", values)
         self.assertIn("candidate_ready", values)
 
+    def test_candidate_expected_head_matches_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            timing_path = Path(temporary) / "timing.json"
+            fake_repository = mock.Mock()
+            fake_repository.assert_identity = mock.Mock()
+            fake_repository.clean.return_value = True
+            fake_repository.head.return_value = HEAD
+            fake_repository.timing_path.return_value = timing_path
+            with (
+                mock.patch("tools.dev.train.Repository", return_value=fake_repository),
+                mock.patch("tools.dev.train.resolve_head", return_value=HEAD),
+                mock.patch("tools.dev.train.resolve_base", return_value=MAIN),
+                mock.patch(
+                    "tools.dev.train.git_changed_paths",
+                    return_value=["tools/dev/train.py"],
+                ),
+                mock.patch(
+                    "tools.dev.train.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ),
+                mock.patch("tools.dev.train.run_portability") as portability,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                portability.return_value.status = "N/A"
+                portability.return_value.detail = "test"
+                result = command_candidate(
+                    argparse.Namespace(base=MAIN, portability="off", expected_head=HEAD)
+                )
+        self.assertEqual(result, 0)
+
+    def test_candidate_expected_head_mismatch_refused(self) -> None:
+        fake_repository = mock.Mock()
+        fake_repository.assert_identity = mock.Mock()
+        fake_repository.clean.return_value = True
+        fake_repository.head.return_value = HEAD
+        with (
+            mock.patch("tools.dev.train.Repository", return_value=fake_repository),
+            mock.patch("tools.dev.train.resolve_head", return_value=HEAD),
+        ):
+            with self.assertRaises(ToolError) as ctx:
+                command_candidate(
+                    argparse.Namespace(base=MAIN, portability="off", expected_head="1" * 40)
+                )
+        self.assertIn("does not match expected-head", str(ctx.exception))
+
     def test_candidate_refuses_stale_worktree_after_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             timing_path = Path(temporary) / "timing.json"
@@ -859,6 +909,90 @@ class TimingAndAvailabilityTests(unittest.TestCase):
             cwd=Path.cwd(),
             timeout=7.5,
         )
+
+    def test_check_candidate_worktree_clean_passes(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = ""
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertTrue(is_clean)
+        self.assertIsNone(err)
+        self.assertEqual(fp, {})
+
+    def test_check_candidate_worktree_approved_untracked_dir_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            approved = root / "goals" / "RM-160H-DELIVERY-PROGRAM-001"
+            approved.mkdir(parents=True)
+            (approved / "test.txt").write_bytes(b"content")
+
+            repo = mock.Mock()
+            repo.root = root
+            repo.status_porcelain.return_value = "?? goals/RM-160H-DELIVERY-PROGRAM-001/\n"
+
+            is_clean, err, fp = check_candidate_worktree(repo)
+            self.assertTrue(is_clean, msg=err)
+            self.assertIsNone(err)
+            self.assertIn("goals/RM-160H-DELIVERY-PROGRAM-001/test.txt", fp)
+
+    def test_check_candidate_worktree_prefix_similar_untracked_refused(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = "?? goals/RM-160H-DELIVERY-PROGRAM-001-fake/\n"
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertFalse(is_clean)
+        self.assertIn("unapproved untracked", err or "")
+
+    def test_check_candidate_worktree_other_untracked_refused(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = "?? random_file.txt\n"
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertFalse(is_clean)
+        self.assertIn("unapproved untracked", err or "")
+
+    def test_check_candidate_worktree_tracked_dirty_refused(self) -> None:
+        repo = mock.Mock()
+        repo.status_porcelain.return_value = " M src/agent.rs\n"
+        is_clean, err, fp = check_candidate_worktree(repo)
+        self.assertFalse(is_clean)
+        self.assertIn("tracked changes present", err or "")
+
+    def test_fingerprint_directory_deterministic_and_sensitive_to_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dir_path = root / "test_dir"
+            dir_path.mkdir()
+            file1 = dir_path / "a.txt"
+            file1.write_bytes(b"hello")
+
+            fp1 = fingerprint_directory(root, "test_dir")
+            self.assertIn("test_dir/a.txt", fp1)
+
+            fp2 = fingerprint_directory(root, "test_dir")
+            self.assertEqual(fp1, fp2)
+
+            file1.write_bytes(b"hello world")
+            fp3 = fingerprint_directory(root, "test_dir")
+            self.assertNotEqual(fp1, fp3)
+
+    def test_subprocess_runner_stdin_eof(self) -> None:
+        runner = SubprocessRunner()
+        result = runner.run(
+            (sys.executable, "-c", "import sys; data = sys.stdin.read(); sys.stdout.write(f'read {len(data)}')"),
+            cwd=Path.cwd(),
+            timeout=5.0,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "read 0")
+
+    def test_subprocess_runner_stdin_input(self) -> None:
+        runner = SubprocessRunner()
+        result = runner.run(
+            (sys.executable, "-c", "import sys; data = sys.stdin.read(); sys.stdout.write(f'received {data}')"),
+            cwd=Path.cwd(),
+            timeout=5.0,
+            stdin_input="payload123",
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "received payload123")
 
 
 if __name__ == "__main__":
