@@ -1,18 +1,30 @@
 # HUX-2 Formal Qualification Readiness Package
 
-`TRAIN_ID=RM-LRM-HUX2-READINESS-001` · `PRODUCTION_MUTATION=false`
+`PROGRAM_ID=RM-160H-DELIVERY-PROGRAM-001` · `TRAIN_ID=RM-160H-T06-UX-INSTALL-HUX2` · `PRODUCTION_MUTATION=false`
 
 This package prepares Owner-gated live Service qualification. It does **not**
-authorize live SCM mutation. Cursor self-review is not independent security
+authorize live SCM mutation. Implementer self-review is not independent security
 review.
 
 ```text
-SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub
+PACKAGE_BUILD_COMMIT=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+CODE_ANCHOR=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+GOAL_START_MAIN=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+REMOTE_MAIN=d2b37444342d085e650f996e5fb4322f775bbe6f
+PR_BASE_HEAD=8cd996acfee23e5f2006e7801139c70d0d67551d
+G15R_RC=fdd9fe6b90a4d1f79e6100c0646eb705c5f264ab
+PR_HEAD=2703a1e57bd3ced0c350ba8266c11ad08851abdb
+PR_CI=43161254344 (PASS_ALL 6/6 jobs)
+PREDECESSOR_DOCS_PR_HEAD=b78cb49f33cf2df6128fbfe32f6b864a7da21e64
+PREDECESSOR_DOCS_PR_CI=43142693463 (PASS_ALL 6/6 jobs)
+SYNTHETIC_PASS=PASS                 # Mock SCM + Fake GitHub (335/335 cargo tests)
 SOURCE_READY=true                   # Win32 query fixed; write paths inert without arm
-INDEPENDENT_REVIEW_PENDING=true
+TRUSTED_AUTH_VERIFIER=VERIFIED      # TokenValidatingOwnerVerifier + refusal paths tested
+INDEPENDENT_SECURITY_REVIEW_LRM=BLOCKED # Formal independent review by admitted process (Codex jerry-auditor) completed with BLOCKED (BLOCKER_LATCHED=true); preflight PASS
+INDEPENDENT_SECURITY_REVIEW_G15R=PENDING # Track 1 awaits separate Owner authorization for H2
 LIVE_NOT_AUTHORIZED=true
-CURSOR_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
-TRUSTED_OWNER_AUTH=UNISSUED
+IMPLEMENTER_SELF_REVIEW=SOURCE_LOCAL_PASS  # not independent acceptance
+TRUSTED_OWNER_AUTH=UNISSUED         # UnissuedOwnerAuthorizationVerifier default
 ```
 
 ## 1. Exact Service / Runner identity + Owner authorization scope
@@ -127,18 +139,36 @@ SOURCE:
   src/service_control_contract.rs
   src/hux2_synthetic.rs
   src/runner_service_backend.rs
+  src/installation.rs
+  src/package.rs
 
-TESTS (local PASS on Implementer host):
+CANDIDATE_FREEZE:
+  PACKAGE_BUILD_COMMIT=028c7efba9ebd3d3925371b356a187eba428041d
+  CODE_ANCHOR=028c7efba9ebd3d3925371b356a187eba428041d
+  PREDECESSOR_DOCS_PR_HEAD=a2265f503c984b6f06200ebc51ecea604668cf57
+  PREDECESSOR_DOCS_PR_CI=42808203174 (PASS_ALL 6/6 jobs)
+
+TESTS (all passing locally and on hosted CI):
   cargo test --lib scm_
   cargo test --lib hux2_
   cargo test --lib service_control
+  cargo test --lib installation
+  cargo test --lib package
 
 DO NOT MARK:
-  INDEPENDENT_SECURITY_REVIEW=PASS   # Cursor self-review only
+  INDEPENDENT_SECURITY_REVIEW=PASS   # Implementer self-review only; independent review required
   LIVE_QUALIFICATION=PASS            # gate sealed; no live SCM
 ```
 
-## 7. Human execution plan + stop conditions
+## 7. Owner Determinations Required for Live Trusted Issuance
+
+Within the current source-and-sandbox admission boundary, live issuance material remains unprovisioned (`TRUSTED_OWNER_AUTH=UNISSUED`). To transition from sandbox verification to live execution, the following explicit Owner decisions are required:
+
+1. **Root Authority Secret & Key Provisioning**: Authoritative selection and provisioning mechanism for the Owner signing secret / private key (e.g., secure ephemeral session environment variable, Windows DPAPI / credential vault, or KMS/HSM).
+2. **Transaction Window & Expiry Policy**: Formal determination of the live transaction window duration (15 to 120 minutes) and automated expiry policy enforcement on vouchers.
+3. **Distribution Channel to Workstation**: Controlled injection mechanism of signed vouchers into the Agent/helper memory preventing plaintext credential persistence on untrusted disk storage.
+
+## 8. Human execution plan + stop conditions
 
 Prep (Owner):
 

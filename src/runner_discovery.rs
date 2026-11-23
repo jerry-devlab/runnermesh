@@ -294,6 +294,10 @@ pub trait SessionDiscoverySource {
     fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
         DiscoveryEnumerationStatus::Ok
     }
+    /// Process-observation status after inspecting session runner processes.
+    fn process_status(&self) -> DiscoveryEnumerationStatus {
+        DiscoveryEnumerationStatus::Ok
+    }
 }
 
 /// Read-only unsupported-mode discovery source (scheduled tasks, etc.).
@@ -454,7 +458,7 @@ where
             exhaustive: false,
             service_enumeration: self.service_source.enumeration_status(),
             session_enumeration: self.session_source.enumeration_status(),
-            process_observation: DiscoveryEnumerationStatus::Ok,
+            process_observation: self.session_source.process_status(),
             candidates: drafts,
         }
     }
@@ -1370,5 +1374,60 @@ mod tests {
         assert!(report.candidates.is_empty());
         assert!(report.is_incomplete());
         assert!(report.is_false_empty_success());
+    }
+
+    #[test]
+    fn process_observation_unavailable_marks_incomplete_without_false_empty_service_ok() {
+        let report = RunnerDiscoveryInventory::new(
+            EmptyServiceDiscoverySource,
+            EmptySessionDiscoverySource,
+            EmptyUnsupportedDiscoverySource,
+            DiscoveryIdentityFilter::default(),
+        )
+        .discover_with_process_status(DiscoveryEnumerationStatus::Unavailable);
+        assert!(report.candidates.is_empty());
+        assert!(report.is_incomplete());
+        assert_eq!(report.service_enumeration, DiscoveryEnumerationStatus::Ok);
+        // Service channel Ok + empty must not be rewritten as Unavailable false-empty.
+        assert!(!report.is_false_empty_success());
+        assert_eq!(
+            report.process_observation,
+            DiscoveryEnumerationStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn incomplete_service_enumeration_with_partial_candidates_stays_incomplete() {
+        #[derive(Clone, Default)]
+        struct IncompleteServices;
+        impl ServiceDiscoverySource for IncompleteServices {
+            fn list_service_candidates(&self) -> Vec<ServiceCandidateFact> {
+                vec![service_fact(
+                    "fixture.scm.partial",
+                    r"C:\fixture\runners\partial",
+                    repo_scope("fixture-owner", "repo-partial"),
+                    9,
+                    DiscoveredLifecycle::Listening,
+                )]
+            }
+            fn enumeration_status(&self) -> DiscoveryEnumerationStatus {
+                DiscoveryEnumerationStatus::Incomplete
+            }
+        }
+        let report = RunnerDiscoveryInventory::new(
+            IncompleteServices,
+            EmptySessionDiscoverySource,
+            EmptyUnsupportedDiscoverySource,
+            DiscoveryIdentityFilter::default(),
+        )
+        .discover();
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.is_incomplete());
+        assert!(!report.is_false_empty_success());
+        // Partial failure must not auto-enroll through discovery alone.
+        assert_eq!(
+            report.candidates[0].disposition,
+            DiscoveryDisposition::ObservedOnly
+        );
     }
 }

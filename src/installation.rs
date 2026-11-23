@@ -240,6 +240,24 @@ impl Installation {
         Ok(state)
     }
 
+    /// Returns the verified stable Agent path for credential submission.
+    /// An activation or uninstall transaction must be resolved separately.
+    pub fn owner_submission_agent(&self) -> Result<PathBuf, InstallError> {
+        self.assert_runtime_root_safe()?;
+        let guards = self.guard_owned_directories()?;
+        guards.verify()?;
+        if self.read_uninstall_transaction()?.is_some() {
+            return Err(InstallError::UninstallInProgress);
+        }
+        if self.read_transaction()?.is_some() {
+            return Err(InstallError::UnreconciledTransaction);
+        }
+        let state = self.read_state_file()?;
+        self.verify_state(&state)?;
+        state.active_version.ok_or(InstallError::NoActiveVersion)?;
+        Ok(self.stable_agent_entry())
+    }
+
     pub fn active_agent_path(&self) -> Result<PathBuf, InstallError> {
         let state = self.state()?;
         let version = state.active_version.ok_or(InstallError::NoActiveVersion)?;
@@ -331,8 +349,12 @@ impl Installation {
     /// Enables exactly the RunnerMesh named autostart value, and only when it
     /// references the stable installed activation entry.
     pub fn enable_autostart(&self, backend: &impl AutostartBackend) -> Result<bool, InstallError> {
+        self.assert_runtime_root_safe()?;
         let _ = self.active_agent_path()?;
         let expected = self.expected_autostart_entry();
+        if is_development_or_worktree_path(&self.stable_agent_entry()) {
+            return Err(InstallError::SourceRuntimeOverlap);
+        }
         match backend.install_exact(&expected).map_err(InstallError::io)? {
             AutostartChange::Changed => Ok(true),
             AutostartChange::Unchanged => Ok(false),
@@ -424,6 +446,9 @@ impl Installation {
 
     fn assert_runtime_root_safe(&self) -> Result<(), InstallError> {
         let root = validate_explicit_path(&self.root)?;
+        if is_development_or_worktree_path(&root) {
+            return Err(InstallError::SourceRuntimeOverlap);
+        }
         if let Some(source) = canonicalize_optional_source(Path::new(env!("CARGO_MANIFEST_DIR")))? {
             let build = source.join("target");
             if root.starts_with(&source) || root.starts_with(&build) {
@@ -1134,6 +1159,41 @@ fn canonicalize_optional_source(path: &Path) -> Result<Option<PathBuf>, InstallE
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(InstallError::io(error)),
     }
+}
+
+pub(crate) fn is_development_or_worktree_path(path: &Path) -> bool {
+    let lower_str = path.to_string_lossy().to_ascii_lowercase();
+    if lower_str.contains("target\\debug")
+        || lower_str.contains("target/debug")
+        || lower_str.contains("target\\release")
+        || lower_str.contains("target/release")
+    {
+        return true;
+    }
+    let lower_components: Vec<_> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    if lower_components.iter().any(|c| c == ".git") {
+        return true;
+    }
+    if let Ok(Some(source)) = canonicalize_optional_source(Path::new(env!("CARGO_MANIFEST_DIR"))) {
+        if let Ok(canonical) = fs::canonicalize(path) {
+            if canonical.starts_with(&source) || canonical.starts_with(source.join("target")) {
+                return true;
+            }
+        } else if path.starts_with(&source) || path.starts_with(source.join("target")) {
+            return true;
+        }
+    }
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() || dir.join("Cargo.toml").exists() {
+            return true;
+        }
+        current = dir.parent();
+    }
+    false
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1973,7 +2033,7 @@ fn validate_version(version: &str) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn manifest_for_payload(payload: &Path) -> Result<VersionManifest, InstallError> {
+pub fn manifest_for_payload(payload: &Path) -> Result<VersionManifest, InstallError> {
     let mut files = BTreeMap::new();
     collect_manifest(payload, payload, &mut files)?;
     if files.is_empty() {
@@ -2282,16 +2342,13 @@ fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
 pub(crate) fn is_reparse_point(path: &Path) -> Result<bool, InstallError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Ok(true);
-            }
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
-                Ok(metadata.file_attributes() & 0x400 != 0)
+                Ok(metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0)
             }
             #[cfg(not(windows))]
-            Ok(false)
+            Ok(metadata.file_type().is_symlink())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(InstallError::io(error)),
@@ -2963,5 +3020,36 @@ mod tests {
         let moved = root.join("moved");
         fs::rename(&protected, &moved).unwrap();
         assert!(matches!(guard.verify(), Err(InstallError::Io(_))));
+    }
+
+    #[test]
+    fn autostart_refuses_target_debug_and_git_worktree_paths() {
+        let base = root("worktree-refusal");
+        let source = payload(&base, "source");
+
+        // Target debug path refusal
+        let debug_root = base.join("target").join("debug").join("installed");
+        let debug_install = Installation::new(&debug_root);
+        assert_eq!(
+            debug_install.install("0.1.0", &source),
+            Err(InstallError::SourceRuntimeOverlap)
+        );
+        let backend = SandboxAutostartBackend::new(base.join("autostart.json"));
+        assert_eq!(
+            debug_install.enable_autostart(&backend),
+            Err(InstallError::SourceRuntimeOverlap)
+        );
+
+        // Git worktree path refusal
+        let git_root = base.join(".git").join("worktrees").join("installed");
+        let git_install = Installation::new(&git_root);
+        assert_eq!(
+            git_install.install("0.1.0", &source),
+            Err(InstallError::SourceRuntimeOverlap)
+        );
+        assert_eq!(
+            git_install.enable_autostart(&backend),
+            Err(InstallError::SourceRuntimeOverlap)
+        );
     }
 }

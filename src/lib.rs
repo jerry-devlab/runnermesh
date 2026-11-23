@@ -59,8 +59,20 @@ pub use admission::{
     ReservedLabelOwnershipState, RetryDirective, RetryPolicy, RESERVED_ADMISSION_LABEL,
 };
 pub use agent::{
-    AgentConfig, AgentCore, AgentCoreError, AgentObservation, AgentObserver, AgentReconciler,
-    ConfigStore, ConfigStoreError, FileConfigStore, MemoryConfigStore, CONFIG_SCHEMA_VERSION,
+    AdmissionBackendFactory, AdmissionCoordinatorFactory, AgentConfig, AgentCore, AgentCoreError,
+    AgentObservation, AgentObserver, AgentReconciler, AuthoritativeMultiRunnerLifecycleBackend,
+    BoundRunnerAdmissionCoordinator, ConfigStore, ConfigStoreError, FileConfigStore,
+    GatedUserSessionProcessTransport, InProcessAdmissionCoordinator,
+    InertUserSessionProcessTransport, LiveSessionExecutionGate, MemoryConfigStore,
+    MultiRunnerAdmissionCoordinator, MultiRunnerLifecycleBackend, MultiRunnerSessionCoordinator,
+    SandboxMultiRunnerLifecycleBackend, SimulatedUserSessionProcessTransport,
+    StandardSessionCoordinator, SyntheticSessionTestGrant, UserSessionProcessTransport,
+    CONFIG_SCHEMA_VERSION,
+};
+#[cfg(windows)]
+pub use agent_runtime::{
+    finish_agent_session, handle_agent_entrypoint_result, AgentRunError, EntrypointExit,
+    InstalledAgentRuntimeSession,
 };
 pub use cli::{execute_cli, parse_cli, AgentTransport, CliCommand, CliError, LocalAgentTransport};
 #[cfg(windows)]
@@ -101,12 +113,13 @@ pub use hux_sandbox::{
 #[cfg(windows)]
 pub use installation::WindowsUserStartupBackend;
 pub use installation::{
-    AutostartBackend, AutostartChange, AutostartEntry, InstallError, InstallReceipt, Installation,
-    InstallationState, SandboxAutostartBackend, UninstallReceipt, VersionManifest,
+    manifest_for_payload, AutostartBackend, AutostartChange, AutostartEntry, InstallError,
+    InstallReceipt, Installation, InstallationState, SandboxAutostartBackend, UninstallReceipt,
+    VersionManifest,
 };
 pub use ipc::{
-    IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResponseBody,
-    IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
+    wake_listener, IpcClient, IpcEndpoint, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
+    IpcResponseBody, IpcServer, IpcTransportError, IPC_PROTOCOL_VERSION,
 };
 pub use lrm_integration::{
     run_lrm_synthetic_matrix, LrmOwnerPrepReceipt, LrmPrepDisposition, LrmSyntheticMatrixReport,
@@ -124,6 +137,7 @@ pub use probe::{
     SteamGameProbe, UserActivityProbe, UserActivitySource, WindowsProcessSource,
     WindowsSteamAppIdSource, WindowsUserActivitySource,
 };
+pub use process_snapshot::ProcessImage;
 pub use qualification::{
     assess_h1_workflow_source, assess_h1_workflow_template, h1_workflow_template,
     verify_h1_readiness, BaselineAdmissionState, EvidenceProvenance, EvidenceState,
@@ -136,7 +150,8 @@ pub use qualification::{
 };
 pub use resource_policy_probe::{probe_resource_policy_capabilities, ResourcePolicyCapability};
 pub use runner_commands::{
-    handle_runners_command, RunnerCommandReport, RunnerPresentationStatus, RunnerRecordView,
+    handle_runners_command, DiscoveredCandidateView, RunnerCommandReport, RunnerPresentationStatus,
+    RunnerRecordView,
 };
 pub use runner_discovery::{
     DiscoveredLifecycle, DiscoveredRunner, DiscoveredRunnerIdentity, DiscoveredServiceBinding,
@@ -149,6 +164,7 @@ pub use runner_discovery::{
     UnsupportedDiscoverySource, RUNNER_DISCOVERY_SCHEMA_VERSION,
 };
 pub use runner_observer::{
+    current_user_owns_path, paths_have_matching_owner, verify_path_and_ancestor_ownership,
     ConnectionEvidence, ExecutionIdentityEvidence, OfficialRunnerObserver, OwnershipEvidence,
     RunnerLocalEvidence, RunnerObservation, RunnerSource, WindowsRunnerSource,
 };
@@ -163,8 +179,10 @@ pub use runner_registry::{
     RUNNER_REGISTRY_SCHEMA_VERSION,
 };
 pub use runner_resource::{
-    aggregate_runner_memory, format_resource_estimate, ResourceSampleConfidence,
-    RunnerMemorySample, RunnerResourceAggregate, RunnerResourceRole,
+    aggregate_runner_memory, aggregate_runner_resources, format_resource_estimate,
+    query_process_working_set, ProcessAttributionDisposition, ResourceSampleConfidence,
+    RunnerAggregateSnapshot, RunnerCpuSample, RunnerMemorySample, RunnerResourceAggregate,
+    RunnerResourceRole, RunnerResourceSample,
 };
 pub use runner_service_backend::{
     PreparedServiceAction, ServiceBackendRefusal, ServiceObservation, ServicePrepareOutcome,
@@ -178,8 +196,8 @@ pub use runtime::{
     AdmissionDecision, AgentCommand, AgentHealth, AgentResponse, AgentSnapshot, BuildProvenance,
     DoctorCheck, DoctorReport, DoctorStatus, EffectiveLocale, EffectiveTheme,
     EffectiveUiPreferences, HardSafetyState, LanguagePreference, LinkKind, LinkSnapshot, LinkState,
-    ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode, RunnerPhase,
-    SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
+    OwnerAuthorizationReport, ProbeHealth, ProbeId, ProbeRuntimeState, ProbeSnapshot, ReasonCode,
+    RunnerPhase, SystemPreferences, ThemePreference, UiPreferences, ZenOverride,
 };
 #[cfg(windows)]
 pub use runtime_binding::current_windows_identity_reference;
@@ -188,9 +206,12 @@ pub use runtime_binding::{
     WINDOWS_SID_SHA256_IDENTITY_PROVIDER,
 };
 pub use scoped_admission_sim::{
-    evaluate_v01_selector_compatibility, propose_scoped_selector_migration,
-    ScopedSelectorMigrationPlan, SelectorCompatibility, SimulatedAdmissionBinding,
-    PROPOSED_SCOPED_SELECTOR_PREFIX,
+    audit_workflow_job_routing, evaluate_v01_selector_compatibility,
+    execute_synthetic_scoped_admission, plan_scoped_label_add, plan_scoped_label_remove,
+    propose_scoped_selector_migration, ScopedAdmissionAction, ScopedAdmissionReceipt,
+    ScopedAdmissionTransaction, ScopedAdmissionTransport, ScopedSelectorMigrationPlan,
+    SelectorCompatibility, SimulatedAdmissionBinding, WorkflowRoutingAudit,
+    WorkflowRoutingClassification, PROPOSED_SCOPED_SELECTOR_PREFIX,
 };
 pub use service_control_contract::{
     achieved_from_observation, capture_restore_plan, mutation_rights, next_control_phase,
@@ -217,18 +238,35 @@ pub use windows_github::{
     WindowsGithubRepositoryAccessClient, WindowsGithubWorkflowClient,
 };
 pub use windows_runner_discovery::{
-    discover_local_runners_read_only, host_service_discovery_source,
-    ConfiguredSessionDiscoverySource, PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
+    discover_local_runners_read_only, host_service_discovery_source, hux1_zenbookduo_operator_card,
+    observe_runner_processes_for_home, observe_runner_processes_for_service,
+    observe_runner_processes_from_images, observe_runner_processes_with_pids,
+    observe_runner_processes_with_pids_for_service, observe_runner_processes_with_pids_from_images,
+    observe_runner_processes_with_pids_from_images_with_identity, runner_home_from_image,
+    service_image_path_token, ConfiguredSessionDiscoverySource, DiscoveredRunnerProcesses,
+    PrivacySafeDiscoverySummary, WindowsServiceDiscoverySource,
 };
 pub use windows_scm_executor::{
-    opaque_image_token, AdmissionSelectorObserver, FakeGithubAdmissionBackend,
-    GatedWindowsScmBackend, LiveScmExecutionGate, MockScmBackend, MockServiceRecord, ScmApiError,
-    ScmControlBackend, ScmControlExecutor, ScmExactSnapshot, ScmTransactionReceipt,
-    ScmTransactionStage, SyntheticScmTestGrant, TrustedOwnerAuthorizationRequest,
-    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier, WindowsScmBackend,
+    map_service_lifecycle_from_process_observation, opaque_image_token,
+    reconcile_interrupted_scm_journal, runner_service_binary_path, runner_service_image_token,
+    AdmissionSelectorObserver, DurableLedgerEntry, FakeGithubAdmissionBackend,
+    GatedWindowsScmBackend, HostExecutionContext, LiveScmExecutionGate, MockClock, MockScmBackend,
+    MockServiceRecord, OwnerAuthoritySecretProvider, OwnerAuthorizationScope,
+    OwnerAuthorizationTargetKind, PrivilegedScmAction, PrivilegedScmHelper, PrivilegedScmReport,
+    PrivilegedScmRequest, ScmActionKind, ScmApiError, ScmControlBackend, ScmControlExecutor,
+    ScmExactSnapshot, ScmMutationArm, ScmTransactionJournal, ScmTransactionReceipt,
+    ScmTransactionStage, SharedAuthorizationLedger, SyntheticScmTestGrant, SystemClock,
+    TokenValidatingOwnerVerifier, TrustedClock, TrustedOwnerAuthorizationRequest,
+    TrustedOwnerAuthorizationVerifier, UnissuedOwnerAuthorizationVerifier,
+    WindowsCredentialManagerAuthorityProvider, WindowsScmBackend,
+    DEFAULT_AUTHORIZATION_VALIDITY_SECONDS, DEFAULT_OWNER_AUTHORITY_CREDENTIAL_TARGET,
+    SCM_TRANSACTION_JOURNAL_SCHEMA_VERSION,
 };
 #[cfg(windows)]
 pub use windows_supervisor::{
     PreparedWindowsSupervisorAction, UserSessionLaunch, WindowsSupervisorReadiness,
     WindowsUserSessionSupervisorAdapter,
 };
+
+#[cfg(test)]
+mod trusted_owner_auth_internal_tests;
