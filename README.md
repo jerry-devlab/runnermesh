@@ -1,87 +1,76 @@
 # RunnerMesh
 
-RunnerMesh is a human-first CI capacity orchestration layer for interactive developer workstations.
+**Put spare Windows workstation capacity to work on GitHub Actions while keeping the person at the keyboard in control.**
 
-Turn everyday developer workstations into an elastic CI pool without treating them like dedicated servers.
+English · [简体中文](README.zh-CN.md)
 
-## Why RunnerMesh?
+[Download the Windows pre-release](https://github.com/jerry-devlab/runnermesh/releases/tag/v0.2.0-rc.2) · [Quick start](#quick-start) · [Project roadmap](docs/roadmap.md) · [MIT License](LICENSE)
 
-Teams often have capable workstations with intermittent spare capacity, but those machines have a human owner whose work must take priority. RunnerMesh is being designed to contribute that capacity conservatively while keeping GitHub Actions native.
+RunnerMesh manages when an official GitHub Actions self-hosted runner can accept work. The Windows Agent owns the policy, and the Tray and CLI read status and send requests through a local Named Pipe. GitHub Actions continues to schedule jobs and store their logs and artifacts.
 
-## Product invariants
+## What you can use today
 
-- **Human first.** Foreground use always has priority over CI.
-- **GitHub Actions native workflow contract.** Workflows remain ordinary GitHub
-  Actions workflows; jobs targeting RunnerMesh-managed capacity add one reserved
-  native `runs-on` selector.
-- **CI-platform native.** RunnerMesh manages capacity, not workflow semantics.
-- **Fail open for the workstation; fail closed for CI admission.** Uncertainty must preserve the human's machine and reject new CI work.
-- **No inbound workstation requirement.** Ordinary operation starts outbound connections.
-- **Graceful drain.** A node can stop accepting new work before it becomes unavailable.
-- **Capability-aware admission.** Hardware, operating system, and policy capabilities inform eligibility.
-- **Native resource control first.** Backends use operating-system mechanisms where they fit.
-- **Semantic portability, not fake equivalence.** Common policy intent does not imply identical controls on every platform.
-- **Explainable decisions.** Admission and policy outcomes should be understandable to the human owner.
-- **Manual policy wins.** A selected mode overrides automatic sensing.
-- **No CI-data proxy.** Source, logs, and artifacts remain on the CI provider data plane.
-- **Minimal authority.** Privileged host operations are a separate, narrowly scoped concern.
-- **One execution identity, one owned work root.** Different execution identities must not actively share a work root.
+| Track | Availability |
+| --- | --- |
+| Local Runner Manager (LRM) | [v0.2.0-rc.2](https://github.com/jerry-devlab/runnermesh/releases/tag/v0.2.0-rc.2) is a Windows x64 pre-release with a ZIP, a same-build package helper, and SHA-256 checksums. It supports local management of multiple registered runners with independently scoped control. |
+| v0.1 single-workstation baseline | The release candidate is in field qualification. Stable publication follows the authorized cutover, ordinary-use observation, and release closeout. See the [v0.1 release operations](docs/v0.1-release-operations.md). |
 
-## Project status
+## Quick start
 
-RunnerMesh is **pre-v0.1 / release hardening**. H1 has accepted the
-GitHub-native dynamic admission-label lifecycle and its independent baseline
-restoration. The productized autostart, immutable install, staged update,
-rollback, package, provenance, and doctor foundations are also accepted.
+Use a Windows x64 workstation and its intended interactive user account. For CI workloads, use the official GitHub Actions self-hosted runner and make PowerShell 7 (`pwsh`) available to its execution identity. The instructions below are for a first LRM pre-release install.
 
-The remaining v0.1 work is the immutable integrated release candidate, the
-Owner-gated real workstation cutover, at least 24 hours of ordinary-use
-dogfood, release closeout, and Owner-authorized publication. The project is not
-yet an installable stable product.
+1. Download `runnermesh-0.2.0-rc.2-windows-x64.zip`, `runnermesh-package.exe`, and `SHA256SUMS` from the same [pre-release page](https://github.com/jerry-devlab/runnermesh/releases/tag/v0.2.0-rc.2).
+2. Open PowerShell in the download directory. Verify both files before running the helper, then check the archive and its provenance.
 
-See [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md) for the durable current execution ledger and [the v0.1 release operations](docs/v0.1-release-operations.md) for the immutable artifact and Owner-gate boundaries.
+```powershell
+$zipName = 'runnermesh-0.2.0-rc.2-windows-x64.zip'
+$helperName = 'runnermesh-package.exe'
+$sums = Get-Content -LiteralPath '.\SHA256SUMS' -ErrorAction Stop
+$hashes = @{}
+foreach ($name in @($zipName, $helperName)) {
+    $pattern = '^[0-9a-f]{64}\s+\*?' + [regex]::Escape($name) + '$'
+    $entries = @($sums | Where-Object { $_ -match $pattern })
+    if ($entries.Count -ne 1) { throw "Missing or ambiguous checksum for $name" }
+    $hashes[$name] = ($entries[0] -split '\s+', 2)[0]
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $name -ErrorAction Stop).Hash
+    if ($actual -ine $hashes[$name]) { throw "SHA-256 mismatch for $name" }
+}
+$archive = (Resolve-Path -LiteralPath $zipName).Path
+$helper = (Resolve-Path -LiteralPath $helperName).Path
+& $helper verify $archive
+if ($LASTEXITCODE -ne 0) { throw 'Package verification failed' }
+```
 
-## Core concepts
+3. In the same session, install for the current user, enable login startup, and open the installed Agent for the first run. For an existing installation, review the [activation and recovery model](docs/windows-workstation.md#autostart-and-recovery) first.
 
-RunnerMesh manages contributed CI **supply**, not a replacement workflow scheduler:
+```powershell
+$root = Join-Path $env:LOCALAPPDATA 'RunnerMesh'
+$stage = Join-Path $env:TEMP ('runnermesh-stage-' + [guid]::NewGuid().ToString('N'))
+& $helper install $archive $hashes[$zipName] $stage $root
+if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
 
-1. **CI demand** — GitHub Actions owns workflow demand, queue semantics, dependencies, assignment mechanics, logs, and checks.
-2. **Placement** — RunnerMesh determines eligible contributed capacity and capabilities.
-3. **Admission** — Each workstation decides whether it should accept new CI work now.
-4. **Resource policy** — Native operating-system mechanisms determine how admitted work coexists with foreground use.
+& $helper autostart enable $root
+if ($LASTEXITCODE -ne 0) { throw 'Autostart setup failed' }
+Start-Process -FilePath (Join-Path $root 'bin\runnermesh-agent.exe')
+```
 
-See [the architecture](docs/architecture.md) for the planned boundary in more detail.
+4. Once the Tray appears, confirm the active build using the installed CLI. You should see version `0.2.0-rc.2` and commit `2593e25c8c9c624eade5a70324d79d0d47f6f1b2`.
 
-## Node modes
+```powershell
+$cli = Join-Path $root 'versions\0.2.0-rc.2\runnermesh.exe'
+& $cli status --json
+```
 
-Planned human-facing modes are `auto`, `work`, `gaming`, `idle`, `maintenance`, and `force-ci`. Manual policy wins over automatic sensing.
+Installation starts the Agent and Tray. Runner control requires a separately configured, authorized runner. Use the [Windows workstation guide](docs/windows-workstation.md) and [GitHub integration guide](docs/github-integration.md) for the operating model. For removal, request `stop-after-drain` through the verified package helper, wait for the Agent to exit, and use the helper's `uninstall <install-root>` command to remove the owned installation.
 
-Machine-facing states are:
+## How RunnerMesh works
 
-- `FULL` — normal eligible capacity is available.
-- `THROTTLED` — only constrained capacity is available.
-- `DRAINED` — the reserved selector is absent, no exact bound Worker is active,
-  and evidence is consistent; active/racing work remains `DrainPending` until
-  natural completion.
-- `OFFLINE` — the node is unavailable for admission.
+- **Human first.** Foreground work has priority. Manual policy overrides automatic sensing, and Zen provides a human-exclusive override. When safety evidence is uncertain, admission refuses new CI work.
+- **Graceful drain.** RunnerMesh withdraws new capacity while active work finishes. `DRAINED` requires the selector to be absent and no exact bound Worker to be active. Constrained-state vocabulary such as `THROTTLED` is reserved for later resource enforcement.
+- **GitHub Actions native.** Jobs use ordinary workflows. GitHub owns queueing, assignment, the official runner protocol, logs, checks, and artifacts.
+- **Local, scoped control.** One Agent controls each user profile, and each execution identity owns its active work root. The official runner connects outbound. Persistent workstations are for explicitly trusted workloads, while public or untrusted contributions can use GitHub-hosted CI.
 
-`THROTTLED` is stable vocabulary but real resource enforcement is deferred beyond v0.1.
-
-## Workload classes
-
-- **Local preflight** may use a current, dirty local workspace and is not necessarily a RunnerMesh responsibility.
-- **Canonical CI** validates immutable source identity visible to the CI provider.
-- **Machine qualification** validates whether a contributed node meets declared expectations.
-- **Heavy CI** is planned to use explicit capacity and policy constraints.
-- **Untrusted CI** must use hosted, disposable, or appropriately isolated execution rather than a trusted persistent personal workstation by default.
-
-## Capacity model
-
-A node contributes only the capacity it can safely offer at the moment. v0.1 focuses on one Windows workstation and the admission/lifecycle slice; later mesh versions add multi-node placement and richer capability negotiation. GitHub Actions remains the authority for workflow scheduling and the official job protocol.
-
-Jobs intended to consume RunnerMesh-managed workstation capacity must use the
-reserved GitHub custom label in addition to the normal self-hosted platform
-labels:
+Jobs intended for RunnerMesh-managed capacity use the canonical reserved selector in addition to normal self-hosted platform labels.
 
 ```yaml
 runs-on:
@@ -91,52 +80,19 @@ runs-on:
   - runnermesh-admit
 ```
 
-RunnerMesh adds or removes only `runnermesh-admit` on its exact bound runner.
-The selector is case-insensitive in GitHub, but RunnerMesh configuration and
-documentation use this lowercase canonical spelling. Generic-label jobs that
-omit it are not governed by RunnerMesh admission withdrawal.
+RunnerMesh adds or removes `runnermesh-admit` only on its exact bound runner. Admission withdrawal applies to jobs requesting that selector. See the [architecture](docs/architecture.md), [GitHub integration](docs/github-integration.md), and [threat model](docs/threat-model.md).
 
-## Networking model
+## Development and roadmap
 
-The official GitHub runner initiates outbound connectivity. Ordinary workstation operation does not require inbound public access, port forwarding, DDNS, or a VPN merely to participate in GitHub Actions. Future RunnerMesh broker sessions are also intended to be outbound-initiated. RunnerMesh control traffic will carry capacity, policy, and capability metadata—not source code, CI logs, or artifacts.
-
-## Security model
-
-Persistent personal workstations must not execute arbitrary untrusted public-fork code by default. Public repository CI uses GitHub-hosted runners. Trusted self-hosted execution is an explicit, separately configured boundary. See the [threat model](docs/threat-model.md).
-
-## Initial scope
-
-The first supported path is GitHub Actions, Windows interactive workstations, and the official GitHub self-hosted runner. The default execution model is an ordinary intended user session running RunnerMesh and the official runner; it does not require `NETWORK SERVICE` or another service identity. PowerShell 7 must be resolvable and functional for the selected execution identity, regardless of supported installation method.
-
-RunnerMesh will not reimplement the GitHub Actions runner protocol. An execution identity may reuse its own work root, but separate identities must not share an active work root. Ownership conflicts must not be solved by globally weakening Git safe-directory protections.
-
-## Installation / current availability
-
-There is no stable released binary or published crate yet. Do not treat this repository as installable product software until the v0.1 release gates are complete.
-
-## CLI direction
-
-The current development CLI exposes typed status/control/diagnostic surfaces over Agent IPC. Contracts remain pre-v0.1 and may still change before the first stable release.
-
-## Non-goals
-
-RunnerMesh is not a GitHub Actions replacement, generic workflow engine, Kubernetes or Jenkins replacement, distributed compiler, remote-development system, source synchronization system, workstation configuration manager, VM manager, generic compute scheduler, deployment platform, coding-agent orchestrator, secrets manager, VPN/NAT traversal system, source/log/artifact proxy, monitoring dashboard, or generic cross-platform cgroup compatibility layer.
-
-## Roadmap
-
-The public multi-version direction is documented in [docs/roadmap.md](docs/roadmap.md). The authoritative remaining v0.1 implementation sequence is [`goals/RM-V0_1-ROADMAP.md`](goals/RM-V0_1-ROADMAP.md), with current status in [`goals/RM-V0_1-EXECUTION-STATUS.md`](goals/RM-V0_1-EXECUTION-STATUS.md).
-
-## Development
-
-With a standard Rust toolchain available, validate the repository with:
+The public [product roadmap](docs/roadmap.md) describes the scope of each version. The [v0.1 execution ledger](goals/RM-V0_1-EXECUTION-STATUS.md) records the stable baseline track.
 
 ```powershell
 cargo check
 cargo test
 ```
 
-Public contributions are validated with GitHub-hosted CI; contributors do not need to own a self-hosted runner. See [CONTRIBUTING.md](CONTRIBUTING.md).
+GitHub-hosted CI validates public contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ## License
 
-RunnerMesh is licensed under the [MIT License](LICENSE).
+RunnerMesh is available under the [MIT License](LICENSE).
